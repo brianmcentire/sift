@@ -6,7 +6,7 @@ Distributed file inventory and deduplication across your LAN. Scanner agents on 
 
 ---
 
-**Disclaimer:** sift is read-only with respect to the files it scans — it never writes, moves, modifies, renames, or deletes any file on the scanned host. The server does maintain its own database (`sift.duckdb`) on whatever machine it runs on, but that's the inventory, not your files. Reasonable efforts have been made to ensure this is actually true. That said, this is alpha software written by humans, and it comes with absolutely no warranty, no guarantee of fitness for any purpose, and no promise that your files will be any safer or better organized after using it. If it somehow causes data loss, existential dread, or unexpected charges from your cloud provider, that's on you. Use at your own risk.
+**Disclaimer:** sift is read-only with respect to the files it scans — it never writes, moves, modifies, renames, or deletes any file on the scanned host. The server does maintain its own database (`sift.duckdb`) on whatever machine it runs on, but that's the inventory, not your files. Reasonable efforts have been made to ensure this is actually true. That said, this is alpha software, and it comes with absolutely no warranty, no guarantee of fitness for any purpose, and no promise that your files will be any safer or better organized after using it. If it somehow causes data loss, existential dread, or unexpected charges from your cloud provider, that's on you. Use at your own risk.
 
 ---
 
