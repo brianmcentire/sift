@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sift"
+version = "0.1.0"
+description = "Distributed file inventory and deduplication system"
+requires-python = ">=3.11"
+dependencies = [
+    "requests",
+]
+
+[project.scripts]
+sift = "sift.main:main"
+
+[project.optional-dependencies]
+server = [
+    "fastapi",
+    "uvicorn[standard]",
+    "duckdb",
+    "pydantic",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sift*", "server*"]

@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+.eggs/
+.venv/
+venv/
+
+# Build artifacts
+build/
+dist/
+
+# Docker image tarballs
+*.tar.gz
+
+# Database files
+*.duckdb
+*.duckdb.wal
+
+# Claude Code session data
+.claude/
+
+# Design docs
+filehash_design_spec_v2.md
+
+# macOS
+.DS_Store

@@ -1,0 +1,13 @@
+services:
+  sift:
+    build: .
+    image: sift-server
+    container_name: sift
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    volumes:
+      - /mnt/cache/appdata/sift:/data
+    environment:
+      - SIFT_DB_PATH=/data/sift.duckdb
+      - SIFT_CONFIG_PATH=/data/sift.config

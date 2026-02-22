@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>sift</Name>
+  <Repository>sift-server</Repository>
+  <Registry/>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project/>
+  <Overview>Sift — distributed file inventory and deduplication server. Scanner agents on each host hash files and POST metadata here. Use the sift CLI to find duplicates, verify backups, and browse your file inventory across all machines.</Overview>
+  <Category>Tools:</Category>
+  <WebUI>http://[IP]:[PORT:8765]/docs</WebUI>
+  <TemplateURL/>
+  <Icon/>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+
+  <Config Name="WebUI Port" Target="8765" Default="8765" Mode="tcp"
+          Description="Port for the sift API and web UI."
+          Type="Port" Display="always" Required="true" Mask="false">8765</Config>
+
+  <Config Name="AppData" Target="/data" Default="/mnt/cache/appdata/sift"
+          Mode="rw"
+          Description="Persistent storage for sift.duckdb and sift.config. All inventory data lives here."
+          Type="Path" Display="always" Required="true" Mask="false">/mnt/cache/appdata/sift</Config>
+
+  <Config Name="DB Path" Target="SIFT_DB_PATH" Default="/data/sift.duckdb"
+          Description="Path to the DuckDB database file inside the container. Change only if you want to store the DB somewhere other than the AppData volume."
+          Type="Variable" Display="advanced" Required="false" Mask="false">/data/sift.duckdb</Config>
+
+  <Config Name="Config Path" Target="SIFT_CONFIG_PATH" Default="/data/sift.config"
+          Description="Path to the TOML config file inside the container. Place a sift.config file in your AppData folder to customize settings."
+          Type="Variable" Display="advanced" Required="false" Mask="false">/data/sift.config</Config>
+</Container>
