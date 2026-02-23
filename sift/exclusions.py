@@ -4,7 +4,9 @@ from __future__ import annotations
 import fnmatch
 import math
 import os
+import re
 import time
+from functools import lru_cache
 from typing import Optional
 
 # ---------------------------------------------------------------------------
@@ -127,10 +129,30 @@ VOLATILE_DIR_PATTERNS: tuple[str, ...] = (
 )
 
 
-def is_excluded_dir(dirpath: str, dirname: str, source_os: str) -> bool:
+@lru_cache(maxsize=1)
+def _is_unraid() -> bool:
+    """Return True if the current host is an Unraid server."""
+    return os.path.exists("/etc/unraid-version")
+
+
+_UNRAID_DISK_RE = re.compile(r"^/mnt/disk\d+(/|$)")
+
+
+def _is_unraid_disk_path(dirpath: str) -> bool:
+    """Return True if dirpath is an Unraid raw disk mount (/mnt/diskN/...)."""
+    return bool(_UNRAID_DISK_RE.match(dirpath))
+
+
+def is_excluded_dir(
+    dirpath: str,
+    dirname: str,
+    source_os: str,
+    allow_unraid_disks: bool = False,
+) -> bool:
     """
     Return True if this directory should be skipped entirely.
     dirpath is the full path of the directory; dirname is its basename.
+    allow_unraid_disks: if True, skip the Unraid /mnt/diskN exclusion (--yolo).
     """
     # Leaf name check (case-insensitive)
     if dirname.lower() in {n.lower() for n in EXCLUDED_DIR_NAMES}:
@@ -149,6 +171,12 @@ def is_excluded_dir(dirpath: str, dirname: str, source_os: str) -> bool:
         for prefix in EXCLUDED_PATH_PREFIXES_POSIX:
             if path_lower == prefix or path_lower.startswith(prefix + "/"):
                 return True
+
+    # Unraid: exclude raw disk mounts (/mnt/diskN) unless --yolo was passed.
+    # These duplicate the content already visible under /mnt/user (mergerfs union).
+    if not allow_unraid_disks and source_os != "windows" and _is_unraid():
+        if _is_unraid_disk_path(dirpath):
+            return True
 
     return False
 

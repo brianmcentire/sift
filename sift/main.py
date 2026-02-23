@@ -21,6 +21,8 @@ def main() -> None:
                         help="Don't cross filesystem boundaries (skips mount points)")
     p_scan.add_argument("--quiet", action="store_true",
                         help="Suppress progress output (still prints final summary)")
+    p_scan.add_argument("--yolo", action="store_true",
+                        help="On Unraid: scan /mnt/diskN raw disk mounts (normally excluded to avoid double-counting)")
 
     # sift ls
     p_ls = sub.add_parser("ls", help="List files/directories in the inventory",

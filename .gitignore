@@ -26,5 +26,12 @@ dist/
 # Design docs
 filehash_design_spec_v2.md
 
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
 # macOS
 .DS_Store
+
+# Local deployment scripts (contain host-specific details)
+docker-deploy

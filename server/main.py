@@ -38,10 +38,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="sift", version="0.1.0", lifespan=lifespan)
 
-# Mount static frontend if it exists
-_frontend_dist = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
-if os.path.isdir(_frontend_dist):
-    app.mount("/app", StaticFiles(directory=_frontend_dist, html=True), name="frontend")
+# Static frontend is mounted AFTER all API routes (see bottom of file)
 
 
 # ---------------------------------------------------------------------------
@@ -111,8 +108,9 @@ def upsert_files(records: list[FileRecord]):
     sql = """
         INSERT INTO files (
             host, drive, path, path_display, filename, ext, file_category,
-            size_bytes, hash, mtime, last_checked, source_os, skipped_reason, last_seen_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            size_bytes, hash, mtime, last_checked, source_os, skipped_reason, last_seen_at,
+            inode, device
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (host, drive, path) DO UPDATE SET
             path_display   = excluded.path_display,
             filename       = excluded.filename,
@@ -124,7 +122,9 @@ def upsert_files(records: list[FileRecord]):
             last_checked   = excluded.last_checked,
             source_os      = excluded.source_os,
             skipped_reason = excluded.skipped_reason,
-            last_seen_at   = excluded.last_seen_at
+            last_seen_at   = excluded.last_seen_at,
+            inode          = excluded.inode,
+            device         = excluded.device
     """
     data = [
         [
@@ -132,6 +132,7 @@ def upsert_files(records: list[FileRecord]):
             r.size_bytes, r.hash, r.mtime,
             r.last_checked.isoformat(), r.source_os, r.skipped_reason,
             r.last_seen_at.isoformat(),
+            r.inode, r.device,
         ]
         for r in records
     ]
@@ -185,6 +186,7 @@ def ls_files(
     path: str = "/",
     host: str = "",
     depth: int = Query(1, ge=1),
+    min_size: int = Query(0, ge=0),
 ):
     prefix = path.lower().rstrip("/")
     # SPLIT_PART is 1-indexed; paths start with '/' → position 1 is empty.
@@ -193,15 +195,29 @@ def ls_files(
     split_idx = prefix.count("/") + depth + 1
 
     sql = f"""
-    WITH dupes AS (
+    WITH hard_linked_inodes AS (
+        -- (host, device, inode) tuples that appear on more than one path.
+        -- These are hard links: multiple directory entries → same physical file.
+        -- We use this to exclude them from same-host dup counts.
+        SELECT device, inode FROM files
+        WHERE host = ? AND inode IS NOT NULL AND device IS NOT NULL
+        GROUP BY device, inode HAVING COUNT(*) > 1
+    ),
+    dupes AS (
+        -- Same-host duplicates: same hash, but NOT because they're hard links
+        -- (hard links are the same physical file; counting them as dups is misleading).
         SELECT hash FROM files
-        WHERE hash IS NOT NULL
+        WHERE hash IS NOT NULL AND host = ?
+          AND size_bytes >= ?
+          AND NOT (inode IS NOT NULL AND device IS NOT NULL
+                   AND (device, inode) IN (SELECT device, inode FROM hard_linked_inodes))
         GROUP BY hash HAVING COUNT(*) > 1
     ),
     scoped AS (
         SELECT
             f.path, f.path_display, f.filename, f.size_bytes,
-            f.hash, f.mtime, f.host, f.drive,
+            f.hash, f.mtime, f.last_seen_at, f.file_category, f.host, f.drive,
+            f.inode, f.device,
             SPLIT_PART(f.path, '/', {split_idx}) AS segment,
             SPLIT_PART(f.path_display, '/', {split_idx}) AS segment_display,
             CASE WHEN SPLIT_PART(f.path, '/', {split_idx + 1}) = ''
@@ -216,22 +232,31 @@ def ls_files(
         COUNT(*) AS file_count,
         SUM(s.size_bytes) AS total_bytes,
         COUNT(CASE WHEN s.hash IN (SELECT hash FROM dupes) THEN 1 END) AS dup_count,
+        COUNT(DISTINCT CASE WHEN s.hash IN (SELECT hash FROM dupes) THEN s.hash END) AS dup_hash_count,
         MAX(CASE WHEN s.entry_type = 'file' THEN s.filename END) AS filename,
         MAX(CASE WHEN s.entry_type = 'file' THEN s.size_bytes END) AS leaf_size,
         MAX(CASE WHEN s.entry_type = 'file' THEN s.hash END) AS leaf_hash,
         MAX(CASE WHEN s.entry_type = 'file' THEN s.mtime END) AS leaf_mtime,
+        MAX(CASE WHEN s.entry_type = 'file' THEN s.last_seen_at END) AS leaf_last_seen_at,
+        MAX(CASE WHEN s.entry_type = 'file' THEN s.file_category END) AS leaf_file_category,
         MAX(CASE WHEN s.entry_type = 'file' THEN s.path_display END) AS leaf_path_display,
         ANY_VALUE(s.segment_display) AS segment_display,
-        STRING_AGG(DISTINCT f2.host ORDER BY f2.host) AS other_hosts
+        STRING_AGG(DISTINCT f2.host ORDER BY f2.host) AS other_hosts,
+        BOOL_OR(
+            s.entry_type = 'file'
+            AND s.inode IS NOT NULL AND s.device IS NOT NULL
+            AND (s.device, s.inode) IN (SELECT device, inode FROM hard_linked_inodes)
+        ) AS is_hard_linked
     FROM scoped s
     LEFT JOIN files f2 ON f2.hash = s.hash AND f2.host != ? AND s.hash IS NOT NULL
                        AND s.entry_type = 'file'
     WHERE s.segment IS NOT NULL AND s.segment != ''
     GROUP BY s.segment
-    ORDER BY ANY_VALUE(s.entry_type) DESC, s.segment
+    ORDER BY ANY_VALUE(s.entry_type) ASC, s.segment
     """
 
-    params = [host, prefix + "/%", prefix, host]
+    # param order: hard_linked host, dupes host, dupes min_size, scoped host, path LIKE, path =, join host
+    params = [host, host, min_size, host, prefix + "/%", prefix, host]
     rows = db.query(sql, params)
     result = []
     for r in rows:
@@ -241,13 +266,17 @@ def ls_files(
             file_count=r[2] or 0,
             total_bytes=r[3],
             dup_count=r[4] or 0,
-            filename=r[5],
-            size_bytes=r[6],
-            hash=r[7],
-            mtime=r[8],
-            path_display=r[9],
-            segment_display=r[10],
-            other_hosts=r[11],
+            dup_hash_count=r[5] or 0,
+            filename=r[6],
+            size_bytes=r[7],
+            hash=r[8],
+            mtime=r[9],
+            last_seen_at=r[10],
+            file_category=r[11],
+            path_display=r[12],
+            segment_display=r[13],
+            other_hosts=r[14],
+            is_hard_linked=bool(r[15]),
         ))
     return result
 
@@ -292,13 +321,14 @@ def list_files(
         conditions.append("f.hash = ?")
         params.append(hash)
     if name:
-        # glob-style: convert * to SQL %, ? to _
-        sql_pat = name.replace("%", "\\%").replace("_", "\\_").replace("*", "%").replace("?", "_")
-        conditions.append("f.filename LIKE ?")
+        # glob-style: convert * → %, ? → _, escape literal % and _ with backslash.
+        # ESCAPE '\' tells DuckDB to treat \ as the escape character in this LIKE.
+        sql_pat = name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_").replace("*", "%").replace("?", "_")
+        conditions.append("f.filename LIKE ? ESCAPE '\\'")
         params.append(sql_pat)
     if iname:
-        sql_pat = iname.replace("%", "\\%").replace("_", "\\_").replace("*", "%").replace("?", "_")
-        conditions.append("LOWER(f.filename) LIKE LOWER(?)")
+        sql_pat = iname.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_").replace("*", "%").replace("?", "_")
+        conditions.append("LOWER(f.filename) LIKE LOWER(?) ESCAPE '\\'")
         params.append(sql_pat)
 
     if has_duplicates is True:
@@ -320,13 +350,13 @@ def list_files(
     sql = f"""
     SELECT
         f.host, f.drive, f.path_display, f.filename, f.ext,
-        f.file_category, f.size_bytes, f.hash, f.mtime,
+        f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at,
         STRING_AGG(DISTINCT f2.host ORDER BY f2.host) AS other_hosts
     FROM files f
     LEFT JOIN files f2 ON f2.hash = f.hash AND f2.host != f.host AND f.hash IS NOT NULL
     WHERE {where} {dup_clause}
     GROUP BY f.host, f.drive, f.path_display, f.filename, f.ext,
-             f.file_category, f.size_bytes, f.hash, f.mtime
+             f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at
     ORDER BY f.path_display
     LIMIT ?
     """
@@ -337,7 +367,7 @@ def list_files(
         FileEntry(
             host=r[0], drive=r[1], path_display=r[2], filename=r[3],
             ext=r[4], file_category=r[5], size_bytes=r[6], hash=r[7],
-            mtime=r[8], other_hosts=r[9],
+            mtime=r[8], last_seen_at=r[9], other_hosts=r[10],
         )
         for r in rows
     ]
@@ -382,7 +412,10 @@ def list_hosts():
 # ---------------------------------------------------------------------------
 
 @app.get("/stats/overview", response_model=StatsOverview)
-def stats_overview():
+def stats_overview(
+    min_size: int = Query(0, ge=0),
+    categories: str = Query("", description="Comma-separated file categories to filter dup stats"),
+):
     row = db.query_one("""
         SELECT
             COUNT(*) AS total_files,
@@ -405,8 +438,16 @@ def stats_overview():
         FROM files
     """)
 
-    # Simpler wasted_bytes calculation
-    dup_row = db.query_one("""
+    # Dup sets / wasted bytes, optionally filtered by min_size and file categories
+    category_list = [c.strip() for c in categories.split(',') if c.strip()] if categories else []
+    cat_clause = ""
+    dup_params = [min_size]
+    if category_list:
+        placeholders = ', '.join(['?' for _ in category_list])
+        cat_clause = f"AND file_category IN ({placeholders})"
+        dup_params += category_list
+
+    dup_row = db.query_one(f"""
         SELECT
             COUNT(DISTINCT hash) AS dup_sets,
             SUM(size_bytes) - SUM(min_size) AS wasted
@@ -414,11 +455,12 @@ def stats_overview():
             SELECT hash, COUNT(*) AS cnt, SUM(size_bytes) AS size_bytes,
                    MIN(size_bytes) AS min_size
             FROM files
-            WHERE hash IS NOT NULL
+            WHERE hash IS NOT NULL AND size_bytes >= ?
+              {cat_clause}
             GROUP BY hash
             HAVING COUNT(*) > 1
         ) t
-    """)
+    """, dup_params)
 
     total_files = row[0] if row else 0
     total_hosts = row[1] if row else 0
@@ -479,3 +521,40 @@ def stats_duplicates(
             locations=locations,
         ))
     return result
+
+
+# ---------------------------------------------------------------------------
+# Directory autocomplete
+# ---------------------------------------------------------------------------
+
+@app.get("/directories")
+def list_directories(q: str = "", limit: int = Query(20, le=100)):
+    q = q.strip()
+    if len(q) < 2:
+        return []
+    rows = db.query(
+        """
+        SELECT dir_path, dir_display FROM (
+            SELECT
+                regexp_replace(path, '/[^/]+$', '') AS dir_path,
+                ANY_VALUE(regexp_replace(path_display, '/[^/]+$', '')) AS dir_display
+            FROM files
+            GROUP BY regexp_replace(path, '/[^/]+$', '')
+            HAVING regexp_replace(path, '/[^/]+$', '') != ''
+        ) sub
+        WHERE lower(dir_path) LIKE '%' || lower(?) || '%'
+        ORDER BY dir_path
+        LIMIT ?
+        """,
+        [q, limit],
+    )
+    return [{"dir_path": r[0], "dir_display": r[1] or r[0]} for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Static frontend — mounted LAST so API routes take precedence
+# ---------------------------------------------------------------------------
+
+_frontend_dist = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+if os.path.isdir(_frontend_dist):
+    app.mount("/", StaticFiles(directory=_frontend_dist, html=True), name="frontend")

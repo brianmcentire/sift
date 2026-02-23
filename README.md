@@ -2,7 +2,7 @@
 
 > **Alpha software** — functional and in daily use across multiple machines, but expect rough edges and occasional breaking changes.
 
-Distributed file inventory and deduplication across your LAN. Scanner agents on each machine hash files locally and send metadata to a central server. Use the CLI to find duplicates, verify backups, and browse your file inventory across all your hosts.
+Distributed file inventory and deduplication across your LAN. Scanner agents on each machine hash files locally and send metadata to a central server. Use the CLI or web UI to find duplicates, verify backups, and browse your file inventory across all your hosts.
 
 ---
 
@@ -15,6 +15,7 @@ Distributed file inventory and deduplication across your LAN. Scanner agents on 
 - A lightweight **server** (FastAPI + DuckDB) runs centrally — on a NAS, home server, or any always-on machine
 - **Agents** (`sift scan`) run on each machine you want to inventory: they walk the filesystem, SHA-256 hash each file, and POST metadata to the server over HTTP. Unchanged files are detected via mtime/size cache and skipped on subsequent scans, making rescans fast.
 - The **CLI** (`sift ls`, `sift find`, `sift du`) queries the server to browse and search your inventory across all hosts
+- The **web UI** (`sift server` then open browser) provides a visual tree browser with duplicate highlighting, filtering, and cross-host comparison
 
 ## Installation
 
@@ -116,11 +117,13 @@ sift du -h --by-category ~             # disk usage by file type
 sift status                             # overview of all hosts
 ```
 
+Then open `http://localhost:8765` in a browser for the web UI.
+
 ## Commands
 
 ### `sift scan [path]`
 
-Walks the filesystem, hashes files, and sends metadata to the server. Shows live progress including files/s, MB/s, percent complete, and estimated time remaining. Uses a mtime/size cache so unchanged files are skipped on subsequent scans — rescans are much faster than initial scans.
+Walks the filesystem, hashes files, and sends metadata to the server. Shows live progress (files/s, MB/s, elapsed time). Uses a mtime/size cache so unchanged files are skipped on subsequent scans — rescans are much faster than initial scans.
 
 ```
 sift scan /                     # scan everything from root
@@ -128,6 +131,10 @@ sift scan ~/Documents           # scan a specific directory
 sift scan -x /                  # don't cross filesystem boundaries (skips mount points)
 sift scan --quiet /             # suppress progress output
 ```
+
+**Hard link awareness:** Files that share an inode (hard links) are detected and hashed only once. They appear with an orange tint in the web UI and are excluded from duplicate counts — hard links are the same physical file, not a true duplicate.
+
+**Unraid:** On Unraid systems, `sift scan /` automatically skips individual `/mnt/disk*` paths and scans through `/mnt/user` instead, avoiding double-counting files that appear on multiple drives.
 
 ### `sift ls [path]`
 
@@ -186,13 +193,32 @@ Server overview: all known hosts, last scan time, file counts, and duplicate sta
 
 ### `sift server`
 
-Start the API server.
+Start the API server. Also serves the web UI at `/`.
 
 ```
 sift server                                        # localhost:8765
 sift server --host 0.0.0.0 --port 8765            # accessible on LAN
 sift server --db /path/to/sift.duckdb
 ```
+
+## Web UI
+
+Open `http://localhost:8765` (or your server address) after starting `sift server`.
+
+### Features
+
+- **Tree browser** — navigate your filesystem inventory with inline expand/collapse. Click a directory to expand it; click a file to see all copies of that file across all hosts.
+- **Duplicate highlighting** — amber rows are duplicate files (same hash, multiple copies). Orange rows are hard-linked files (same inode, excluded from dup counts).
+- **"Extra copies" on directories** — the hash column shows how many redundant file copies exist within a directory subtree. A directory with "3 extra copies" means 3 files could be removed while keeping one of each.
+- **Cross-host host badges** — each file row shows which hosts it exists on, color-coded per host.
+- **Search** — filename search (glob-style, `*` wildcards), hash search (prefix match), and directory scope filter.
+- **Filters** (all combinable):
+  - **All files / Only dups** — toggle to show only duplicate rows and the directories that contain them
+  - **Min dup size** — ignore duplicates below a size threshold (0 B, 1 KB, 1 MB, 100 MB, 1 GB, or custom with unit parsing)
+  - **File type** — multi-select by category (images, video, audio, docs, code, archives, other)
+  - **Host chips** — show/hide specific hosts from the merged view
+- **Stats bar** — live counts of total files, total size, hosts, duplicate sets, and wasted space. Updates when min dup size or file type filters are applied; shows `(filtered)` when the dup stats reflect active filters rather than the full inventory.
+- **Column toggle** — show/hide size, date, last seen, type, hash, and host columns.
 
 ## Configuration
 
@@ -236,7 +262,7 @@ This is a personal project shared for the community's use. Issues and PRs may no
 
 ## Roadmap
 
-- [ ] React web UI
+- [x] React web UI
 - [ ] `sift dups` — duplicate analysis (top wasted space, by category, host intersection/difference)
 - [ ] `sift shell` — REPL with `cd`/`ls`/`find` against the inventory
 - [ ] Windows agent testing

@@ -26,6 +26,8 @@ class FileRecord(BaseModel):
     source_os: str
     skipped_reason: Optional[str] = None
     last_seen_at: datetime
+    inode: Optional[int] = None
+    device: Optional[int] = None
 
 
 class SeenEntry(BaseModel):
@@ -93,13 +95,17 @@ class LsEntry(BaseModel):
     file_count: int
     total_bytes: Optional[int]
     dup_count: int
+    dup_hash_count: int = 0
     filename: Optional[str] = None
     size_bytes: Optional[int] = None
     hash: Optional[str] = None
     mtime: Optional[int] = None
+    last_seen_at: Optional[datetime] = None
+    file_category: Optional[str] = None
     path_display: Optional[str] = None
     segment_display: Optional[str] = None
     other_hosts: Optional[str] = None
+    is_hard_linked: bool = False
 
 
 class FileEntry(BaseModel):
@@ -112,6 +118,7 @@ class FileEntry(BaseModel):
     size_bytes: Optional[int]
     hash: Optional[str]
     mtime: Optional[int]
+    last_seen_at: Optional[datetime] = None
     other_hosts: Optional[str] = None
 
 

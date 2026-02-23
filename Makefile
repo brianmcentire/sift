@@ -1,9 +1,17 @@
-.PHONY: dist-agent clean help
+.PHONY: dist-agent build-frontend dev-frontend clean help
 
 help:
 	@echo "Targets:"
-	@echo "  dist-agent   Build standalone sift binary for Linux x86_64 (Unraid)"
-	@echo "  clean        Remove build artifacts"
+	@echo "  build-frontend   Build the React UI (outputs to frontend/dist/)"
+	@echo "  dev-frontend     Start Vite dev server (proxies API to :8765)"
+	@echo "  dist-agent       Build standalone sift binary for Linux x86_64 (Unraid)"
+	@echo "  clean            Remove build artifacts"
+
+build-frontend:
+	cd frontend && npm install && npm run build
+
+dev-frontend:
+	cd frontend && npm install && npm run dev
 
 dist-agent:
 	mkdir -p dist

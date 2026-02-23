@@ -1,0 +1,8 @@
+pytest
+pytest-asyncio
+httpx
+fastapi[standard]
+duckdb
+pydantic
+pytz
+requests

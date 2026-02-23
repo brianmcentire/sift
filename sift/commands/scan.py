@@ -36,6 +36,7 @@ def _precount_files(
     result: dict,
     stop_event: threading.Event,
     root_dev: int | None = None,
+    allow_unraid_disks: bool = False,
 ) -> None:
     """
     Background file count. Writes result['count'] when complete.
@@ -63,7 +64,7 @@ def _precount_files(
                         if entry.is_dir(follow_symlinks=False):
                             if root_dev is not None and os.stat(entry.path).st_dev != root_dev:
                                 continue
-                            if not is_excluded_dir(entry.path, entry.name, source_os):
+                            if not is_excluded_dir(entry.path, entry.name, source_os, allow_unraid_disks):
                                 stack.append(entry.path)
                         elif entry.is_file(follow_symlinks=False):
                             count += 1
@@ -135,12 +136,20 @@ def _print_progress(
     current_file = display.get("current_file", "")
     prev = display.get("lines", 0)
 
-    if is_tty and current_file and not final:
-        # Two-line mode: status line + current file being hashed
+    if is_tty:
         try:
             cols = os.get_terminal_size(sys.stderr.fileno()).columns
         except OSError:
             cols = 120
+    else:
+        cols = 120
+
+    # Truncate line1 to prevent wrapping — a wrapped line breaks \r and cursor-up ANSI codes
+    if len(line1) > cols - 1:
+        line1 = line1[:cols - 1]
+
+    if is_tty and current_file and not final:
+        # Two-line mode: status line + current file being hashed
         line2 = f"  {current_file}"
         if len(line2) > cols:
             # Keep the tail of the path so the filename is always visible
@@ -156,7 +165,7 @@ def _print_progress(
             # Collapse: clear both lines with a single erase-to-end-of-screen
             sys.stderr.write(f"\x1b[1A\r\x1b[J{line1}")
         else:
-            sys.stderr.write(f"\r{line1}")
+            sys.stderr.write(f"\r\x1b[2K{line1}")
         if final:
             sys.stderr.write("\n")
         display["lines"] = 0 if final else 1
@@ -185,6 +194,7 @@ def cmd_scan(args) -> None:
     debug = getattr(args, "debug", False)
     quiet = getattr(args, "quiet", False)
     one_filesystem = getattr(args, "one_filesystem", False)
+    allow_unraid_disks = getattr(args, "yolo", False)
 
     raw_root = getattr(args, "path", "/") or "/"
     root = os.path.realpath(os.path.expanduser(raw_root))
@@ -244,7 +254,7 @@ def cmd_scan(args) -> None:
     if not quiet:
         threading.Thread(
             target=_precount_files,
-            args=(root, source_os, precount_result, stop_event, root_dev),
+            args=(root, source_os, precount_result, stop_event, root_dev, allow_unraid_disks),
             daemon=True,
             name="sift-precount",
         ).start()
@@ -275,6 +285,9 @@ def cmd_scan(args) -> None:
         # -------------------------------------------------------------------
         upsert_records: list[dict] = []
         seen_paths: list[dict] = []
+        # Maps (st_dev, st_ino) → hash for reusing hash across hard-linked paths.
+        # Only populated when inode is non-zero (i.e., not Windows with st_ino=0).
+        seen_inodes: dict[tuple[int, int], str] = {}
         stats = {
             "files_scanned": 0,
             "files_hashed": 0,
@@ -291,7 +304,7 @@ def cmd_scan(args) -> None:
             kept = []
             for d in dirnames:
                 full = os.path.join(dirpath, d)
-                if is_excluded_dir(full, d, source_os):
+                if is_excluded_dir(full, d, source_os, allow_unraid_disks):
                     if debug:
                         _debug(f"[excluded dir]  {full}")
                     continue
@@ -338,6 +351,19 @@ def cmd_scan(args) -> None:
                     cached = cache.get(path_lower)
                     mtime_val = math.floor(stat_result.st_mtime)
 
+                    # Inode tracking for hard link detection.
+                    # Windows returns st_ino=0 for most files — treat as unknown.
+                    raw_ino = stat_result.st_ino
+                    raw_dev = stat_result.st_dev
+                    if raw_ino == 0:
+                        inode_val = None
+                        device_val = None
+                        inode_key = None
+                    else:
+                        inode_val = raw_ino
+                        device_val = raw_dev
+                        inode_key = (raw_dev, raw_ino)
+
                     stats["files_scanned"] += 1
                     stats["bytes_scanned"] += stat_result.st_size
                     display["current_file"] = raw_path
@@ -354,34 +380,55 @@ def cmd_scan(args) -> None:
                             size_bytes=stat_result.st_size, hash_val=None,
                             mtime=mtime_val, scan_start_iso=scan_start_iso,
                             source_os=source_os, skipped_reason="volatile_active",
+                            inode=inode_val, device=device_val,
                         ))
                         stats["files_skipped"] += 1
 
                     elif needs_rehash(stat_result, cached):
-                        hash_val = hash_file(sp, chunk_size=chunk_size_bytes)
-                        if hash_val is None:
-                            msg = f"cannot read {raw_path}: permission denied"
+                        # If we've already hashed another path with the same inode on
+                        # this device (a hard link), reuse the cached hash — no I/O needed.
+                        if inode_key is not None and inode_key in seen_inodes:
+                            hash_val = seen_inodes[inode_key]
                             if debug:
-                                print(f"\nsift: {msg}", file=sys.stderr)
-                                sys.exit(1)
-                            upsert_records.append(_make_record(
-                                host=host, drive=drive, path=path_lower, path_display=path_display,
-                                filename=filename, ext=ext, file_category=category,
-                                size_bytes=stat_result.st_size, hash_val=None,
-                                mtime=mtime_val, scan_start_iso=scan_start_iso,
-                                source_os=source_os, skipped_reason="permission_error",
-                            ))
-                            print(f"\nsift: cannot read {raw_path}", file=sys.stderr)
-                            stats["files_skipped"] += 1
-                        else:
+                                _debug(f"[hard link]     {raw_path}")
                             upsert_records.append(_make_record(
                                 host=host, drive=drive, path=path_lower, path_display=path_display,
                                 filename=filename, ext=ext, file_category=category,
                                 size_bytes=stat_result.st_size, hash_val=hash_val,
                                 mtime=mtime_val, scan_start_iso=scan_start_iso,
                                 source_os=source_os, skipped_reason=None,
+                                inode=inode_val, device=device_val,
                             ))
                             stats["files_hashed"] += 1
+                        else:
+                            hash_val = hash_file(sp, chunk_size=chunk_size_bytes)
+                            if hash_val is None:
+                                msg = f"cannot read {raw_path}: permission denied"
+                                if debug:
+                                    print(f"\nsift: {msg}", file=sys.stderr)
+                                    sys.exit(1)
+                                upsert_records.append(_make_record(
+                                    host=host, drive=drive, path=path_lower, path_display=path_display,
+                                    filename=filename, ext=ext, file_category=category,
+                                    size_bytes=stat_result.st_size, hash_val=None,
+                                    mtime=mtime_val, scan_start_iso=scan_start_iso,
+                                    source_os=source_os, skipped_reason="permission_error",
+                                    inode=inode_val, device=device_val,
+                                ))
+                                print(f"\nsift: cannot read {raw_path}", file=sys.stderr)
+                                stats["files_skipped"] += 1
+                            else:
+                                if inode_key is not None:
+                                    seen_inodes[inode_key] = hash_val
+                                upsert_records.append(_make_record(
+                                    host=host, drive=drive, path=path_lower, path_display=path_display,
+                                    filename=filename, ext=ext, file_category=category,
+                                    size_bytes=stat_result.st_size, hash_val=hash_val,
+                                    mtime=mtime_val, scan_start_iso=scan_start_iso,
+                                    source_os=source_os, skipped_reason=None,
+                                    inode=inode_val, device=device_val,
+                                ))
+                                stats["files_hashed"] += 1
 
                     else:
                         # Unchanged — just update last_seen_at
@@ -457,6 +504,7 @@ def cmd_scan(args) -> None:
 def _make_record(
     *, host, drive, path, path_display, filename, ext, file_category,
     size_bytes, hash_val, mtime, scan_start_iso, source_os, skipped_reason,
+    inode=None, device=None,
 ) -> dict:
     return {
         "host": host,
@@ -473,6 +521,8 @@ def _make_record(
         "source_os": source_os,
         "skipped_reason": skipped_reason,
         "last_seen_at": scan_start_iso,
+        "inode": inode,
+        "device": device,
     }
 
 

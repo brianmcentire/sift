@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS files (
     source_os       TEXT        NOT NULL,
     skipped_reason  TEXT,
     last_seen_at    TIMESTAMPTZ NOT NULL,
+    inode           BIGINT,
+    device          BIGINT,
     PRIMARY KEY (host, drive, path)
 );
 
@@ -61,6 +63,22 @@ def get_connection() -> duckdb.DuckDBPyConnection:
     return _conn
 
 
+def _run_migrations(conn: duckdb.DuckDBPyConnection) -> None:
+    """Add columns to existing databases that predate the current schema."""
+    existing = {
+        row[0]
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'files'"
+        ).fetchall()
+    }
+    for col, ddl in [
+        ("inode",  "ALTER TABLE files ADD COLUMN inode  BIGINT"),
+        ("device", "ALTER TABLE files ADD COLUMN device BIGINT"),
+    ]:
+        if col not in existing:
+            conn.execute(ddl)
+
+
 def init_db(db_path: str | None = None) -> None:
     global _conn
     with _lock:
@@ -71,6 +89,7 @@ def init_db(db_path: str | None = None) -> None:
         for stmt in _split_statements(SCHEMA_SQL):
             if stmt.strip():
                 _conn.execute(stmt)
+        _run_migrations(_conn)
 
 
 def _split_statements(sql: str) -> list[str]:
