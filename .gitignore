@@ -37,3 +37,6 @@ frontend/test-results/
 # Local deployment scripts and host-specific make targets (contain host-specific details)
 docker-deploy
 local.mk
+
+# Personal scratch files
+brians-todo
