@@ -88,6 +88,9 @@ def main() -> None:
     # sift config
     sub.add_parser("config", help="Configure the sift server URL")
 
+    # sift upgrade
+    sub.add_parser("upgrade", help="Upgrade sift to the latest version from GitHub")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -116,6 +119,9 @@ def main() -> None:
         elif args.command == "config":
             from sift.commands.config import cmd_config
             cmd_config(args)
+        elif args.command == "upgrade":
+            from sift.commands.upgrade import cmd_upgrade
+            cmd_upgrade(args)
         else:
             parser.print_help()
             sys.exit(1)

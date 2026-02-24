@@ -5,7 +5,7 @@ import sys
 from datetime import datetime, timezone
 
 from sift import client
-from sift.commands import print_server_info
+from sift.commands import get_version, print_server_info
 
 
 def _fmt_dt(dt_str: str | None) -> str:
@@ -40,6 +40,7 @@ def cmd_status(args) -> None:
         sys.exit(1)
 
     print("=== Sift Server Status ===")
+    print(f"  Version:         {get_version()}")
     print(f"  Total files:     {overview.get('total_files', 0):,}")
     print(f"  Total hosts:     {overview.get('total_hosts', 0)}")
     print(f"  Unique hashes:   {overview.get('unique_hashes', 0):,}")
