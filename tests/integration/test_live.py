@@ -313,6 +313,7 @@ class TestLiveDupHash:
         )
 
     def test_dup_hash_404_for_no_dup_dir(self, live_client):
+
         """
         A directory with no same-host duplicates should return 404,
         not a spurious hash.
@@ -336,4 +337,71 @@ class TestLiveDupHash:
         )
         assert r.status_code == 404, (
             f"Expected 404 for no-dup dir {path}, got {r.status_code}: {r.text}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# /directories — directory search
+# ---------------------------------------------------------------------------
+
+class TestLiveDirectories:
+    def test_all_results_contain_query(self, live_client):
+        """Every returned dir_path must contain the query string (case-insensitive)."""
+        results = get(live_client, "/directories", q="users")
+        for r in results:
+            assert "users" in r["dir_path"].lower(), (
+                f"Result '{r['dir_path']}' does not contain 'users'"
+            )
+
+    def test_short_query_returns_empty(self, live_client):
+        """Single-char query should return []."""
+        results = get(live_client, "/directories", q="x")
+        assert results == []
+
+    def test_respects_limit(self, live_client):
+        results = get(live_client, "/directories", q="users", limit=3)
+        assert len(results) <= 3
+
+    def test_result_has_required_fields(self, live_client):
+        results = get(live_client, "/directories", q="users", limit=1)
+        if not results:
+            pytest.skip("No matching directories")
+        assert "dir_path" in results[0]
+        assert "dir_display" in results[0]
+
+    def test_matching_ancestors_included(self, live_client):
+        """
+        Regression: if a returned path has an ancestor that also contains the
+        query string, that ancestor must also appear in the results.
+
+        Without this, the tree expands the ancestor (as a non-highlighted
+        node) and shows the matched child underneath — confusing the user.
+
+        Example with q='better':
+          Returned: /users/brian/downloads/betterzip.app/contents
+          Missing:  /users/brian/downloads/betterzip.app   ← also contains 'better'
+
+        The UI expands betterzip.app to reveal Contents, but betterzip.app
+        itself is not highlighted as a match.
+        """
+        q = "better"
+        results = get(live_client, "/directories", q=q, limit=100)
+        if not results:
+            pytest.skip(f"No '{q}' directories in database — cannot test")
+
+        result_paths = {r["dir_path"] for r in results}
+
+        missing = []
+        for r in results:
+            parts = r["dir_path"].split("/")  # ['', 'users', 'brian', ...]
+            for i in range(2, len(parts)):
+                ancestor = "/".join(parts[:i])
+                if q.lower() in ancestor.lower() and ancestor not in result_paths:
+                    missing.append((r["dir_path"], ancestor))
+
+        assert not missing, (
+            "These result paths have matching ancestors not in the results "
+            "(the UI will expand the ancestor without highlighting it):\n"
+            + "\n".join(f"  {child!r} is missing ancestor {anc!r}"
+                        for child, anc in missing[:5])
         )

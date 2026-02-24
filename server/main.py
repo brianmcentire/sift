@@ -589,7 +589,25 @@ def list_directories(q: str = "", limit: int = Query(20, le=100)):
         """,
         [q, limit],
     )
-    return [{"dir_path": r[0], "dir_display": r[1] or r[0]} for r in rows]
+    results = {r[0]: r[1] or r[0] for r in rows}
+
+    # Also include any ancestor paths that contain the query but have no files
+    # directly in them (e.g. BetterZip.app only has files in Contents/).
+    # Without this the UI expands the ancestor as a non-highlighted node.
+    q_lower = q.lower()
+    extra = {}
+    for dir_path in list(results):
+        parts = dir_path.split("/")  # ['', 'users', 'brian', 'downloads', 'betterzip.app', ...]
+        for i in range(2, len(parts)):
+            ancestor = "/".join(parts[:i])
+            if q_lower in ancestor.lower() and ancestor not in results and ancestor not in extra:
+                extra[ancestor] = ancestor  # no display path available; use raw path
+
+    results.update(extra)
+    return [
+        {"dir_path": p, "dir_display": results[p]}
+        for p in sorted(results)[:limit]
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -171,6 +171,7 @@ export default function App() {
         setExpandedPaths(prev => {
           const next = new Set(prev)
           toExpand.forEach(p => { if (!matched.has(p)) next.add(p) })
+          matched.forEach(p => next.delete(p)) // collapse matched dirs even if previously open
           return next
         })
         toExpand.forEach(p => {
