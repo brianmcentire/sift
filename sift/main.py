@@ -85,6 +85,9 @@ def main() -> None:
     p_status = sub.add_parser("status", help="Show server and host status")
     p_status.add_argument("--host", default=None, help="Filter to a specific host")
 
+    # sift config
+    sub.add_parser("config", help="Configure the sift server URL")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -110,6 +113,9 @@ def main() -> None:
         elif args.command == "status":
             from sift.commands.status import cmd_status
             cmd_status(args)
+        elif args.command == "config":
+            from sift.commands.config import cmd_config
+            cmd_config(args)
         else:
             parser.print_help()
             sys.exit(1)
