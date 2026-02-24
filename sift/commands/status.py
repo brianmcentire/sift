@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sift import client
 from sift.commands import get_version, print_server_info
@@ -13,7 +13,7 @@ def _fmt_dt(dt_str: str | None) -> str:
         return "never"
     try:
         dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        return dt.strftime("%Y-%m-%d %H:%M UTC")
     except Exception:
         return dt_str or "?"
 
@@ -32,27 +32,22 @@ def cmd_status(args) -> None:
     print_server_info()
     filter_host = getattr(args, "host", None)
 
-    # Fetch overview stats
     try:
         overview = client.get("/stats/overview")
     except Exception as e:
         print(f"sift: cannot reach server: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print("=== Sift Server Status ===")
-    print(f"  Version:         {get_version()}")
-    print(f"  Total files:     {overview.get('total_files', 0):,}")
-    print(f"  Total hosts:     {overview.get('total_hosts', 0)}")
-    print(f"  Unique hashes:   {overview.get('unique_hashes', 0):,}")
-    print(f"  Duplicate sets:  {overview.get('duplicate_sets', 0):,}")
-
-    wasted = overview.get("wasted_bytes")
-    total = overview.get("total_bytes")
-    print(f"  Wasted bytes:    {_human_size(wasted)}")
-    print(f"  Total bytes:     {_human_size(total)}")
+    print(
+        f"sift {get_version()}  ·  "
+        f"{overview.get('total_hosts', 0)} hosts  ·  "
+        f"{overview.get('total_files', 0):,} files  ·  "
+        f"{_human_size(overview.get('total_bytes'))}  ·  "
+        f"{overview.get('duplicate_sets', 0):,} dup sets  ·  "
+        f"{_human_size(overview.get('wasted_bytes'))} wasted"
+    )
     print()
 
-    # Fetch hosts
     try:
         hosts = client.get("/hosts")
     except Exception as e:
@@ -62,21 +57,21 @@ def cmd_status(args) -> None:
     if filter_host:
         hosts = [h for h in hosts if h["host"] == filter_host]
 
-    if not hosts:
-        print("No hosts found.")
-        return
-
-    print("=== Hosts ===")
-    for h in hosts:
-        print(f"  {h['host']}")
-        print(f"    Last scan:  {_fmt_dt(h.get('last_scan_at'))}")
-        print(f"    Scan root:  {h.get('last_scan_root') or '?'}")
-        print(f"    Files:      {h.get('total_files', 0):,}")
-        print(f"    Total size: {_human_size(h.get('total_bytes'))}")
-        print(f"    Hashed:     {h.get('total_hashed', 0):,}")
+    if hosts:
+        name_w = max(len(h["host"]) for h in hosts)
+        print(f"  {'host':<{name_w}}  {'files':>8}  {'size':>7}  {'hashed':>8}  {'last scan':<17}  scan root")
+        print(f"  {'-'*name_w}  {'------':>8}  {'-------':>7}  {'------':>8}  {'-'*17}  ---------")
+        for h in hosts:
+            print(
+                f"  {h['host']:<{name_w}}"
+                f"  {h.get('total_files', 0):>8,}"
+                f"  {_human_size(h.get('total_bytes')):>7}"
+                f"  {h.get('total_hashed', 0):>8,}"
+                f"  {_fmt_dt(h.get('last_scan_at')):<17}"
+                f"  {h.get('last_scan_root') or '?'}"
+            )
         print()
 
-    # Recent scan runs
     try:
         runs = client.get("/scan-runs", params={"limit": 10})
     except Exception:
@@ -86,10 +81,10 @@ def cmd_status(args) -> None:
         runs = [r for r in runs if r["host"] == filter_host]
 
     if runs:
-        print("=== Recent Scan Runs ===")
+        print("recent scans")
         for r in runs[:10]:
             print(
                 f"  [{r['id']}] {r['host']}:{r['root_path']}"
                 f"  {r['status']}"
-                f"  started {_fmt_dt(r.get('started_at'))}"
+                f"  {_fmt_dt(r.get('started_at'))}"
             )
