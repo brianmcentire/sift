@@ -1,4 +1,5 @@
 """Hostname and path normalization — shared between agent and CLI."""
+from __future__ import annotations
 import os
 import platform
 import socket
