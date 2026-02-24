@@ -2,7 +2,7 @@
 Integration test configuration.
 
 Set SIFT_TEST_SERVER to run these tests against a live server, e.g.:
-    SIFT_TEST_SERVER=http://192.168.1.200:8765 pytest -m integration
+    SIFT_TEST_SERVER=http://your-sift-server:8765 pytest -m integration
 
 Tests are skipped automatically if SIFT_TEST_SERVER is not set.
 """
@@ -11,7 +11,7 @@ import pytest
 import requests
 
 
-SIFT_TEST_SERVER = os.environ.get("SIFT_TEST_SERVER", "http://192.168.1.200:8765")
+SIFT_TEST_SERVER = os.environ.get("SIFT_TEST_SERVER")
 
 
 def pytest_configure(config):
@@ -27,6 +27,9 @@ def live_client():
     A thin wrapper around requests.Session pointed at the live server.
     Skips if the server is unreachable.
     """
+    if not SIFT_TEST_SERVER:
+        pytest.skip("SIFT_TEST_SERVER not set — skipping integration tests")
+
     session = requests.Session()
     session.base_url = SIFT_TEST_SERVER
 

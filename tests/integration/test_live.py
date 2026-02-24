@@ -6,7 +6,7 @@ Instead they assert mathematical invariants that must ALWAYS hold regardless
 of data content.  A failing invariant means there is a bug in the server.
 
 Run with:
-    SIFT_TEST_SERVER=http://192.168.1.200:8765 pytest -m integration -v
+    SIFT_TEST_SERVER=http://your-sift-server:8765 pytest -m integration -v
 """
 import pytest
 from tests.integration.conftest import live_client, get
