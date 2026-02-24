@@ -4,10 +4,12 @@ import sys
 
 
 def main() -> None:
+    from sift.commands import get_version
     parser = argparse.ArgumentParser(
         prog="sift",
         description="Distributed file inventory and deduplication",
     )
+    parser.add_argument("--version", action="version", version=f"sift {get_version()}")
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     # sift scan
