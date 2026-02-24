@@ -173,6 +173,43 @@ def _print_progress(
     sys.stderr.flush()
 
 
+class _ServerDown(Exception):
+    """Raised when the sift server has been unreachable for too long."""
+
+
+_RETRY_TIMEOUT = 30  # seconds before giving up and aborting the scan
+
+
+def _post_with_retry(fn, label: str) -> None:
+    """Call fn(), retrying with exponential backoff up to _RETRY_TIMEOUT seconds.
+
+    Prints a single warning on first failure, then retries silently.
+    Raises _ServerDown if the server remains unreachable for the full timeout.
+    """
+    deadline = time.time() + _RETRY_TIMEOUT
+    delay = 2
+    first = True
+    while True:
+        try:
+            fn()
+            return
+        except Exception as e:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise _ServerDown(
+                    f"server unreachable for {_RETRY_TIMEOUT}s ({label}): {e}"
+                ) from e
+            if first:
+                print(
+                    f"\nsift: server unreachable ({label}), retrying for up to {_RETRY_TIMEOUT}s…",
+                    file=sys.stderr,
+                )
+                first = False
+            wait = min(delay, remaining)
+            time.sleep(wait)
+            delay = min(delay * 2, 10)
+
+
 def _onerror(e: OSError) -> None:
     # Silently skip unreadable directories (called by os.walk)
     pass
@@ -196,7 +233,7 @@ def cmd_scan(args) -> None:
     one_filesystem = getattr(args, "one_filesystem", False)
     allow_unraid_disks = getattr(args, "yolo", False)
 
-    raw_root = getattr(args, "path", "/") or "/"
+    raw_root = getattr(args, "path", ".") or "."
     root = os.path.realpath(os.path.expanduser(raw_root))
 
     # On Windows use safe_path for os.walk root
@@ -293,10 +330,33 @@ def cmd_scan(args) -> None:
             "files_hashed": 0,
             "files_skipped": 0,
             "bytes_scanned": 0,
+            "read_errors": 0,
         }
 
-        _progress_interval = 0.25  # seconds between progress updates
+        _error_log_path = os.path.expanduser("~/.sift-scan-errors.log")
+        _error_log_fh = None
+
+        def _log_error(path: str) -> None:
+            nonlocal _error_log_fh
+            if _error_log_fh is None:
+                _error_log_fh = open(_error_log_path, "a")  # noqa: SIM115
+                _error_log_fh.write(
+                    f"--- sift scan errors: {scan_start_iso} | host: {host} | root: {walk_root} ---\n"
+                )
+            _error_log_fh.write(path + "\n")
+
+        _progress_interval = 1.0  # seconds between progress updates
         _last_progress = time.time()
+
+        def _on_chunk(_nbytes: int) -> None:
+            nonlocal _last_progress
+            if quiet:
+                return
+            now = time.time()
+            if now - _last_progress >= _progress_interval:
+                _print_progress(stats, scan_start, display)
+                _last_progress = now
+
         onerror = _onerror_debug if debug else _onerror
 
         for dirpath, dirnames, filenames in os.walk(walk_root, onerror=onerror, followlinks=False):
@@ -401,7 +461,7 @@ def cmd_scan(args) -> None:
                             ))
                             stats["files_hashed"] += 1
                         else:
-                            hash_val = hash_file(sp, chunk_size=chunk_size_bytes)
+                            hash_val = hash_file(sp, chunk_size=chunk_size_bytes, on_chunk=_on_chunk)
                             if hash_val is None:
                                 msg = f"cannot read {raw_path}: permission denied"
                                 if debug:
@@ -415,7 +475,8 @@ def cmd_scan(args) -> None:
                                     source_os=source_os, skipped_reason="permission_error",
                                     inode=inode_val, device=device_val,
                                 ))
-                                print(f"\nsift: cannot read {raw_path}", file=sys.stderr)
+                                _log_error(raw_path)
+                                stats["read_errors"] += 1
                                 stats["files_skipped"] += 1
                             else:
                                 if inode_key is not None:
@@ -438,11 +499,14 @@ def cmd_scan(args) -> None:
                     if debug:
                         print(f"\nsift: permission denied: {raw_path}: {e.strerror}", file=sys.stderr)
                         sys.exit(1)
+                    _log_error(raw_path)
+                    stats["read_errors"] += 1
                 except OSError as e:
                     if debug:
                         print(f"\nsift: error: {raw_path}: {e.strerror}", file=sys.stderr)
                         sys.exit(1)
-                    print(f"\nsift: {e}", file=sys.stderr)
+                    _log_error(raw_path)
+                    stats["read_errors"] += 1
 
                 # Flush upsert batch if full (inline — these carry new hash data, flush promptly)
                 if len(upsert_records) >= upsert_batch_size:
@@ -458,6 +522,8 @@ def cmd_scan(args) -> None:
                     _last_progress = now
 
         display["current_file"] = ""
+        if _error_log_fh is not None:
+            _error_log_fh.close()
 
         # -------------------------------------------------------------------
         # 4. Flush batches
@@ -482,14 +548,28 @@ def cmd_scan(args) -> None:
         if not quiet:
             _print_progress(stats, scan_start, display, final=True)
         elapsed = time.time() - scan_start.timestamp()
+        err_suffix = (
+            f", {stats['read_errors']:,} read errors (see {_error_log_path})"
+            if stats["read_errors"] else ""
+        )
         print(
             f"\nScan complete: {stats['files_scanned']:,} files scanned, "
             f"{stats['files_hashed']:,} hashed, "
             f"{stats['files_skipped']:,} skipped, "
             f"{_format_size(stats['bytes_scanned'])} total, "
-            f"{_format_duration(elapsed)} elapsed",
+            f"{_format_duration(elapsed)} elapsed{err_suffix}",
             file=sys.stderr,
         )
+
+    except _ServerDown as e:
+        stop_event.set()
+        print(f"\nsift: {e}", file=sys.stderr)
+        print("Scan aborted. Re-run to resume once the server is back.", file=sys.stderr)
+        try:
+            client.patch(f"/scan-runs/{run_id}", {"status": "failed"})
+        except Exception:
+            pass
+        sys.exit(1)
 
     except KeyboardInterrupt:
         stop_event.set()
@@ -529,20 +609,17 @@ def _make_record(
 def _flush_upsert(records: list[dict], host: str, scan_start_iso: str) -> None:
     if not records:
         return
-    try:
-        client.post("/files", records)
-    except Exception as e:
-        print(f"\nsift: error posting files batch: {e}", file=sys.stderr)
+    _post_with_retry(lambda: client.post("/files", records), "upsert")
 
 
 def _flush_seen(paths: list[dict], host: str, scan_start_iso: str) -> None:
     if not paths:
         return
-    try:
-        client.post("/files/seen", {
+    _post_with_retry(
+        lambda: client.post("/files/seen", {
             "host": host,
             "last_seen_at": scan_start_iso,
             "paths": paths,
-        })
-    except Exception as e:
-        print(f"\nsift: error posting seen batch: {e}", file=sys.stderr)
+        }),
+        "seen",
+    )

@@ -10,10 +10,15 @@ from typing import Optional
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB default
 
 
-def hash_file(path: str, chunk_size: int = _CHUNK_SIZE) -> Optional[str]:
+def hash_file(
+    path: str,
+    chunk_size: int = _CHUNK_SIZE,
+    on_chunk: Optional[callable] = None,
+) -> Optional[str]:
     """
     Compute SHA-256 hex digest of a file.
     Returns None on PermissionError or OSError (caller should log).
+    on_chunk(bytes_read) is called after each chunk if provided.
     """
     h = hashlib.sha256()
     try:
@@ -23,6 +28,8 @@ def hash_file(path: str, chunk_size: int = _CHUNK_SIZE) -> Optional[str]:
                 if not chunk:
                     break
                 h.update(chunk)
+                if on_chunk:
+                    on_chunk(len(chunk))
         return h.hexdigest()
     except PermissionError:
         return None

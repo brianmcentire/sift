@@ -47,6 +47,8 @@ CREATE INDEX IF NOT EXISTS idx_files_filename  ON files(filename);
 CREATE INDEX IF NOT EXISTS idx_files_ext       ON files(ext);
 CREATE INDEX IF NOT EXISTS idx_files_category  ON files(file_category);
 CREATE INDEX IF NOT EXISTS idx_files_seen      ON files(host, last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_files_host_path ON files(host, path);
+CREATE INDEX IF NOT EXISTS idx_files_host_hash ON files(host, hash);
 """
 
 

@@ -13,6 +13,7 @@ async function get(path, params = {}) {
 }
 
 export const api = {
+  init: (path = '/') => get('/init', { path }),
   hosts: () => get('/hosts'),
   ls: (path, host, minSize = 0) => get('/files/ls', { path, host, depth: 1, min_size: minSize }),
   dupHash: (path, host) => get('/files/ls/dup-hash', { path, host }),

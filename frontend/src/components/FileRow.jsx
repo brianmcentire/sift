@@ -97,21 +97,21 @@ export default function FileRow({
 }) {
   const isDir = entry.entry_type === 'dir'
 
-  // Duplicate detection:
-  //   dup_count > 0       → same-host duplicate (server scopes this to the queried host)
-  //   presentHosts.length > 1 → file exists on multiple *selected* hosts (cross-host dup,
-  //                             only fires when the user has more than one host selected)
-  // other_hosts is informational (shown in host badges) but does NOT drive amber
-  // highlighting — a file on a non-selected host is not a "dup" from the current view.
-  const isDup = !isDir && (
-    entry.dup_count > 0 ||
-    (entry.presentHosts?.length ?? 0) > 1
-  )
-  const isHardLinked = !isDir && Boolean(entry.is_hard_linked)
-
   const otherHostList = entry.other_hosts
     ? entry.other_hosts.split(',').map(h => h.trim()).filter(Boolean)
     : []
+
+  // Duplicate detection:
+  //   dup_count > 0         → same-host duplicate (same hash, same host, different path)
+  //   otherHostList.length  → cross-host duplicate confirmed by the server (same hash on
+  //                           another host). Using other_hosts rather than presentHosts.length
+  //                           avoids false positives: two hosts can have the same path with
+  //                           different content (e.g. /home/pi/.bash_history on two Pis).
+  const isDup = !isDir && (
+    entry.dup_count > 0 ||
+    otherHostList.length > 0
+  )
+  const isHardLinked = !isDir && Boolean(entry.is_hard_linked)
   const allHostsSet = new Set([...(entry.presentHosts || []), ...otherHostList])
 
   // Extra copies = files in dup groups minus the distinct dup groups

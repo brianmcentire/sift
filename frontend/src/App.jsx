@@ -90,14 +90,28 @@ export default function App() {
     }
   }, [hashQuery])
 
-  // ── Initial load ─────────────────────────────────────────────────────────
+  // ── Initial load — combined /init fetches hosts + root ls in one round trip
   useEffect(() => {
-    api.hosts()
-      .then(data => {
-        setHosts(data)
-        setSelectedHosts(new Set(data.map(h => h.host)))
+    api.init('/')
+      .then(({ hosts: hostList, root_ls: rootLs }) => {
+        // Pre-populate cache before setting hosts so the hosts-change effect
+        // finds everything cached and skips the redundant fetch.
+        Object.entries(rootLs).forEach(([h, entries]) => {
+          cacheRef.current.set(`${h}:/`, Array.isArray(entries) ? entries : [])
+        })
+        setCacheVersion(v => v + 1)
+        setHosts(hostList)
+        setSelectedHosts(new Set(hostList.map(h => h.host)))
       })
-      .catch(() => {})
+      .catch(() => {
+        // Fallback to separate /hosts call if /init isn't available
+        api.hosts()
+          .then(data => {
+            setHosts(data)
+            setSelectedHosts(new Set(data.map(h => h.host)))
+          })
+          .catch(() => {})
+      })
   }, [])
 
   // ── Stats (re-fetched when minDupSize or categoryFilter changes) ─────────
@@ -356,14 +370,14 @@ export default function App() {
       : converted
     if (minDupSize > 0) {
       filtered = filtered.filter(r => {
-        const isDup = r.entry.dup_count > 0 || (r.entry.presentHosts?.length ?? 0) > 1
+        const isDup = r.entry.dup_count > 0 || Boolean(r.entry.other_hosts)
         if (!isDup) return true
         return (r.entry.size_bytes || 0) >= minDupSize
       })
     }
     if (onlyDups) {
       filtered = filtered.filter(r =>
-        r.entry.dup_count > 0 || (r.entry.presentHosts?.length ?? 0) > 1
+        r.entry.dup_count > 0 || Boolean(r.entry.other_hosts)
       )
     }
     return sortFileEntries(filtered, sortBy, sortDir)
@@ -382,18 +396,18 @@ export default function App() {
     if (minDupSize > 0) {
       filtered = filtered.filter(row => {
         if (row.entry.entry_type !== 'file') return true
-        const isDup = row.entry.dup_count > 0 || (row.entry.presentHosts?.length ?? 0) > 1
+        const isDup = row.entry.dup_count > 0 || Boolean(row.entry.other_hosts)
         if (!isDup) return true
         return (row.entry.size_bytes || 0) >= minDupSize
       })
     }
     if (onlyDups) {
-      // Strict pass: dirs with extraCopies>0, files with dup_count>0.
+      // Strict pass: dirs with extraCopies>0, files with dup_count>0 or cross-host same-hash.
       const strictFiltered = filtered.filter(row => {
         if (row.entry.entry_type === 'dir') {
           return Math.max(0, (row.entry.dup_count || 0) - (row.entry.dup_hash_count || 0)) > 0
         }
-        return row.entry.dup_count > 0 || (row.entry.presentHosts?.length ?? 0) > 1
+        return row.entry.dup_count > 0 || Boolean(row.entry.other_hosts)
       })
 
       // Find dirs that are expanded, have extraCopies>0, but have NO children surviving
@@ -484,7 +498,7 @@ export default function App() {
     return null
   }, [pinnedResults, filenameResults, filenameQuery, hashResults, hashQuery])
 
-  const isLoading = loadingPaths.has(currentPath)
+  const isLoading = hosts.length === 0 || loadingPaths.has(currentPath)
 
   return (
     <div className="min-h-screen bg-slate-50">

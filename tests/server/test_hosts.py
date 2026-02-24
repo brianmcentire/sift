@@ -47,9 +47,19 @@ class TestListHosts:
         assert mac["total_files"] == 2
         assert mac["total_hashed"] == 1
 
-    def test_no_files_host_not_listed(self, client):
+    def test_no_files_no_scan_runs_returns_empty(self, client):
         resp = client.get("/hosts")
         assert resp.json() == []
+
+    def test_scanning_host_with_no_files_appears(self, client):
+        """A host that has a running scan but no files yet should still appear."""
+        insert_scan_run(host="newhost", root_path="/data", status="running")
+        resp = client.get("/hosts")
+        hosts = {h["host"] for h in resp.json()}
+        assert "newhost" in hosts
+        newhost = next(h for h in resp.json() if h["host"] == "newhost")
+        assert newhost["total_files"] == 0
+        assert newhost["total_bytes"] is None
 
     def test_last_scan_at_populated_from_scan_runs(self, client):
         insert_files([make_file(host="mac", path="/a.txt", filename="a.txt")])

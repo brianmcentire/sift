@@ -418,26 +418,43 @@ def list_files(
 # Hosts
 # ---------------------------------------------------------------------------
 
+@app.get("/init")
+def init_data(path: str = "/", min_size: int = Query(0, ge=0)):
+    """Combined startup endpoint: returns hosts + root ls in one round trip."""
+    hosts = list_hosts()
+    root_ls = {
+        h.host: ls_files(path=path, host=h.host, depth=1, min_size=min_size)
+        for h in hosts
+    }
+    return {"hosts": hosts, "root_ls": root_ls}
+
+
 @app.get("/hosts", response_model=list[HostEntry])
 def list_hosts():
     rows = db.query("""
-        WITH latest_run AS (
+        WITH all_hosts AS (
+            SELECT host FROM files
+            UNION
+            SELECT host FROM scan_runs
+        ),
+        latest_run AS (
             SELECT host, root_path, started_at,
                    ROW_NUMBER() OVER (PARTITION BY host ORDER BY id DESC) AS rn
             FROM scan_runs
         )
         SELECT
-            f.host,
+            ah.host,
             MAX(sr.started_at) AS last_scan_at,
             ANY_VALUE(lr.root_path) AS last_scan_root,
-            COUNT(*) AS total_files,
+            COUNT(f.path) AS total_files,
             SUM(f.size_bytes) AS total_bytes,
             COUNT(CASE WHEN f.hash IS NOT NULL THEN 1 END) AS total_hashed
-        FROM files f
-        LEFT JOIN scan_runs sr ON sr.host = f.host AND sr.status = 'complete'
-        LEFT JOIN latest_run lr ON lr.host = f.host AND lr.rn = 1
-        GROUP BY f.host
-        ORDER BY f.host
+        FROM all_hosts ah
+        LEFT JOIN files f ON f.host = ah.host
+        LEFT JOIN scan_runs sr ON sr.host = ah.host AND sr.status = 'complete'
+        LEFT JOIN latest_run lr ON lr.host = ah.host AND lr.rn = 1
+        GROUP BY ah.host
+        ORDER BY ah.host
     """)
     return [
         HostEntry(
@@ -615,5 +632,8 @@ def list_directories(q: str = "", limit: int = Query(20, le=100)):
 # ---------------------------------------------------------------------------
 
 _frontend_dist = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+if not os.path.isdir(_frontend_dist):
+    # Fallback for non-editable installs: check current working directory
+    _frontend_dist = os.path.join(os.getcwd(), "frontend", "dist")
 if os.path.isdir(_frontend_dist):
     app.mount("/", StaticFiles(directory=_frontend_dist, html=True), name="frontend")

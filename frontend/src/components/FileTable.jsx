@@ -1,5 +1,9 @@
 import FileRow from './FileRow.jsx'
 
+// Skeleton row name-column widths (varied to look natural)
+const SKELETON_WIDTHS = ['w-40', 'w-56', 'w-32', 'w-48', 'w-36', 'w-52', 'w-28', 'w-44']
+const SKELETON_COL_WIDTHS = { size: 'w-12 ml-auto', date: 'w-20', seen: 'w-20', type: 'w-10', hash: 'w-16', hosts: 'w-12' }
+
 export const COLUMN_DEFS = {
   size:  { label: 'Size',      sortKey: 'size',  headerClass: 'text-right pr-4' },
   date:  { label: 'Modified',  sortKey: 'date',  headerClass: 'pr-4' },
@@ -35,22 +39,7 @@ export default function FileTable({
 }) {
   // Ordered list of visible non-name columns
   const orderedCols = columnOrder.filter(k => visibleColumns[k])
-
-  if (isLoading && rows.length === 0) {
-    return (
-      <div className="flex items-center justify-center py-16 text-slate-400 text-sm">
-        Loading…
-      </div>
-    )
-  }
-
-  if (!isLoading && rows.length === 0) {
-    return (
-      <div className="flex items-center justify-center py-16 text-slate-400 text-sm">
-        No files found.
-      </div>
-    )
-  }
+  const colCount = 1 + orderedCols.length
 
   return (
     <div className="overflow-x-auto">
@@ -86,27 +75,52 @@ export default function FileTable({
           </tr>
         </thead>
         <tbody>
-          {rows.map(({ entry, parentPath, fullPath, fullDisplayPath, depth }) => (
-            <FileRow
-              key={`${fullPath}:${entry.presentHosts?.join(',')}`}
-              entry={entry}
-              parentPath={parentPath}
-              fullPath={fullPath}
-              fullDisplayPath={fullDisplayPath}
-              depth={depth}
-              isExpanded={expandedPaths.has(fullPath)}
-              onToggleDir={onToggleDir}
-              onFileClick={onFileClick}
-              onCopyPath={onCopyPath}
-              onTypeClick={onTypeClick}
-              onDupHashClick={onDupHashClick}
-              highlightedPaths={highlightedPaths}
-              matchedDirPaths={matchedDirPaths}
-              hostColorMap={hostColorMap}
-              orderedCols={orderedCols}
-              filterActive={filterActive}
-            />
-          ))}
+          {isLoading && rows.length === 0
+            ? SKELETON_WIDTHS.map((w, i) => (
+                <tr key={i} className="border-b border-slate-100 animate-pulse">
+                  <td className="py-2 pr-3">
+                    <div className="flex items-center gap-2">
+                      <div className="w-3 h-2 bg-slate-200 rounded shrink-0" />
+                      <div className={`h-2.5 bg-slate-200 rounded ${w}`} />
+                    </div>
+                  </td>
+                  {orderedCols.map(k => (
+                    <td key={k} className="py-2 pr-4">
+                      <div className={`h-2.5 bg-slate-200 rounded ${SKELETON_COL_WIDTHS[k] ?? 'w-16'}`} />
+                    </td>
+                  ))}
+                </tr>
+              ))
+            : !isLoading && rows.length === 0
+            ? (
+                <tr>
+                  <td colSpan={colCount} className="py-16 text-center text-slate-400 text-sm">
+                    No files found.
+                  </td>
+                </tr>
+              )
+            : rows.map(({ entry, parentPath, fullPath, fullDisplayPath, depth }) => (
+                <FileRow
+                  key={`${fullPath}:${entry.presentHosts?.join(',')}`}
+                  entry={entry}
+                  parentPath={parentPath}
+                  fullPath={fullPath}
+                  fullDisplayPath={fullDisplayPath}
+                  depth={depth}
+                  isExpanded={expandedPaths.has(fullPath)}
+                  onToggleDir={onToggleDir}
+                  onFileClick={onFileClick}
+                  onCopyPath={onCopyPath}
+                  onTypeClick={onTypeClick}
+                  onDupHashClick={onDupHashClick}
+                  highlightedPaths={highlightedPaths}
+                  matchedDirPaths={matchedDirPaths}
+                  hostColorMap={hostColorMap}
+                  orderedCols={orderedCols}
+                  filterActive={filterActive}
+                />
+              ))
+          }
         </tbody>
       </table>
     </div>

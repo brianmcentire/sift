@@ -37,11 +37,17 @@ class TestListFiles:
         assert len(results) == 2
         assert all(r["hash"] == HASH_C for r in results)
 
-    def test_hash_prefix_not_matched(self, client):
-        """Hash filter is exact match, not prefix."""
+    def test_hash_prefix_matched(self, client):
+        """Hash filter does prefix matching for partial hashes (used by search-as-you-type)."""
         insert_files([make_file(hash=HASH_A)])
         resp = client.get("/files", params={"hash": HASH_A[:8]})
-        # Partial hash should not match
+        assert len(resp.json()) == 1
+        assert resp.json()[0]["hash"] == HASH_A
+
+    def test_hash_prefix_no_false_positive(self, client):
+        """Hash prefix does not match a file with a completely different hash."""
+        insert_files([make_file(hash=HASH_B)])
+        resp = client.get("/files", params={"hash": HASH_A[:8]})
         assert len(resp.json()) == 0
 
     def test_path_prefix_filter(self, client):

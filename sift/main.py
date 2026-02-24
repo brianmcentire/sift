@@ -14,7 +14,7 @@ def main() -> None:
 
     # sift scan
     p_scan = sub.add_parser("scan", help="Scan a directory and send metadata to server")
-    p_scan.add_argument("path", nargs="?", default="/", help="Path to scan (default: /)")
+    p_scan.add_argument("path", nargs="?", default=".", help="Path to scan (default: current directory)")
     p_scan.add_argument("--debug", action="store_true",
                         help="Fail immediately on any error; show excluded and skipped files")
     p_scan.add_argument("--ask", action="store_true",
@@ -86,6 +86,7 @@ def main() -> None:
     # sift status
     p_status = sub.add_parser("status", help="Show server and host status")
     p_status.add_argument("--host", default=None, help="Filter to a specific host")
+    p_status.add_argument("-v", "--verbose", action="store_true", help="Show recent scan history")
 
     # sift config
     sub.add_parser("config", help="Configure the sift server URL")

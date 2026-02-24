@@ -69,8 +69,8 @@ def cmd_status(args) -> None:
 
     if hosts:
         name_w = max(len(h["host"]) for h in hosts)
-        print(f"  {'host':<{name_w}}  {'files':>8}  {'size':>7}  {'hashed':>8}  {'last scan':<17}  scan root")
-        print(f"  {'-'*name_w}  {'------':>8}  {'-------':>7}  {'------':>8}  {'-'*17}  ---------")
+        print(f"  {'host':<{name_w}}  {'files':>8}  {'size':>7}  {'hashed':>8}  {'last scan':<20}  scan root")
+        print(f"  {'-'*name_w}  {'------':>8}  {'-------':>7}  {'------':>8}  {'-'*20}  ---------")
         for h in hosts:
             last = "scanning..." if h["host"] in scanning else _fmt_dt(h.get("last_scan_at"))
             print(
@@ -78,12 +78,13 @@ def cmd_status(args) -> None:
                 f"  {h.get('total_files', 0):>8,}"
                 f"  {_human_size(h.get('total_bytes')):>7}"
                 f"  {h.get('total_hashed', 0):>8,}"
-                f"  {last:<17}"
+                f"  {last:<20}"
                 f"  {h.get('last_scan_root') or '?'}"
             )
         print()
 
-    if runs:
+    verbose = getattr(args, "verbose", False)
+    if verbose and runs:
         print("recent scans")
         for r in runs:
             print(
