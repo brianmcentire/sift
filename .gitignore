@@ -29,6 +29,7 @@ filehash_design_spec_v2.md
 # Frontend
 frontend/node_modules/
 frontend/dist/
+frontend/test-results/
 
 # macOS
 .DS_Store
