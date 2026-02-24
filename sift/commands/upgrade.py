@@ -21,7 +21,7 @@ def cmd_upgrade(args) -> None:
 
     print("Fetching latest from GitHub...")
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--force-reinstall", _INSTALL_URL],
+        [sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-deps", _INSTALL_URL],
         check=False,
     )
     if result.returncode == 0:
