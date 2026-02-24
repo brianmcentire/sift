@@ -93,7 +93,7 @@ export default function App() {
   // ── Initial load — combined /init fetches hosts + root ls in one round trip
   useEffect(() => {
     api.init('/')
-      .then(({ hosts: hostList, root_ls: rootLs }) => {
+      .then(({ hosts: hostList, root_ls: rootLs, client_host: clientHost }) => {
         // Pre-populate cache before setting hosts so the hosts-change effect
         // finds everything cached and skips the redundant fetch.
         Object.entries(rootLs).forEach(([h, entries]) => {
@@ -101,7 +101,12 @@ export default function App() {
         })
         setCacheVersion(v => v + 1)
         setHosts(hostList)
-        setSelectedHosts(new Set(hostList.map(h => h.host)))
+        // Pre-select the host matching the browser's machine if detectable,
+        // otherwise select all.
+        const matched = clientHost
+          ? hostList.find(h => h.host.toLowerCase() === clientHost.toLowerCase())
+          : null
+        setSelectedHosts(matched ? new Set([matched.host]) : new Set(hostList.map(h => h.host)))
       })
       .catch(() => {
         // Fallback to separate /hosts call if /init isn't available
@@ -114,14 +119,17 @@ export default function App() {
       })
   }, [])
 
-  // ── Stats (re-fetched when minDupSize or categoryFilter changes) ─────────
+  // ── Stats (re-fetched when minDupSize, categoryFilter, or selectedHosts changes)
   useEffect(() => {
     const params = { min_size: minDupSize }
     if (categoryFilter.size > 0) params.categories = [...categoryFilter].join(',')
+    if (selectedHosts.size > 0 && selectedHosts.size < hosts.length) {
+      params.hosts = [...selectedHosts].join(',')
+    }
     api.stats(params)
       .then(setStats)
       .catch(() => {})
-  }, [minDupSize, categoryFilter])
+  }, [minDupSize, categoryFilter, selectedHosts, hosts.length])
 
   // ── When minDupSize changes, bust the ls cache so dup counts refresh ──────
   useEffect(() => {

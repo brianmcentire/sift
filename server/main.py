@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import os
+import socket
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 
 from server import db
@@ -419,14 +420,27 @@ def list_files(
 # ---------------------------------------------------------------------------
 
 @app.get("/init")
-def init_data(path: str = "/", min_size: int = Query(0, ge=0)):
+def init_data(request: Request, path: str = "/", min_size: int = Query(0, ge=0)):
     """Combined startup endpoint: returns hosts + root ls in one round trip."""
     hosts = list_hosts()
     root_ls = {
         h.host: ls_files(path=path, host=h.host, depth=1, min_size=min_size)
         for h in hosts
     }
-    return {"hosts": hosts, "root_ls": root_ls}
+    # Attempt reverse-DNS on the client IP so the frontend can pre-select the
+    # matching host. Fails gracefully (returns None) on any lookup error.
+    client_host = None
+    try:
+        client_ip = request.client.host if request.client else None
+        if client_ip in ("127.0.0.1", "::1"):
+            # Browser is on the same machine as the server
+            client_host = socket.gethostname().split(".")[0]
+        elif client_ip:
+            name, _, _ = socket.gethostbyaddr(client_ip)
+            client_host = name.split(".")[0]
+    except Exception:
+        pass
+    return {"hosts": hosts, "root_ls": root_ls, "client_host": client_host}
 
 
 @app.get("/hosts", response_model=list[HostEntry])
@@ -473,33 +487,33 @@ def list_hosts():
 def stats_overview(
     min_size: int = Query(0, ge=0),
     categories: str = Query("", description="Comma-separated file categories to filter dup stats"),
+    hosts: str = Query("", description="Comma-separated host names to filter stats"),
 ):
-    row = db.query_one("""
+    host_list = [h.strip() for h in hosts.split(',') if h.strip()] if hosts else []
+    host_where = ""
+    if host_list:
+        placeholders = ', '.join(['?' for _ in host_list])
+        host_where = f"AND host IN ({placeholders})"
+
+    row = db.query_one(f"""
         SELECT
             COUNT(*) AS total_files,
             COUNT(DISTINCT host) AS total_hosts,
             COUNT(DISTINCT hash) FILTER (WHERE hash IS NOT NULL) AS unique_hashes,
             COUNT(*) FILTER (WHERE hash IN (
-                SELECT hash FROM files WHERE hash IS NOT NULL
+                SELECT hash FROM files
+                WHERE hash IS NOT NULL {host_where}
                 GROUP BY hash HAVING COUNT(*) > 1
             )) AS dup_files,
-            SUM(size_bytes) FILTER (WHERE hash IN (
-                SELECT hash FROM files WHERE hash IS NOT NULL
-                GROUP BY hash HAVING COUNT(*) > 1
-            )) - SUM(
-                (SELECT MIN(size_bytes) FROM files f2 WHERE f2.hash = files.hash)
-            ) FILTER (WHERE hash IN (
-                SELECT hash FROM files WHERE hash IS NOT NULL
-                GROUP BY hash HAVING COUNT(*) > 1
-            )) AS wasted_bytes,
             SUM(size_bytes) AS total_bytes
         FROM files
-    """)
+        WHERE 1=1 {host_where}
+    """, host_list + host_list)
 
-    # Dup sets / wasted bytes, optionally filtered by min_size and file categories
+    # Dup sets / wasted bytes, optionally filtered by min_size, categories, and hosts
     category_list = [c.strip() for c in categories.split(',') if c.strip()] if categories else []
     cat_clause = ""
-    dup_params = [min_size]
+    dup_params = [min_size] + host_list
     if category_list:
         placeholders = ', '.join(['?' for _ in category_list])
         cat_clause = f"AND file_category IN ({placeholders})"
@@ -514,6 +528,7 @@ def stats_overview(
                    MIN(size_bytes) AS min_size
             FROM files
             WHERE hash IS NOT NULL AND size_bytes >= ?
+              {host_where}
               {cat_clause}
             GROUP BY hash
             HAVING COUNT(*) > 1
@@ -523,7 +538,7 @@ def stats_overview(
     total_files = row[0] if row else 0
     total_hosts = row[1] if row else 0
     unique_hashes = row[2] if row else 0
-    total_bytes = row[5] if row else None
+    total_bytes = row[4] if row else None
     duplicate_sets = dup_row[0] if dup_row else 0
     wasted_bytes = dup_row[1] if dup_row else None
 

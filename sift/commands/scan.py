@@ -177,7 +177,8 @@ class _ServerDown(Exception):
     """Raised when the sift server has been unreachable for too long."""
 
 
-_RETRY_TIMEOUT = 30  # seconds before giving up and aborting the scan
+_RETRY_TIMEOUT = 30          # seconds before giving up and aborting the scan
+_FLUSH_INTERVAL = 60  # flush accumulated records at least every minute
 
 
 def _post_with_retry(fn, label: str) -> None:
@@ -347,6 +348,7 @@ def cmd_scan(args) -> None:
 
         _progress_interval = 1.0  # seconds between progress updates
         _last_progress = time.time()
+        _last_flush_time = time.time()
 
         def _on_chunk(_nbytes: int) -> None:
             nonlocal _last_progress
@@ -424,7 +426,6 @@ def cmd_scan(args) -> None:
                         device_val = raw_dev
                         inode_key = (raw_dev, raw_ino)
 
-                    stats["files_scanned"] += 1
                     stats["bytes_scanned"] += stat_result.st_size
                     display["current_file"] = raw_path
 
@@ -508,10 +509,17 @@ def cmd_scan(args) -> None:
                     _log_error(raw_path)
                     stats["read_errors"] += 1
 
-                # Flush upsert batch if full (inline — these carry new hash data, flush promptly)
-                if len(upsert_records) >= upsert_batch_size:
-                    _flush_upsert(upsert_records[:upsert_batch_size], host, scan_start_iso)
-                    del upsert_records[:upsert_batch_size]
+                stats["files_scanned"] += 1
+
+                # Flush on time interval (or when batch grows very large as a memory safety net)
+                if (
+                    len(upsert_records) >= 10_000
+                    or (upsert_records and time.time() - _last_flush_time >= _FLUSH_INTERVAL)
+                ):
+                    for chunk in _chunks(upsert_records, upsert_batch_size):
+                        _flush_upsert(chunk, host, scan_start_iso)
+                    upsert_records.clear()
+                    _last_flush_time = time.time()
 
                 # seen_paths are flushed after the walk — don't block traversal with network I/O
 
@@ -574,6 +582,13 @@ def cmd_scan(args) -> None:
     except KeyboardInterrupt:
         stop_event.set()
         print("\nScan interrupted.", file=sys.stderr)
+        if upsert_records:
+            print(f"Flushing {len(upsert_records)} buffered records...", file=sys.stderr)
+            try:
+                for chunk in _chunks(upsert_records, upsert_batch_size):
+                    _flush_upsert(chunk, host, scan_start_iso)
+            except _ServerDown:
+                print("sift: server unreachable, buffered records not saved.", file=sys.stderr)
         try:
             client.patch(f"/scan-runs/{run_id}", {"status": "interrupted"})
         except Exception:

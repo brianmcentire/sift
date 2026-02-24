@@ -15,6 +15,95 @@ REPL with `cd`/`ls`/`find` against the inventory. Includes `rm` for removing inv
 
 ---
 
+## Host-Aware Dup Semantics
+
+**Context:** Today "is this a duplicate?" has one meaning regardless of which hosts are selected.
+The desired behavior is three distinct semantic modes driven by the host chip selection:
+
+### Three modes
+
+| Selection | `isDup` definition |
+|---|---|
+| **All hosts** | current behavior — dup if `dup_count > 0` OR same hash exists on any other host |
+| **Single host** | within-host only — dup if `dup_count > 0` on that host; cross-host matches ignored |
+| **2+ but not all hosts** | union — dup if `dup_count > 0` on any selected host OR same hash exists on any other selected host |
+
+In union mode the user chose **union** (not intersection) — "what's redundant within this group of hosts?"
+
+### What needs to change
+
+#### Frontend (`App.jsx`, `utils.js`)
+
+1. Derive `dupMode: 'all' | 'single' | 'multi'` from `selectedHosts.size` vs `hosts.length`.
+2. Pass `dupMode` + `selectedHosts` into `mergeEntries` / wherever `isDup` is computed today.
+3. Rewrite `isDup` logic:
+   - `all`: `dup_count > 0 || Boolean(other_hosts)` ← unchanged
+   - `single`: `dup_count > 0` ← ignore `other_hosts`
+   - `multi`: `dup_count > 0 || other_hosts.split(',').some(h => selectedHosts.has(h))`
+     (`other_hosts` already contains all other-host names for the same hash)
+4. `onlyDups` toggle and `isDup`-derived row colouring (amber) both use the mode-appropriate definition.
+5. **StatsBar `isFiltered` label**: host selection in `single` or `multi` mode should arguably
+   display `(filtered)` since numbers differ from global totals.  Currently only `minDupSize > 0`
+   or `categoryFilter.size > 0` triggers the label — extend the condition.
+
+#### Server `/files/ls`
+
+`dup_count` on directory entries is currently same-host only (computed from the `dupes` CTE which
+filters `WHERE host = ?`).  For union mode, directory `dup_count` should also count files in that
+directory whose hash appears on any other selected host.
+
+- Add optional `selected_hosts: str` query param (comma-separated) to `/files/ls`.
+- When provided and `len > 1`, widen the `dupes` CTE:
+  ```sql
+  -- current (single-host)
+  dupes AS (
+      SELECT hash FROM files
+      WHERE hash IS NOT NULL AND host = ? AND size_bytes >= ?
+      ...
+      GROUP BY hash HAVING COUNT(*) > 1
+  )
+  -- multi-host union
+  dupes AS (
+      SELECT hash FROM files
+      WHERE hash IS NOT NULL AND host IN (?, ?) AND size_bytes >= ?
+      GROUP BY hash HAVING COUNT(*) > 1
+  )
+  ```
+  The outer `scoped` CTE still filters `WHERE f.host = ?` (we're building one host's tree view),
+  so `dup_count` becomes "files in this dir/file on this host whose hash appears 2+ times across
+  all selected hosts."
+- When `len == 1` (single-host), keep the current same-host-only CTE.
+- Frontend `fetchPath` must pass `selected_hosts` param when in multi mode.
+- **Cache key** must include the selected-hosts set, or the cache must be busted when `dupMode`
+  changes (similar to `lsFetchKey` pattern used for `minDupSize`).
+
+#### Server `/stats/overview`
+
+Already handles all three modes correctly via the `hosts` comma-separated param added in the
+previous session:
+- No host param → all-hosts totals (mode: all)
+- Single host → same-host dups only (mode: single) — the `HAVING COUNT(*) > 1` naturally scopes
+  to only that host's files
+- Multiple hosts → union pool (mode: multi) — counts any hash appearing 2+ times across the
+  combined pool of selected hosts
+
+No further server changes needed for stats.
+
+### Open questions / decisions for implementation
+
+- **`dup_hash_count` for dirs in multi mode**: currently used for `extraCopies =
+  dup_count - dup_hash_count`.  May need a matching `multi_dup_hash_count` column or a
+  revised formula.
+- **Cache invalidation**: adding `selected_hosts` to the ls cache key could fragment the cache
+  heavily.  An alternative is to always fetch with all-hosts semantics and apply the filter
+  client-side, but that requires the server to return both same-host AND cross-host dup counts
+  in every ls response — a larger schema change.
+- **Hard-link interaction**: in multi-host union mode, hard links on a single host should still
+  be excluded from dup counts (same physical file).  The existing hard-link CTE already scopes
+  to the current host, so this is likely fine as-is.
+
+---
+
 ## Server: `is_scanning` field on `/hosts`
 
 **Context:** `last_scan_at` in `/hosts` is derived from `MAX(started_at)` on `scan_runs` filtered to
