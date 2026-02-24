@@ -33,5 +33,6 @@ frontend/dist/
 # macOS
 .DS_Store
 
-# Local deployment scripts (contain host-specific details)
+# Local deployment scripts and host-specific make targets (contain host-specific details)
 docker-deploy
+local.mk

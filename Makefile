@@ -1,4 +1,5 @@
 .PHONY: dist-agent build-frontend dev-frontend clean help
+# Local targets (sync-db, deploy, etc.) live in local.mk — see bottom of this file
 
 help:
 	@echo "Targets:"
@@ -24,3 +25,7 @@ dist-agent:
 
 clean:
 	rm -rf dist/ build/ *.spec
+
+# Host-specific / private targets go in local.mk (gitignored, never committed).
+# Create your own local.mk to extend this Makefile without touching the public repo.
+sinclude local.mk
