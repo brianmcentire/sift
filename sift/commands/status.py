@@ -57,32 +57,35 @@ def cmd_status(args) -> None:
     if filter_host:
         hosts = [h for h in hosts if h["host"] == filter_host]
 
+    try:
+        runs = client.get("/scan-runs", params={"limit": 10})
+    except Exception:
+        runs = []
+
+    if filter_host:
+        runs = [r for r in runs if r["host"] == filter_host]
+
+    scanning = {r["host"] for r in runs if r["status"] == "running"}
+
     if hosts:
         name_w = max(len(h["host"]) for h in hosts)
         print(f"  {'host':<{name_w}}  {'files':>8}  {'size':>7}  {'hashed':>8}  {'last scan':<17}  scan root")
         print(f"  {'-'*name_w}  {'------':>8}  {'-------':>7}  {'------':>8}  {'-'*17}  ---------")
         for h in hosts:
+            last = "scanning..." if h["host"] in scanning else _fmt_dt(h.get("last_scan_at"))
             print(
                 f"  {h['host']:<{name_w}}"
                 f"  {h.get('total_files', 0):>8,}"
                 f"  {_human_size(h.get('total_bytes')):>7}"
                 f"  {h.get('total_hashed', 0):>8,}"
-                f"  {_fmt_dt(h.get('last_scan_at')):<17}"
+                f"  {last:<17}"
                 f"  {h.get('last_scan_root') or '?'}"
             )
         print()
 
-    try:
-        runs = client.get("/scan-runs", params={"limit": 10})
-    except Exception:
-        return
-
-    if filter_host:
-        runs = [r for r in runs if r["host"] == filter_host]
-
     if runs:
         print("recent scans")
-        for r in runs[:10]:
+        for r in runs:
             print(
                 f"  [{r['id']}] {r['host']}:{r['root_path']}"
                 f"  {r['status']}"
