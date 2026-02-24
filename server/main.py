@@ -181,6 +181,39 @@ def get_cache(host: str, root: str):
 # File listing
 # ---------------------------------------------------------------------------
 
+@app.get("/files/ls/dup-hash")
+def ls_dup_hash(path: str = Query("/"), host: str = Query("")):
+    """Return the first duplicated hash found within the given subtree for a host.
+    Uses the same hard-link exclusion logic as the dupes CTE in ls_files so the
+    returned hash is guaranteed to appear >= 2 times in /files?hash=X."""
+    prefix = path.lower().rstrip("/")
+    row = db.query_one("""
+        WITH hard_linked_inodes AS (
+            SELECT device, inode FROM files
+            WHERE host = ? AND inode IS NOT NULL AND device IS NOT NULL
+            GROUP BY device, inode HAVING COUNT(*) > 1
+        )
+        SELECT f.hash
+        FROM files f
+        WHERE f.host = ?
+          AND f.hash IS NOT NULL
+          AND (f.path LIKE ? OR f.path = ?)
+          AND NOT (f.inode IS NOT NULL AND f.device IS NOT NULL
+                   AND (f.device, f.inode) IN (SELECT device, inode FROM hard_linked_inodes))
+          AND f.hash IN (
+              SELECT hash FROM files
+              WHERE host = ? AND hash IS NOT NULL
+                AND NOT (inode IS NOT NULL AND device IS NOT NULL
+                         AND (device, inode) IN (SELECT device, inode FROM hard_linked_inodes))
+              GROUP BY hash HAVING COUNT(*) > 1
+          )
+        LIMIT 1
+    """, [host, host, prefix + "/%", prefix, host])
+    if row is None:
+        raise HTTPException(status_code=404, detail="No duplicate hash found in subtree")
+    return {"hash": row[0]}
+
+
 @app.get("/files/ls", response_model=list[LsEntry])
 def ls_files(
     path: str = "/",
@@ -285,6 +318,7 @@ def ls_files(
 def list_files(
     host: Optional[str] = None,
     path_prefix: Optional[str] = None,
+    path_contains: Optional[str] = None,
     ext: Optional[str] = None,
     category: Optional[str] = None,
     min_size: Optional[int] = None,
@@ -317,9 +351,16 @@ def list_files(
     if max_size is not None:
         conditions.append("f.size_bytes <= ?")
         params.append(max_size)
+    if path_contains:
+        conditions.append("f.path LIKE '%' || ? || '%'")
+        params.append(path_contains.lower())
     if hash:
-        conditions.append("f.hash = ?")
-        params.append(hash)
+        h = hash.lower()
+        if len(h) == 64:
+            conditions.append("f.hash = ?")
+        else:
+            conditions.append("f.hash LIKE ? || '%'")
+        params.append(h)
     if name:
         # glob-style: convert * → %, ? → _, escape literal % and _ with backslash.
         # ESCAPE '\' tells DuckDB to treat \ as the escape character in this LIKE.

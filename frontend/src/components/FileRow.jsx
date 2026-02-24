@@ -42,11 +42,21 @@ const CELL_RENDERERS = {
     </td>
   ),
 
-  hash: ({ entry, extraCopies }) => (
+  hash: ({ entry, extraCopies, fullPath, onDupHashClick }) => (
     <td key="hash" className="py-1.5 pr-4">
       {entry.entry_type === 'dir' ? (
         extraCopies > 0 ? (
-          <span className="text-[11px] text-amber-600 font-medium">
+          <span
+            className={`text-[11px] text-amber-600 font-medium ${
+              extraCopies === 1 && onDupHashClick
+                ? 'cursor-pointer hover:text-amber-800 hover:underline'
+                : ''
+            }`}
+            title={extraCopies === 1 && onDupHashClick ? 'Show all copies' : undefined}
+            onClick={extraCopies === 1 && onDupHashClick
+              ? e => { e.stopPropagation(); onDupHashClick(fullPath, entry) }
+              : undefined}
+          >
             {extraCopies} extra cop{extraCopies !== 1 ? 'ies' : 'y'}
           </span>
         ) : null
@@ -71,12 +81,16 @@ export default function FileRow({
   entry,
   parentPath,
   fullPath,
+  fullDisplayPath,
   depth,
   isExpanded,
   onToggleDir,
   onFileClick,
   onCopyPath,
   onTypeClick,
+  onDupHashClick,
+  highlightedPaths,
+  matchedDirPaths,
   hostColorMap,
   orderedCols,
   filterActive,
@@ -103,6 +117,11 @@ export default function FileRow({
   // Extra copies = files in dup groups minus the distinct dup groups
   const extraCopies = Math.max(0, (entry.dup_count || 0) - (entry.dup_hash_count || 0))
 
+  // Blue highlight: this is the file (or one of the files) the user navigated from
+  const isHighlighted = !!(highlightedPaths?.size && highlightedPaths.has((fullPath || '').toLowerCase()))
+  // Soft blue: this dir matched the directory search (tree mode only)
+  const isMatchedDir = !filterActive && isDir && !!(matchedDirPaths?.size && matchedDirPaths.has(fullPath))
+
   // When filter is active (or search mode), show parent path as context below filename
   const indent = filterActive ? 0 : depth * 20
   const contextPath = filterActive && !isDir
@@ -119,13 +138,13 @@ export default function FileRow({
     }
   }
 
-  const cellOpts = { entry, extraCopies, allHostsSet, hostColorMap, onTypeClick }
+  const cellOpts = { entry, extraCopies, allHostsSet, hostColorMap, onTypeClick, fullPath, onDupHashClick }
 
   return (
     <tr
       className={`
         group border-b border-slate-100
-        ${isDup ? 'bg-amber-50 hover:bg-amber-100' : isHardLinked ? 'bg-orange-50 hover:bg-orange-100' : 'hover:bg-slate-50'}
+        ${isHighlighted ? 'bg-blue-100 hover:bg-blue-200' : isDup ? 'bg-amber-50 hover:bg-amber-100' : isHardLinked ? 'bg-orange-50 hover:bg-orange-100' : isMatchedDir ? 'bg-blue-50 hover:bg-blue-100' : 'hover:bg-slate-100'}
         ${isDir || onFileClick ? 'cursor-pointer' : ''}
         transition-colors duration-100
       `}
@@ -154,7 +173,7 @@ export default function FileRow({
             </div>
             {isDir && onCopyPath && (
               <button
-                onClick={e => { e.stopPropagation(); onCopyPath(fullPath, entry) }}
+                onClick={e => { e.stopPropagation(); onCopyPath(fullDisplayPath || fullPath) }}
                 className="opacity-0 group-hover:opacity-100 shrink-0 ml-1 text-slate-300 hover:text-slate-500 transition-opacity leading-none"
                 title="Copy path to clipboard"
               >

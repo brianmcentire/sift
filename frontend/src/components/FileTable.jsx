@@ -26,6 +26,9 @@ export default function FileTable({
   onFileClick,
   onCopyPath,
   onTypeClick,
+  onDupHashClick,
+  highlightedPaths,
+  matchedDirPaths,
   expandedPaths,
   isLoading,
   filterActive,
@@ -83,18 +86,22 @@ export default function FileTable({
           </tr>
         </thead>
         <tbody>
-          {rows.map(({ entry, parentPath, fullPath, depth }) => (
+          {rows.map(({ entry, parentPath, fullPath, fullDisplayPath, depth }) => (
             <FileRow
               key={`${fullPath}:${entry.presentHosts?.join(',')}`}
               entry={entry}
               parentPath={parentPath}
               fullPath={fullPath}
+              fullDisplayPath={fullDisplayPath}
               depth={depth}
               isExpanded={expandedPaths.has(fullPath)}
               onToggleDir={onToggleDir}
               onFileClick={onFileClick}
               onCopyPath={onCopyPath}
               onTypeClick={onTypeClick}
+              onDupHashClick={onDupHashClick}
+              highlightedPaths={highlightedPaths}
+              matchedDirPaths={matchedDirPaths}
               hostColorMap={hostColorMap}
               orderedCols={orderedCols}
               filterActive={filterActive}

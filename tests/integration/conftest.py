@@ -40,8 +40,8 @@ def live_client():
     return session
 
 
-def get(session, path, **params):
-    url = f"{session.base_url}{path}"
+def get(session, endpoint, **params):
+    url = f"{session.base_url}{endpoint}"
     r = session.get(url, params=params or None, timeout=30)
     r.raise_for_status()
     return r.json()

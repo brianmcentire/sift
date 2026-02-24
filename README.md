@@ -208,10 +208,12 @@ Open `http://localhost:8765` (or your server address) after starting `sift serve
 ### Features
 
 - **Tree browser** — navigate your filesystem inventory with inline expand/collapse. Click a directory to expand it; click a file to see all copies of that file across all hosts.
+- **Directory search** — type in the directory search box to expand the tree directly to matching directories, highlighted in blue. Non-matching ancestor directories are auto-expanded; matching dirs stay collapsed so you can open them at will. Hover any directory row to reveal a ⧉ button that copies its path to the clipboard.
 - **Duplicate highlighting** — amber rows are duplicate files (same hash, multiple copies). Orange rows are hard-linked files (same inode, excluded from dup counts).
 - **"Extra copies" on directories** — the hash column shows how many redundant file copies exist within a directory subtree. A directory with "3 extra copies" means 3 files could be removed while keeping one of each.
 - **Cross-host host badges** — each file row shows which hosts it exists on, color-coded per host.
-- **Search** — filename search (glob-style, `*` wildcards), hash search (prefix match), and directory scope filter.
+- **Search** — filename search (glob-style, `*` wildcards), hash search (prefix match), and directory name search (tree expansion to matches).
+- **← Back navigation** — when viewing file copies or hash search results, a ← Back button returns to the tree view.
 - **Filters** (all combinable):
   - **All files / Only dups** — toggle to show only duplicate rows and the directories that contain them
   - **Min dup size** — ignore duplicates below a size threshold (0 B, 1 KB, 1 MB, 100 MB, 1 GB, or custom with unit parsing)

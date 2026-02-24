@@ -12,8 +12,7 @@ export default function Header({
   setSelectedHosts,
   hostColorMap,
   dirQuery,
-  onDirSelect,
-  onDirClear,
+  setDirQuery,
   filenameQuery,
   setFilenameQuery,
   hashQuery,
@@ -47,8 +46,7 @@ export default function Header({
           {/* Directory search */}
           <DirectorySearch
             value={dirQuery}
-            onSelect={onDirSelect}
-            onClear={onDirClear}
+            onChange={setDirQuery}
             className="w-44 shrink-0"
           />
 

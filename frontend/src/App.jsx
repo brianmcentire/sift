@@ -15,14 +15,16 @@ export default function App() {
   const [expandedPaths, setExpandedPaths] = useState(new Set())
 
   // ── Search / filter state ───────────────────────────────────────────────
-  const [dirQuery, setDirQuery] = useState('')            // text in directory search box
-  const [selectedDir, setSelectedDir] = useState(null)   // { dir_path, dir_display } | null
+  const [dirQuery, setDirQuery] = useState('')
+  const [debouncedDirQuery, setDebouncedDirQuery] = useState('')
   const [filenameQuery, setFilenameQuery] = useState('')
   const [debouncedFilenameQuery, setDebouncedFilenameQuery] = useState('')
   const [hashQuery, setHashQuery] = useState('')
+  const [matchedDirPaths, setMatchedDirPaths] = useState(new Set()) // lowercase dir paths matched by dir query
   const [filenameResults, setFilenameResults] = useState(null)  // null | FileEntry[]
   const [hashResults, setHashResults] = useState(null)          // null | FileEntry[]
   const [pinnedResults, setPinnedResults] = useState(null)      // null | FileEntry[]
+  const [highlightedPaths, setHighlightedPaths] = useState(new Set()) // paths (lowercase) to blue-highlight in results
   const [categoryFilter, setCategoryFilter] = useState(new Set())
   const [minDupSize, setMinDupSize] = useState(0)
   const [onlyDups, setOnlyDups] = useState(false)
@@ -55,7 +57,12 @@ export default function App() {
     return m
   }, [hosts])
 
-  // ── Debounce filename query ─────────────────────────────────────────────
+  // ── Debounce dir + filename queries ─────────────────────────────────────
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedDirQuery(dirQuery), 150)
+    return () => clearTimeout(t)
+  }, [dirQuery])
+
   useEffect(() => {
     const t = setTimeout(() => setDebouncedFilenameQuery(filenameQuery), 150)
     return () => clearTimeout(t)
@@ -64,15 +71,13 @@ export default function App() {
   // ── Filename search (server-side) ────────────────────────────────────────
   useEffect(() => {
     if (debouncedFilenameQuery.length >= 2) {
-      const params = { iname: `*${debouncedFilenameQuery}*`, limit: 500 }
-      if (selectedDir?.dir_path) params.path_prefix = selectedDir.dir_path
-      api.files(params)
+      api.files({ iname: `*${debouncedFilenameQuery}*`, limit: 500 })
         .then(setFilenameResults)
         .catch(() => setFilenameResults([]))
     } else {
       setFilenameResults(null)
     }
-  }, [debouncedFilenameQuery, selectedDir])
+  }, [debouncedFilenameQuery])
 
   // ── Hash search ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -137,6 +142,46 @@ export default function App() {
     setCacheVersion(v => v + 1)
   }, [])
 
+  // ── Directory search → expand tree to matching dirs ─────────────────────
+  // NOTE: must be after `fetchPath` useCallback to avoid TDZ
+  useEffect(() => {
+    if (debouncedDirQuery.length < 2) {
+      setMatchedDirPaths(new Set())
+      return
+    }
+    api.directories(debouncedDirQuery)
+      .then(dirs => {
+        if (!dirs || dirs.length === 0) {
+          setMatchedDirPaths(new Set())
+          return
+        }
+        const toExpand = new Set()
+        const matched = new Set()
+        dirs.forEach(d => {
+          const p = d.dir_path
+          matched.add(p)
+          // Add ancestor paths (not the match itself) so the tree opens down to each match
+          const parts = p.split('/').filter(Boolean)
+          for (let i = 1; i < parts.length; i++) {
+            toExpand.add('/' + parts.slice(0, i).join('/'))
+          }
+        })
+        setMatchedDirPaths(matched)
+        // Expand only non-matched ancestors — matched dirs stay collapsed for the user to open
+        setExpandedPaths(prev => {
+          const next = new Set(prev)
+          toExpand.forEach(p => { if (!matched.has(p)) next.add(p) })
+          return next
+        })
+        toExpand.forEach(p => {
+          if (!matched.has(p) && hosts.some(h => !cacheRef.current.has(`${h.host}:${p}`))) {
+            fetchPath(p, hosts)
+          }
+        })
+      })
+      .catch(() => setMatchedDirPaths(new Set()))
+  }, [debouncedDirQuery, hosts, fetchPath])
+
   // Fetch currentPath whenever it, hosts, or lsFetchKey changes
   useEffect(() => {
     if (hosts.length > 0) {
@@ -157,11 +202,11 @@ export default function App() {
   const reset = useCallback(() => {
     setFilenameQuery('')
     setHashQuery('')
+    setDirQuery('')
+    setMatchedDirPaths(new Set())
     setCategoryFilter(new Set())
     setMinDupSize(0)
     setOnlyDups(false)
-    setDirQuery('')
-    setSelectedDir(null)
     setPinnedResults(null)
     setSelectedHosts(new Set(hosts.map(h => h.host)))
     setExpandedPaths(new Set())
@@ -196,6 +241,7 @@ export default function App() {
   // ── Handle file click → zoom to all copies ────────────────────────────────
   const handleFileClick = useCallback(async (entry) => {
     if (entry.hash) {
+      setHighlightedPaths(new Set([(entry.path_display || '').toLowerCase()]))
       try {
         const data = await api.files({ hash: entry.hash, limit: 500 })
         setPinnedResults(data)
@@ -218,12 +264,40 @@ export default function App() {
   }, [])
 
   // ── Handle dir copy-path button → copy path to clipboard ─────────────────
-  const handleCopyPath = useCallback((fullPath, entry) => {
-    const displayPath = entry.path_display || fullPath
-    navigator.clipboard.writeText(displayPath).then(() => {
+  const handleCopyPath = useCallback((displayPath) => {
+    const success = () => {
       setClipboardToast(true)
       setTimeout(() => setClipboardToast(false), 2000)
-    }).catch(() => {})
+    }
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(displayPath).then(success).catch(() => {})
+    } else {
+      // Fallback for HTTP (non-secure context)
+      const ta = document.createElement('textarea')
+      ta.value = displayPath
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.focus()
+      ta.select()
+      try { document.execCommand('copy'); success() } catch (_) {}
+      document.body.removeChild(ta)
+    }
+  }, [])
+
+  // ── Handle "1 extra copy" click → find dup hash and open hash overlay ──────
+  const handleDupHashClick = useCallback(async (fullPath, entry) => {
+    const host = entry.presentHosts?.[0]
+    if (!host) return
+    try {
+      const result = await api.dupHash(fullPath, host)
+      if (result?.hash) {
+        // Find the specific files in this subtree with that hash so we can highlight them
+        const inDir = await api.files({ hash: result.hash, path_prefix: fullPath, host, limit: 50 })
+        setHighlightedPaths(new Set(inDir.map(f => (f.path_display || '').toLowerCase())))
+        setHashQuery(result.hash)
+      }
+    } catch (_) {}
   }, [])
 
   // ── Handle type badge click → toggle category filter ─────────────────────
@@ -236,24 +310,8 @@ export default function App() {
     })
   }, [])
 
-  // ── Handle directory selection from autocomplete ──────────────────────────
-  const handleDirSelect = useCallback((sug) => {
-    if (sug._typing) {
-      // User is still typing — just update the display text
-      setDirQuery(sug.dir_display || '')
-      return
-    }
-    setSelectedDir(sug)
-    setDirQuery(sug.dir_display || sug.dir_path)
-  }, [])
-
-  const handleDirClear = useCallback(() => {
-    setSelectedDir(null)
-    setDirQuery('')
-  }, [])
-
   // ── Build flat row list from cache (tree mode) ────────────────────────────
-  const buildRows = useCallback((parentPath, depth) => {
+  const buildRows = useCallback((parentPath, depth, parentDisplayPath = parentPath) => {
     const hostDataMap = new Map()
     hosts.forEach(h => {
       const key = `${h.host}:${parentPath}`
@@ -268,9 +326,10 @@ export default function App() {
 
     for (const entry of sorted) {
       const fullPath = joinPath(parentPath, entry.segment)
-      rows.push({ entry, parentPath, fullPath, depth })
+      const fullDisplayPath = joinPath(parentDisplayPath, entry.segment_display || entry.segment)
+      rows.push({ entry, parentPath, fullPath, fullDisplayPath, depth })
       if (entry.entry_type === 'dir' && expandedPaths.has(fullPath)) {
-        rows.push(...buildRows(fullPath, depth + 1))
+        rows.push(...buildRows(fullPath, depth + 1, fullDisplayPath))
       }
     }
 
@@ -281,6 +340,11 @@ export default function App() {
   // ── Active results: pinned > filename > hash ──────────────────────────────
   const activeResults = pinnedResults ?? filenameResults ?? hashResults
   const isSearchMode = activeResults !== null
+
+  // Clear highlighted paths whenever the results overlay closes
+  useEffect(() => {
+    if (activeResults === null) setHighlightedPaths(new Set())
+  }, [activeResults])
 
   // ── Search result rows ────────────────────────────────────────────────────
   const searchRows = useMemo(() => {
@@ -364,7 +428,29 @@ export default function App() {
     return filtered
   }, [allTreeRows, categoryFilter, minDupSize, onlyDups, expandedPaths])
 
-  const rows = isSearchMode ? (searchRows ?? []) : treeRows
+  // ── Rows: search overlay > dir-search path-chain filter > plain tree ──────
+  const rows = useMemo(() => {
+    if (isSearchMode) return searchRows ?? []
+
+    // Dir search active: filter tree to only show the path chain to each matched dir
+    if (matchedDirPaths.size > 0 && debouncedDirQuery.length >= 2) {
+      // Build set of all paths that should remain visible (matches + their ancestors)
+      const visiblePaths = new Set()
+      matchedDirPaths.forEach(p => {
+        visiblePaths.add(p)
+        const parts = p.split('/').filter(Boolean)
+        for (let i = 1; i < parts.length; i++) {
+          visiblePaths.add('/' + parts.slice(0, i).join('/'))
+        }
+      })
+      // Show ancestors+matches, plus children of any expanded matched dir
+      return treeRows.filter(row =>
+        visiblePaths.has(row.fullPath) || matchedDirPaths.has(row.parentPath)
+      )
+    }
+
+    return treeRows
+  }, [isSearchMode, searchRows, treeRows, matchedDirPaths, debouncedDirQuery])
 
   // ── Available categories — from unfiltered source so multi-select works ──
   const availableCategories = useMemo(() => {
@@ -387,15 +473,15 @@ export default function App() {
       clear: () => setPinnedResults(null),
     }
     if (filenameResults !== null) return {
-      label: `filename: "${filenameQuery}"${selectedDir ? ` in ${selectedDir.dir_display || selectedDir.dir_path}` : ''}`,
-      clear: () => { setFilenameQuery(''); setFilenameResults(null) },
+      label: `filename: "${filenameQuery}"`,
+      clear: () => { setFilenameQuery('') },
     }
     if (hashResults !== null) return {
       label: `hash: ${hashQuery}`,
       clear: () => { setHashQuery('') },
     }
     return null
-  }, [pinnedResults, filenameResults, filenameQuery, selectedDir, hashResults, hashQuery])
+  }, [pinnedResults, filenameResults, filenameQuery, hashResults, hashQuery])
 
   const isLoading = loadingPaths.has(currentPath)
 
@@ -407,8 +493,7 @@ export default function App() {
         setSelectedHosts={setSelectedHosts}
         hostColorMap={hostColorMap}
         dirQuery={dirQuery}
-        onDirSelect={handleDirSelect}
-        onDirClear={handleDirClear}
+        setDirQuery={setDirQuery}
         filenameQuery={filenameQuery}
         setFilenameQuery={setFilenameQuery}
         hashQuery={hashQuery}
@@ -455,6 +540,9 @@ export default function App() {
           onFileClick={handleFileClick}
           onCopyPath={handleCopyPath}
           onTypeClick={handleTypeClick}
+          onDupHashClick={handleDupHashClick}
+          highlightedPaths={highlightedPaths}
+          matchedDirPaths={matchedDirPaths}
           expandedPaths={expandedPaths}
           isLoading={isLoading && !isSearchMode}
           filterActive={isSearchMode}

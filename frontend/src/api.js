@@ -15,7 +15,8 @@ async function get(path, params = {}) {
 export const api = {
   hosts: () => get('/hosts'),
   ls: (path, host, minSize = 0) => get('/files/ls', { path, host, depth: 1, min_size: minSize }),
+  dupHash: (path, host) => get('/files/ls/dup-hash', { path, host }),
   files: (params) => get('/files', params),
   stats: (params = {}) => get('/stats/overview', params),
-  directories: (q) => get('/directories', { q, limit: 20 }),
+  directories: (q, limit = 10) => get('/directories', { q, limit }),
 }

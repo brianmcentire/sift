@@ -254,3 +254,86 @@ class TestLiveDuplicates:
                 f"Hash {s['hash'][:8]}: copy_count={s['copy_count']} "
                 f"but len(locations)={len(s['locations'])}"
             )
+
+
+# ---------------------------------------------------------------------------
+# /files/ls/dup-hash — "1 extra copy" click feature
+# ---------------------------------------------------------------------------
+
+def _find_one_extra_copy_dir(live_client, path, host, max_depth=4, _visited=None):
+    """Walk the tree to find the first directory where dup_count - dup_hash_count == 1."""
+    if _visited is None:
+        _visited = set()
+    if path in _visited:
+        return None
+    _visited.add(path)
+    try:
+        entries = get(live_client, "/files/ls", path=path, host=host)
+    except Exception:
+        return None
+    for e in entries:
+        if e["entry_type"] != "dir":
+            continue
+        full = ("/" + e["segment"]) if path == "/" else (path + "/" + e["segment"])
+        if (e["dup_count"] - e["dup_hash_count"]) == 1:
+            return full
+        if max_depth > 0 and e["dup_count"] > 0:
+            result = _find_one_extra_copy_dir(live_client, full, host, max_depth - 1, _visited)
+            if result:
+                return result
+    return None
+
+
+class TestLiveDupHash:
+    def test_dup_hash_returns_findable_hash(self, live_client):
+        """
+        Core invariant: when /files/ls/dup-hash returns a hash for a directory,
+        that hash must appear >= 2 times in /files?hash=X.
+
+        Regression test for the bug where clicking '1 extra copy' opened the
+        hash overlay showing '0 results / No files found'.
+        """
+        hosts = get(live_client, "/hosts")
+        host = hosts[0]["host"]
+
+        dir_path = _find_one_extra_copy_dir(live_client, "/", host, max_depth=4)
+        if dir_path is None:
+            pytest.skip("No directory with exactly 1 extra copy found — cannot test")
+
+        result = get(live_client, "/files/ls/dup-hash", path=dir_path, host=host)
+        assert "hash" in result, f"Expected {{hash: ...}}, got {result}"
+        hash_val = result["hash"]
+        assert hash_val, "hash should be non-empty"
+
+        copies = get(live_client, "/files", hash=hash_val, limit=10)
+        assert len(copies) >= 2, (
+            f"/files/ls/dup-hash for {dir_path} returned hash {hash_val[:8]}... "
+            f"but /files?hash=... found only {len(copies)} "
+            f"cop{'y' if len(copies) == 1 else 'ies'} (expected >= 2)"
+        )
+
+    def test_dup_hash_404_for_no_dup_dir(self, live_client):
+        """
+        A directory with no same-host duplicates should return 404,
+        not a spurious hash.
+        """
+        hosts = get(live_client, "/hosts")
+        host = hosts[0]["host"]
+
+        entries = get(live_client, "/files/ls", path="/", host=host)
+        no_dup = next(
+            (e for e in entries if e["entry_type"] == "dir" and e["dup_count"] == 0),
+            None,
+        )
+        if no_dup is None:
+            pytest.skip("Every root-level directory has duplicates — cannot test 404 case")
+
+        path = "/" + no_dup["segment"]
+        r = live_client.get(
+            f"{live_client.base_url}/files/ls/dup-hash",
+            params={"path": path, "host": host},
+            timeout=30,
+        )
+        assert r.status_code == 404, (
+            f"Expected 404 for no-dup dir {path}, got {r.status_code}: {r.text}"
+        )
