@@ -5,20 +5,15 @@ from typing import Any
 
 import requests
 from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 from sift.config import get_server_url
 
 
 def _make_session() -> requests.Session:
+    # No urllib3-level retries — scan.py's _post_with_retry handles retry/backoff,
+    # and urllib3 retrying internally would silently multiply timeouts (5× per call).
     session = requests.Session()
-    retry = Retry(
-        total=5,
-        backoff_factor=1.0,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET", "POST", "PATCH"],
-    )
-    adapter = HTTPAdapter(max_retries=retry)
+    adapter = HTTPAdapter()
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
@@ -42,18 +37,18 @@ def api_url(path: str) -> str:
 
 
 def get(path: str, params: dict | None = None) -> Any:
-    resp = _get_session().get(api_url(path), params=params, timeout=30)
+    resp = _get_session().get(api_url(path), params=params, timeout=(5, 30))
     resp.raise_for_status()
     return resp.json()
 
 
-def post(path: str, data: Any, timeout: int = 60) -> Any:
+def post(path: str, data: Any, timeout: tuple = (5, 30)) -> Any:
     resp = _get_session().post(api_url(path), json=data, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
 
 
 def patch(path: str, data: Any) -> Any:
-    resp = _get_session().patch(api_url(path), json=data, timeout=30)
+    resp = _get_session().patch(api_url(path), json=data, timeout=(5, 30))
     resp.raise_for_status()
     return resp.json()

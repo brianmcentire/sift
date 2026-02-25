@@ -40,3 +40,4 @@ local.mk
 
 # Personal scratch files
 brians-todo
+.aider*

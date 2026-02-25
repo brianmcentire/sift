@@ -104,6 +104,33 @@ No further server changes needed for stats.
 
 ---
 
+## Scan Cache Performance / Data Store Optimization
+
+**Context:** At scan startup, `GET /files/cache` fetches every previously-indexed file (path +
+mtime + size) for the scanned host/root as a single response. On large roots this can be 10MB+
+of JSON and cause a 30–60s apparent freeze before scanning begins.
+
+**Partial mitigations already in place:**
+- Compact array-of-arrays response format (eliminates per-row JSON key overhead ~40% smaller)
+- UX: "Fetching file cache... N entries." message so the user knows what's happening
+
+**Remaining bottlenecks to investigate:**
+- DuckDB `LIKE` on `path` column has no B-tree index — full table scan on every cache fetch
+- The global `threading.RLock()` blocks all other db operations during the fetch
+- Entire result set is buffered in Python before being serialized — streaming would help on huge roots
+
+**Potential approaches:**
+- Add a DuckDB index on `(host, path)` — DuckDB supports `CREATE INDEX` as of v0.10; measure
+  whether it actually helps on columnar storage (may not for LIKE prefix scans)
+- Stream the cache response with FastAPI `StreamingResponse` + NDJSON so parsing can begin
+  before the full response arrives
+- Store the cache locally (e.g. SQLite in `~/.sift-cache.db`) so startup is a local read
+  instead of a network round-trip — invalidate on server-side hash changes
+- Evaluate alternative embedded stores (e.g. Lance, SQLite + FTS5) if DuckDB proves
+  fundamentally slow for the point-query / LIKE patterns sift uses at scale
+
+---
+
 ## Server: `is_scanning` field on `/hosts`
 
 **Context:** `last_scan_at` in `/hosts` is derived from `MAX(started_at)` on `scan_runs` filtered to

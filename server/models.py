@@ -79,15 +79,6 @@ class ScanRunCreatedResponse(BaseModel):
     id: int
 
 
-class CacheEntry(BaseModel):
-    path: str
-    mtime: Optional[int]
-    size_bytes: Optional[int]
-
-
-class CacheResponse(BaseModel):
-    files: list[CacheEntry]
-
 
 class LsEntry(BaseModel):
     segment: str

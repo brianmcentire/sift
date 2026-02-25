@@ -11,8 +11,6 @@ from fastapi.staticfiles import StaticFiles
 
 from server import db
 from server.models import (
-    CacheResponse,
-    CacheEntry,
     DuplicateLocation,
     DuplicateSet,
     FileEntry,
@@ -166,16 +164,17 @@ def mark_files_seen(body: SeenRequest):
 # Cache endpoint (rehash optimization)
 # ---------------------------------------------------------------------------
 
-@app.get("/files/cache", response_model=CacheResponse)
+@app.get("/files/cache")
 def get_cache(host: str, root: str):
+    # Returns a compact array-of-arrays [path, mtime, size_bytes] to minimize
+    # JSON payload size and avoid per-row Pydantic model instantiation overhead.
     root_lower = root.lower()
     rows = db.query(
         "SELECT path, mtime, size_bytes FROM files "
         "WHERE host = ? AND (path LIKE ? OR path = ?)",
         [host, root_lower + "/%", root_lower],
     )
-    files = [CacheEntry(path=r[0], mtime=r[1], size_bytes=r[2]) for r in rows]
-    return {"files": files}
+    return {"files": [[r[0], r[1], r[2]] for r in rows]}
 
 
 # ---------------------------------------------------------------------------

@@ -104,7 +104,8 @@ def _print_progress(
 ) -> None:
     elapsed = time.time() - scan_start.timestamp()
     files_rate = stats["files_scanned"] / elapsed if elapsed > 0 else 0
-    mb_rate = stats["bytes_scanned"] / elapsed / (1024 * 1024) if elapsed > 0 else 0
+    # Hash throughput should reflect bytes actually read+hashed, not cache hits.
+    mb_rate = stats["bytes_hashed"] / elapsed / (1024 * 1024) if elapsed > 0 else 0
 
     # Pick up precount total as soon as the background thread writes it
     if display["total"] is None and "count" in display.get("precount", {}):
@@ -173,11 +174,38 @@ def _print_progress(
     sys.stderr.flush()
 
 
+def _print_current_file_only(display: dict) -> None:
+    """Refresh only the current-file line (line 2) without touching stats line.
+
+    Used for smoother feedback during cache-hit-heavy scans while keeping the
+    stats line update interval independent and slower.
+    """
+    is_tty = sys.stderr.isatty()
+    current_file = display.get("current_file", "")
+    prev = display.get("lines", 0)
+    if not is_tty or not current_file or prev < 2:
+        return
+
+    try:
+        cols = os.get_terminal_size(sys.stderr.fileno()).columns
+    except OSError:
+        cols = 120
+
+    line2 = f"  {current_file}"
+    if len(line2) > cols:
+        line2 = "  ..." + current_file[-(cols - 5):]
+
+    # Rewrite line 2. Leave cursor on line 2 (same as _print_progress does),
+    # so the next _print_progress call's \x1b[1A correctly moves back to line 1.
+    sys.stderr.write(f"\r\x1b[2K{line2}")
+    sys.stderr.flush()
+
+
 class _ServerDown(Exception):
     """Raised when the sift server has been unreachable for too long."""
 
 
-_RETRY_TIMEOUT = 30          # seconds before giving up and aborting the scan
+_RETRY_TIMEOUT = 90          # seconds before giving up and aborting the scan
 _FLUSH_INTERVAL = 60  # flush accumulated records at least every minute
 
 
@@ -308,13 +336,22 @@ def cmd_scan(args) -> None:
         # -------------------------------------------------------------------
         # 2. Fetch cache
         # -------------------------------------------------------------------
+        if not quiet:
+            sys.stderr.write("Fetching file cache...")
+            sys.stderr.flush()
         try:
             cache_resp = client.get("/files/cache", params={"host": host, "root": root_path})
+            # Response is compact array-of-arrays: [path, mtime, size_bytes]
             cache: dict[str, dict] = {
-                entry["path"]: {"mtime": entry["mtime"], "size_bytes": entry["size_bytes"]}
+                entry[0]: {"mtime": entry[1], "size_bytes": entry[2]}
                 for entry in cache_resp.get("files", [])
             }
+            if not quiet:
+                sys.stderr.write(f" {len(cache):,} entries.\n")
+                sys.stderr.flush()
         except Exception as e:
+            if not quiet:
+                sys.stderr.write("\n")
             print(f"sift: warning — could not fetch cache: {e}", file=sys.stderr)
             cache = {}
 
@@ -331,6 +368,7 @@ def cmd_scan(args) -> None:
             "files_hashed": 0,
             "files_skipped": 0,
             "bytes_scanned": 0,
+            "bytes_hashed": 0,
             "read_errors": 0,
         }
 
@@ -346,18 +384,29 @@ def cmd_scan(args) -> None:
                 )
             _error_log_fh.write(path + "\n")
 
-        _progress_interval = 1.0  # seconds between progress updates
-        _last_progress = time.time()
+        _stats_progress_interval = 1.0   # stats line refresh cadence
+        _file_progress_interval = 0.10   # current-file line refresh cadence
+        _last_stats_progress = time.time()
+        _last_file_progress = _last_stats_progress
         _last_flush_time = time.time()
 
+        def _maybe_render_progress(now: float) -> None:
+            nonlocal _last_stats_progress, _last_file_progress
+            if quiet:
+                return
+            if now - _last_stats_progress >= _stats_progress_interval:
+                _print_progress(stats, scan_start, display)
+                _last_stats_progress = now
+                _last_file_progress = now
+            elif now - _last_file_progress >= _file_progress_interval:
+                _print_current_file_only(display)
+                _last_file_progress = now
+
         def _on_chunk(_nbytes: int) -> None:
-            nonlocal _last_progress
             if quiet:
                 return
             now = time.time()
-            if now - _last_progress >= _progress_interval:
-                _print_progress(stats, scan_start, display)
-                _last_progress = now
+            _maybe_render_progress(now)
 
         onerror = _onerror_debug if debug else _onerror
 
@@ -482,6 +531,7 @@ def cmd_scan(args) -> None:
                             else:
                                 if inode_key is not None:
                                     seen_inodes[inode_key] = hash_val
+                                stats["bytes_hashed"] += stat_result.st_size
                                 upsert_records.append(_make_record(
                                     host=host, drive=drive, path=path_lower, path_display=path_display,
                                     filename=filename, ext=ext, file_category=category,
@@ -525,9 +575,7 @@ def cmd_scan(args) -> None:
 
                 # Progress update
                 now = time.time()
-                if not quiet and now - _last_progress >= _progress_interval:
-                    _print_progress(stats, scan_start, display)
-                    _last_progress = now
+                _maybe_render_progress(now)
 
         display["current_file"] = ""
         if _error_log_fh is not None:
