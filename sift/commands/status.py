@@ -108,7 +108,14 @@ def cmd_status(args) -> None:
     if filter_host:
         runs = [r for r in runs if r["host"] == filter_host]
 
-    scanning = {r["host"] for r in runs if r.get("status") == "running"}
+    scanning = set()
+    seen_hosts = set()
+    for r in runs:
+        host = r["host"]
+        if host not in seen_hosts:
+            seen_hosts.add(host)
+            if r.get("status") == "running":
+                scanning.add(host)
 
     if hosts:
         rows = []
