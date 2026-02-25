@@ -28,6 +28,49 @@ def _human_size(n: int | None) -> str:
     return f"{n:.1f}P"
 
 
+def _restore_root_case(root_path: str | None, sample_display_path: str | None) -> str:
+    """Best-effort restoration of root path casing using a sample path_display."""
+    if not root_path:
+        return "?"
+    if root_path == "/" or not sample_display_path:
+        return root_path
+
+    root_parts = root_path.split("/")
+    display_parts = sample_display_path.split("/")
+
+    # Both are absolute POSIX-style paths in the API model, so index 0 is "".
+    if not root_parts or not display_parts or root_parts[0] != "" or display_parts[0] != "":
+        return root_path
+
+    restored = [""]
+    for i in range(1, len(root_parts)):
+        rp = root_parts[i]
+        if i >= len(display_parts):
+            return root_path
+        dp = display_parts[i]
+        if dp.lower() != rp.lower():
+            return root_path
+        restored.append(dp)
+
+    out = "/".join(restored)
+    return out or "/"
+
+
+def _display_scan_root(host: str, root_path: str | None) -> str:
+    """Resolve display-cased scan root using files.path_display as source of truth."""
+    if not root_path:
+        return "?"
+    if root_path == "/":
+        return "/"
+
+    try:
+        rows = client.get("/files", params={"host": host, "path_prefix": root_path, "limit": 1})
+        sample = rows[0]["path_display"] if rows else None
+        return _restore_root_case(root_path, sample)
+    except Exception:
+        return root_path
+
+
 def cmd_status(args) -> None:
     print_server_info()
     filter_host = getattr(args, "host", None)
@@ -44,7 +87,7 @@ def cmd_status(args) -> None:
         f"{overview.get('total_files', 0):,} files  ·  "
         f"{_human_size(overview.get('total_bytes'))}  ·  "
         f"{overview.get('duplicate_sets', 0):,} dup sets  ·  "
-        f"{_human_size(overview.get('wasted_bytes'))} wasted"
+        f"{_human_size(overview.get('wasted_bytes'))} duplicated"
     )
     print()
 
@@ -65,21 +108,44 @@ def cmd_status(args) -> None:
     if filter_host:
         runs = [r for r in runs if r["host"] == filter_host]
 
-    scanning = {r["host"] for r in runs if r["status"] == "running"}
+    scanning = {r["host"] for r in runs if r.get("status") == "running"}
 
     if hosts:
-        name_w = max(len(h["host"]) for h in hosts)
-        print(f"  {'host':<{name_w}}  {'files':>8}  {'size':>7}  {'hashed':>8}  {'last scan':<20}  scan root")
-        print(f"  {'-'*name_w}  {'------':>8}  {'-------':>7}  {'------':>8}  {'-'*20}  ---------")
+        rows = []
         for h in hosts:
-            last = "scanning..." if h["host"] in scanning else _fmt_dt(h.get("last_scan_at"))
+            host = h["host"]
+
+            last = "scanning..." if host in scanning else _fmt_dt(h.get("last_scan_at"))
+            root = _display_scan_root(host, h.get("last_scan_root"))
+
+            rows.append({
+                "host": host,
+                "files": f"{h.get('total_files', 0):,}",
+                "size": _human_size(h.get('total_bytes')),
+                "hashed": f"{h.get('total_hashed', 0):,}",
+                "last_scan": last,
+                "scan_root": root,
+            })
+
+        host_w = max(len("host"), max(len(r["host"]) for r in rows))
+        files_w = max(len("files"), max(len(r["files"]) for r in rows))
+        size_w = max(len("size"), max(len(r["size"]) for r in rows))
+        hashed_w = max(len("hashed"), max(len(r["hashed"]) for r in rows))
+        last_w = max(len("last scan"), max(len(r["last_scan"]) for r in rows))
+
+        print(
+            f"  {'host':<{host_w}}  {'files':>{files_w}}  {'size':>{size_w}}"
+            f"  {'hashed':>{hashed_w}}  {'last scan':<{last_w}}  scan root"
+        )
+        print(
+            f"  {'-' * host_w}  {'-' * files_w}  {'-' * size_w}"
+            f"  {'-' * hashed_w}  {'-' * last_w}  {'-' * len('scan root')}"
+        )
+
+        for r in rows:
             print(
-                f"  {h['host']:<{name_w}}"
-                f"  {h.get('total_files', 0):>8,}"
-                f"  {_human_size(h.get('total_bytes')):>7}"
-                f"  {h.get('total_hashed', 0):>8,}"
-                f"  {last:<20}"
-                f"  {h.get('last_scan_root') or '?'}"
+                f"  {r['host']:<{host_w}}  {r['files']:>{files_w}}  {r['size']:>{size_w}}"
+                f"  {r['hashed']:>{hashed_w}}  {r['last_scan']:<{last_w}}  {r['scan_root']}"
             )
         print()
 
