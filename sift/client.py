@@ -52,3 +52,10 @@ def patch(path: str, data: Any) -> Any:
     resp = _get_session().patch(api_url(path), json=data, timeout=(5, 30))
     resp.raise_for_status()
     return resp.json()
+
+
+def get_stream(path: str, params: dict | None = None) -> requests.Response:
+    """Return a streaming Response. Caller should use as a context manager."""
+    resp = _get_session().get(api_url(path), params=params, timeout=(5, 120), stream=True)
+    resp.raise_for_status()
+    return resp

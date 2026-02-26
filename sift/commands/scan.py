@@ -1,6 +1,7 @@
 """sift scan — scan a directory and POST file metadata to the server."""
 from __future__ import annotations
 
+import json
 import math
 import os
 import sys
@@ -352,17 +353,20 @@ def cmd_scan(args) -> None:
         # 2. Fetch cache
         # -------------------------------------------------------------------
         if not quiet:
-            sys.stderr.write("Fetching file cache...")
+            sys.stderr.write("Fetching file cache: 0")
             sys.stderr.flush()
         try:
-            cache_resp = client.get("/files/cache", params={"host": host, "root": root_path})
-            # Response is compact array-of-arrays: [path, mtime, size_bytes]
-            cache: dict[str, dict] = {
-                entry[0]: {"mtime": entry[1], "size_bytes": entry[2]}
-                for entry in cache_resp.get("files", [])
-            }
+            cache: dict[str, dict] = {}
+            with client.get_stream("/files/cache/stream", params={"host": host, "root": root_path}) as resp:
+                for line in resp.iter_lines():
+                    if line:
+                        entry = json.loads(line)
+                        cache[entry[0]] = {"mtime": entry[1], "size_bytes": entry[2]}
+                        if not quiet and len(cache) % 10_000 == 0:
+                            sys.stderr.write(f"\rFetching file cache: {len(cache):,}")
+                            sys.stderr.flush()
             if not quiet:
-                sys.stderr.write(f" {len(cache):,} entries.\n")
+                sys.stderr.write(f"\rFetching file cache: {len(cache):,} entries.\n")
                 sys.stderr.flush()
         except Exception as e:
             if not quiet:

@@ -7,7 +7,11 @@ import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
+import json
+
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from server import db
@@ -37,6 +41,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="sift", version="0.1.0", lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # Static frontend is mounted AFTER all API routes (see bottom of file)
 
@@ -192,6 +197,25 @@ def get_cache(host: str, root: str):
         [host, root_lower + "/%", root_lower],
     )
     return {"files": [[r[0], r[1], r[2]] for r in rows]}
+
+
+@app.get("/files/cache/stream")
+def get_cache_stream(host: str, root: str):
+    """Stream cache entries as NDJSON — one JSON array per line.
+    Rows are fetched under the lock then streamed from memory, so the
+    lock is held only for the DB query, not the entire HTTP transfer."""
+    root_lower = root.lower()
+    rows = db.query(
+        "SELECT path, mtime, size_bytes FROM files "
+        "WHERE host = ? AND (path LIKE ? OR path = ?)",
+        [host, root_lower + "/%", root_lower],
+    )
+
+    def generate():
+        for r in rows:
+            yield json.dumps([r[0], r[1], r[2]]) + "\n"
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
 # ---------------------------------------------------------------------------
