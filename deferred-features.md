@@ -104,6 +104,85 @@ No further server changes needed for stats.
 
 ---
 
+## APFS Dataless / Cloud-Stub File Handling
+
+**Context / Why this matters:**
+`sift scan` is extremely slow on macOS machines with large Apple Mail libraries or iCloud Drive
+folders. The cause: `.partial.emlx` and APFS "dataless" stub files — files that appear to have
+content (`st_size > 0`) but have no local disk blocks (`st_blocks == 0`). Reading them triggers
+an on-demand download from Apple's servers, turning a microsecond hash into a multi-second stall
+per file. A Mail library can contain hundreds of thousands of such files.
+
+**Detection methods:**
+- **General (APFS cloud stubs):** `stat_result.st_blocks == 0` — reliable on APFS for any file
+  that has been evicted to iCloud (Drive, Photos, Mail, etc.). macOS-only; no-op on Linux/Windows.
+- **Specific (Mail partials):** `.partial.emlx` extension — Apple Mail partial downloads. May have
+  some blocks allocated but content is incomplete; hash would be meaningless.
+
+**Three categories of "cloud" files (different treatment):**
+1. **APFS dataless stubs (`st_blocks == 0`):** Bytes not on local disk. Record with
+   `skipped_reason="macos_dataless"`, DO NOT hash. These don't count as local copies for LAN
+   dedup purposes — they physically don't exist on the LAN.
+2. **Partial files (`.partial.emlx`):** Some local bytes but incomplete. Same treatment:
+   record, skip hash, `skipped_reason="macos_dataless"`.
+3. **"Optimized" files that ARE locally present:** Photos originals on the MacBook, Documents
+   actively in use — these have `st_blocks > 0` even when iCloud-backed. The `st_blocks` check
+   correctly allows these through for normal hashing. Do NOT exclude them.
+
+**Why NOT hash dataless/partial files:**
+- Hash is meaningless for dedup — partial content never matches a full copy of the same file
+- Reading triggers a slow iCloud/Mail server network download
+- `.partial.emlx` is transient — gets replaced with full `.emlx` when fully fetched, making
+  stored hash immediately stale
+- `st_blocks == 0` files have zero bytes on local SSD — nothing to hash
+
+**Why still RECORD them (don't skip entirely):**
+- Inventory visibility: useful to know a machine "has" 200k Mail messages even if partial
+- `skipped_reason="macos_dataless"` distinguishes "not hashed because cloud" from permission
+  errors or volatile files — important for future analysis
+- Leaves door open for future cloud-dup features without re-scanning
+
+**The "cloud duplicate" philosophical question:**
+Today sift answers: "same bytes exist on multiple LAN hosts." A cloud dup would mean "same
+bytes exist on a LAN host AND in iCloud." This is a fundamentally different relationship:
+- Different tooling needed (Apple CloudKit APIs, not filesystem reads)
+- Out of scope for core LAN dedup mission
+- Not addressable via `st_blocks` detection alone
+- **Deferred indefinitely — likely out of scope entirely**
+
+**Photos library nuance (deferred):**
+macOS Photos can store "optimized" (lower-res) thumbnails locally while originals live in
+iCloud. The thumbnail IS a locally-allocated file (`st_blocks > 0`) but is not the original.
+Detecting this requires inspecting xattrs or the Photos library database — complex, out of
+scope for the initial fix. The `st_blocks` approach handles the zero-block case correctly
+and won't interfere with locally-present Photos originals.
+
+**Recommended implementation (near term):**
+
+In `sift/commands/scan.py`, after `stat_result = os.stat(sp)` and before the hash check, add:
+
+```python
+# macOS: skip APFS dataless stubs (cloud-evicted files have no local blocks)
+if source_os == "darwin" and stat_result.st_blocks == 0:
+    upsert_records.append(_make_record(
+        ..., hash_val=None, skipped_reason="macos_dataless", ...
+    ))
+    stats["files_skipped"] += 1
+    continue
+```
+
+Also route `.partial.emlx` files to the same `skipped_reason="macos_dataless"` path
+(record in inventory, skip hash) rather than excluding them entirely.
+
+Note: `st_blocks` is in 512-byte units on macOS. `st_blocks == 0` means truly no allocated
+blocks. Sparse files edge case not worth special-casing here.
+
+**Files to modify:**
+- `sift/commands/scan.py` — main scan loop, after stat(), before hash check
+- Verify `get_source_os()` in `sift/normalize.py` returns `"darwin"` on macOS
+
+---
+
 ## Scan Cache Performance / Data Store Optimization
 
 **Context:** At scan startup, `GET /files/cache` fetches every previously-indexed file (path +

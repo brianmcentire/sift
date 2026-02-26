@@ -67,7 +67,9 @@ def _precount_files(
                             if not is_excluded_dir(entry.path, entry.name, source_os, allow_unraid_disks):
                                 stack.append(entry.path)
                         elif entry.is_file(follow_symlinks=False):
-                            count += 1
+                            ext, _ = classify_file(entry.name)
+                            if not is_excluded_file(entry.name, ext):
+                                count += 1
                     except OSError:
                         pass
         except OSError:
@@ -110,11 +112,13 @@ def _print_progress(
     # Pick up precount total as soon as the background thread writes it
     if display["total"] is None and "count" in display.get("precount", {}):
         display["total"] = display["precount"]["count"]
+        display["total_is_estimate"] = True
 
     total = display["total"]
+    total_label = f"~{total:,}" if display.get("total_is_estimate") else f"{total:,}"
     if total is not None and total > 0:
         line1 = (
-            f"Scanned {stats['files_scanned']:,} of {total:,} files"
+            f"Scanned {stats['files_scanned']:,} of {total_label} files"
             f" | {files_rate:,.0f} files/s"
             f" | {mb_rate:.1f} MB/s"
             f" | {_format_size(stats['bytes_scanned'])}"
@@ -366,6 +370,7 @@ def cmd_scan(args) -> None:
         stats = {
             "files_scanned": 0,
             "files_hashed": 0,
+            "files_cached": 0,
             "files_skipped": 0,
             "bytes_scanned": 0,
             "bytes_hashed": 0,
@@ -545,6 +550,7 @@ def cmd_scan(args) -> None:
                     else:
                         # Unchanged — just update last_seen_at
                         seen_paths.append({"drive": drive, "path": path_lower})
+                        stats["files_cached"] += 1
 
                 except PermissionError as e:
                     if debug:
@@ -608,9 +614,10 @@ def cmd_scan(args) -> None:
             f", {stats['read_errors']:,} read errors (see {_error_log_path})"
             if stats["read_errors"] else ""
         )
+        cached_str = f", {stats['files_cached']:,} cached" if stats["files_cached"] else ""
         print(
             f"\nScan complete: {stats['files_scanned']:,} files scanned, "
-            f"{stats['files_hashed']:,} hashed, "
+            f"{stats['files_hashed']:,} hashed{cached_str}, "
             f"{stats['files_skipped']:,} skipped, "
             f"{_format_size(stats['bytes_scanned'])} total, "
             f"{_format_duration(elapsed)} elapsed{err_suffix}",
