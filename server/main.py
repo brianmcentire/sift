@@ -66,8 +66,8 @@ def create_scan_run(body: ScanRunCreate):
 
 @app.patch("/scan-runs/{run_id}")
 def patch_scan_run(run_id: int, body: ScanRunPatch):
-    if body.status not in ("complete", "failed"):
-        raise HTTPException(400, "status must be 'complete' or 'failed'")
+    if body.status not in ("complete", "failed", "interrupted"):
+        raise HTTPException(400, "status must be 'complete', 'failed', or 'interrupted'")
     db.execute(
         "UPDATE scan_runs SET status = ? WHERE id = ?",
         [body.status, run_id],
@@ -495,17 +495,19 @@ def stats_overview(
         host_where = f"AND host IN ({placeholders})"
 
     row = db.query_one(f"""
+        WITH dup_hashes AS (
+            SELECT hash FROM files
+            WHERE hash IS NOT NULL {host_where}
+            GROUP BY hash HAVING COUNT(*) > 1
+        )
         SELECT
             COUNT(*) AS total_files,
-            COUNT(DISTINCT host) AS total_hosts,
-            COUNT(DISTINCT hash) FILTER (WHERE hash IS NOT NULL) AS unique_hashes,
-            COUNT(*) FILTER (WHERE hash IN (
-                SELECT hash FROM files
-                WHERE hash IS NOT NULL {host_where}
-                GROUP BY hash HAVING COUNT(*) > 1
-            )) AS dup_files,
-            SUM(size_bytes) AS total_bytes
-        FROM files
+            COUNT(DISTINCT f.host) AS total_hosts,
+            COUNT(DISTINCT f.hash) FILTER (WHERE f.hash IS NOT NULL) AS unique_hashes,
+            COUNT(*) FILTER (WHERE dh.hash IS NOT NULL) AS dup_files,
+            SUM(f.size_bytes) AS total_bytes
+        FROM files f
+        LEFT JOIN dup_hashes dh ON f.hash = dh.hash
         WHERE 1=1 {host_where}
     """, host_list + host_list)
 

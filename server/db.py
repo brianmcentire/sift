@@ -88,6 +88,10 @@ def init_db(db_path: str | None = None) -> None:
             return
         path = db_path or get_db_path()
         _conn = duckdb.connect(path)
+        # Cap parallelism so bulk queries don't saturate all cores on a shared host.
+        # DuckDB defaults to using every available core.
+        max_threads = int(os.environ.get("SIFT_DB_THREADS", "4"))
+        _conn.execute(f"SET threads TO {max_threads}")
         for stmt in _split_statements(SCHEMA_SQL):
             if stmt.strip():
                 _conn.execute(stmt)
