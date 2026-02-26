@@ -39,9 +39,12 @@ class TestIsMacosDataless:
     def test_partial_emlx_linux_not_dataless(self):
         assert not _is_macos_dataless("12345.partial.emlx", st_blocks=8, source_os="linux")
 
-    def test_regular_emlx_not_dataless(self):
-        # A fully-downloaded mail message should be hashed
-        assert not _is_macos_dataless("12345.emlx", st_blocks=8, source_os="darwin")
+    def test_regular_emlx_darwin_is_dataless(self):
+        # .emlx with st_blocks > 0 can still trigger iCloud downloads (partially cached)
+        assert _is_macos_dataless("12345.emlx", st_blocks=8, source_os="darwin")
+
+    def test_regular_emlx_linux_not_dataless(self):
+        assert not _is_macos_dataless("12345.emlx", st_blocks=8, source_os="linux")
 
     # -- Combined: zero blocks + partial.emlx ------------------------------
 

@@ -80,8 +80,17 @@ def _precount_files(
 
 
 def _is_macos_dataless(filename: str, st_blocks: int, source_os: str) -> bool:
-    """Return True for APFS cloud-evicted stubs and Apple Mail partial downloads."""
-    return source_os == "darwin" and (st_blocks == 0 or filename.endswith(".partial.emlx"))
+    """Return True for APFS cloud-evicted stubs and Apple Mail files.
+
+    .emlx files (including .partial.emlx) can trigger on-demand iCloud downloads
+    even when st_blocks > 0 — macOS may have only headers cached locally.
+    Skip all of them rather than risking a per-file network fetch.
+    """
+    if source_os != "darwin":
+        return False
+    if st_blocks == 0:
+        return True
+    return filename.endswith(".emlx")
 
 
 def _format_size(n: Optional[int]) -> str:
