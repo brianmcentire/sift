@@ -79,6 +79,11 @@ def _precount_files(
         result["count"] = count
 
 
+def _is_macos_dataless(filename: str, st_blocks: int, source_os: str) -> bool:
+    """Return True for APFS cloud-evicted stubs and Apple Mail partial downloads."""
+    return source_os == "darwin" and (st_blocks == 0 or filename.endswith(".partial.emlx"))
+
+
 def _format_size(n: Optional[int]) -> str:
     if n is None:
         return "0 B"
@@ -115,8 +120,8 @@ def _print_progress(
         display["total_is_estimate"] = True
 
     total = display["total"]
-    total_label = f"~{total:,}" if display.get("total_is_estimate") else f"{total:,}"
     if total is not None and total > 0:
+        total_label = f"~{total:,}" if display.get("total_is_estimate") else f"{total:,}"
         line1 = (
             f"Scanned {stats['files_scanned']:,} of {total_label} files"
             f" | {files_rate:,.0f} files/s"
@@ -484,9 +489,7 @@ def cmd_scan(args) -> None:
                     display["current_file"] = raw_path
 
                     # macOS: skip APFS dataless stubs and Mail partial downloads — no local bytes to hash
-                    if source_os == "darwin" and (
-                        stat_result.st_blocks == 0 or filename.endswith(".partial.emlx")
-                    ):
+                    if _is_macos_dataless(filename, stat_result.st_blocks, source_os):
                         if debug:
                             _debug(f"[macos_dataless] {raw_path}")
                         upsert_records.append(_make_record(
