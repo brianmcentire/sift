@@ -29,6 +29,7 @@ def _human_size(n: int | None) -> str:
 
 
 def cmd_status(args) -> None:
+    print()
     print_server_info()
     filter_host = getattr(args, "host", None)
     show_stats = getattr(args, "stats", False)
