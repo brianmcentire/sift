@@ -33,11 +33,20 @@ CREATE TABLE IF NOT EXISTS files (
 );
 
 CREATE TABLE IF NOT EXISTS scan_runs (
-    id          BIGINT      PRIMARY KEY DEFAULT nextval('scan_run_id_seq'),
-    host        TEXT        NOT NULL,
-    root_path   TEXT        NOT NULL,
-    started_at  TIMESTAMPTZ NOT NULL,
-    status      TEXT        DEFAULT 'running'
+    id                BIGINT      PRIMARY KEY DEFAULT nextval('scan_run_id_seq'),
+    host              TEXT        NOT NULL,
+    root_path         TEXT        NOT NULL,
+    root_path_display TEXT,
+    started_at        TIMESTAMPTZ NOT NULL,
+    status            TEXT        DEFAULT 'running'
+);
+
+CREATE TABLE IF NOT EXISTS host_stats (
+    host            TEXT    PRIMARY KEY,
+    total_files     BIGINT  NOT NULL DEFAULT 0,
+    total_bytes     BIGINT  NOT NULL DEFAULT 0,
+    total_hashed    BIGINT  NOT NULL DEFAULT 0,
+    updated_at      TIMESTAMPTZ NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_hash      ON files(hash);
@@ -79,6 +88,26 @@ def _run_migrations(conn: duckdb.DuckDBPyConnection) -> None:
     ]:
         if col not in existing:
             conn.execute(ddl)
+
+    # Add root_path_display to scan_runs if missing (pre-0.3.11 databases)
+    sr_cols = {
+        row[0]
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'scan_runs'"
+        ).fetchall()
+    }
+    if "root_path_display" not in sr_cols:
+        conn.execute("ALTER TABLE scan_runs ADD COLUMN root_path_display TEXT")
+
+    # Backfill host_stats if empty (one-time on upgrade)
+    hs_count = conn.execute("SELECT COUNT(*) FROM host_stats").fetchone()[0]
+    if hs_count == 0:
+        conn.execute("""
+            INSERT INTO host_stats (host, total_files, total_bytes, total_hashed, updated_at)
+            SELECT host, COUNT(*), COALESCE(SUM(size_bytes), 0),
+                   COUNT(CASE WHEN hash IS NOT NULL THEN 1 END), now()
+            FROM files GROUP BY host
+        """)
 
 
 def init_db(db_path: str | None = None) -> None:
@@ -135,3 +164,25 @@ def executemany(sql: str, data: list[list[Any]]) -> None:
     with _lock:
         conn = get_connection()
         conn.executemany(sql, data)
+
+
+def refresh_host_stats(host: str) -> None:
+    """Recompute and store aggregate stats for a single host."""
+    with _lock:
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0), "
+            "COUNT(CASE WHEN hash IS NOT NULL THEN 1 END) "
+            "FROM files WHERE host = ?",
+            [host],
+        ).fetchone()
+        total_files, total_bytes, total_hashed = row
+        conn.execute(
+            "DELETE FROM host_stats WHERE host = ?",
+            [host],
+        )
+        conn.execute(
+            "INSERT INTO host_stats (host, total_files, total_bytes, total_hashed, updated_at) "
+            "VALUES (?, ?, ?, ?, now())",
+            [host, total_files, total_bytes, total_hashed],
+        )

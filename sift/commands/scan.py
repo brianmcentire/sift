@@ -284,7 +284,7 @@ def cmd_scan(args) -> None:
     root_dev = os.stat(walk_root).st_dev if one_filesystem else None
 
     # Normalize root path for storage
-    root_path, _, _ = normalize_path_for_storage(root, source_os)
+    root_path, root_path_display, _ = normalize_path_for_storage(root, source_os)
 
     if getattr(args, "ask", False):
         from sift.config import get_server_url
@@ -322,6 +322,7 @@ def cmd_scan(args) -> None:
         run_resp = client.post("/scan-runs", {
             "host": host,
             "root_path": root_path,
+            "root_path_display": root_path_display,
             "started_at": scan_start_iso,
         })
         run_id = run_resp["id"]

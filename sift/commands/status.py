@@ -28,77 +28,44 @@ def _human_size(n: int | None) -> str:
     return f"{n:.1f}P"
 
 
-def _restore_root_case(root_path: str | None, sample_display_path: str | None) -> str:
-    """Best-effort restoration of root path casing using a sample path_display."""
-    if not root_path:
-        return "?"
-    if root_path == "/" or not sample_display_path:
-        return root_path
-
-    root_parts = root_path.split("/")
-    display_parts = sample_display_path.split("/")
-
-    # Both are absolute POSIX-style paths in the API model, so index 0 is "".
-    if not root_parts or not display_parts or root_parts[0] != "" or display_parts[0] != "":
-        return root_path
-
-    restored = [""]
-    for i in range(1, len(root_parts)):
-        rp = root_parts[i]
-        if i >= len(display_parts):
-            return root_path
-        dp = display_parts[i]
-        if dp.lower() != rp.lower():
-            return root_path
-        restored.append(dp)
-
-    out = "/".join(restored)
-    return out or "/"
-
-
-def _display_scan_root(host: str, root_path: str | None) -> str:
-    """Resolve display-cased scan root using files.path_display as source of truth."""
-    if not root_path:
-        return "?"
-    if root_path == "/":
-        return "/"
-
-    try:
-        rows = client.get("/files", params={"host": host, "path_prefix": root_path, "limit": 1})
-        sample = rows[0]["path_display"] if rows else None
-        return _restore_root_case(root_path, sample)
-    except Exception:
-        return root_path
-
-
 def cmd_status(args) -> None:
     print_server_info()
     filter_host = getattr(args, "host", None)
-
-    try:
-        overview = client.get("/stats/overview")
-    except Exception as e:
-        print(f"sift: cannot reach server: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    print(
-        f"sift {get_version()}  ·  "
-        f"{overview.get('total_hosts', 0)} hosts  ·  "
-        f"{overview.get('total_files', 0):,} files  ·  "
-        f"{_human_size(overview.get('total_bytes'))}  ·  "
-        f"{overview.get('duplicate_sets', 0):,} dup sets  ·  "
-        f"{_human_size(overview.get('wasted_bytes'))} duplicated"
-    )
-    print()
+    show_stats = getattr(args, "stats", False)
 
     try:
         hosts = client.get("/hosts")
     except Exception as e:
-        print(f"sift: cannot fetch hosts: {e}", file=sys.stderr)
-        return
+        print(f"sift: cannot reach server: {e}", file=sys.stderr)
+        sys.exit(1)
 
     if filter_host:
         hosts = [h for h in hosts if h["host"] == filter_host]
+
+    # Compute totals from /hosts response (no full-table scan needed)
+    total_hosts = len(hosts)
+    total_files = sum(h.get("total_files", 0) for h in hosts)
+    total_bytes = sum(h.get("total_bytes") or 0 for h in hosts)
+
+    summary = (
+        f"sift {get_version()}  ·  "
+        f"{total_hosts} hosts  ·  "
+        f"{total_files:,} files  ·  "
+        f"{_human_size(total_bytes)}"
+    )
+
+    if show_stats:
+        try:
+            overview = client.get("/stats/overview")
+            summary += (
+                f"  ·  {overview.get('duplicate_sets', 0):,} dup sets  ·  "
+                f"{_human_size(overview.get('wasted_bytes'))} duplicated"
+            )
+        except Exception as e:
+            summary += f"  ·  (dup stats unavailable: {e})"
+
+    print(summary)
+    print()
 
     try:
         runs = client.get("/scan-runs", params={"limit": 10})
@@ -123,7 +90,7 @@ def cmd_status(args) -> None:
             host = h["host"]
 
             last = "scanning..." if host in scanning else _fmt_dt(h.get("last_scan_at"))
-            root = _display_scan_root(host, h.get("last_scan_root"))
+            root = h.get("last_scan_root") or "?"
 
             rows.append({
                 "host": host,
@@ -160,8 +127,9 @@ def cmd_status(args) -> None:
     if verbose and runs:
         print("recent scans")
         for r in runs:
+            root = r.get("root_path_display") or r["root_path"]
             print(
-                f"  [{r['id']}] {r['host']}:{r['root_path']}"
+                f"  [{r['id']}] {r['host']}:{root}"
                 f"  {r['status']}"
                 f"  {_fmt_dt(r.get('started_at'))}"
             )

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import socket
+import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -47,14 +48,23 @@ app = FastAPI(title="sift", version="0.1.0", lifespan=lifespan)
 @app.post("/scan-runs", response_model=ScanRunCreatedResponse)
 def create_scan_run(body: ScanRunCreate):
     # Abandon any prior 'running' scans for same host + root_path
-    db.execute(
-        "UPDATE scan_runs SET status = 'failed' "
-        "WHERE host = ? AND root_path = ? AND status = 'running'",
+    stale = db.query(
+        "SELECT id FROM scan_runs WHERE host = ? AND root_path = ? AND status = 'running'",
         [body.host, body.root_path],
     )
+    if stale:
+        db.execute(
+            "UPDATE scan_runs SET status = 'failed' "
+            "WHERE host = ? AND root_path = ? AND status = 'running'",
+            [body.host, body.root_path],
+        )
+        # Crashed/stale scan — refresh stats so they reflect reality
+        db.refresh_host_stats(body.host)
+        _invalidate_stats_cache()
     db.execute(
-        "INSERT INTO scan_runs (host, root_path, started_at, status) VALUES (?, ?, ?, 'running')",
-        [body.host, body.root_path, body.started_at.isoformat()],
+        "INSERT INTO scan_runs (host, root_path, root_path_display, started_at, status) "
+        "VALUES (?, ?, ?, ?, 'running')",
+        [body.host, body.root_path, body.root_path_display, body.started_at.isoformat()],
     )
     row = db.query_one(
         "SELECT id FROM scan_runs WHERE host = ? AND root_path = ? AND status = 'running' "
@@ -68,10 +78,15 @@ def create_scan_run(body: ScanRunCreate):
 def patch_scan_run(run_id: int, body: ScanRunPatch):
     if body.status not in ("complete", "failed", "interrupted"):
         raise HTTPException(400, "status must be 'complete', 'failed', or 'interrupted'")
+    # Look up host before UPDATE so we can refresh its stats
+    row = db.query_one("SELECT host FROM scan_runs WHERE id = ?", [run_id])
     db.execute(
         "UPDATE scan_runs SET status = ? WHERE id = ?",
         [body.status, run_id],
     )
+    if row:
+        db.refresh_host_stats(row[0])
+        _invalidate_stats_cache()
     return {"ok": True}
 
 
@@ -79,18 +94,19 @@ def patch_scan_run(run_id: int, body: ScanRunPatch):
 def list_scan_runs(host: Optional[str] = None, limit: int = Query(50, le=500)):
     if host:
         rows = db.query(
-            "SELECT id, host, root_path, started_at, status FROM scan_runs "
+            "SELECT id, host, root_path, root_path_display, started_at, status FROM scan_runs "
             "WHERE host = ? ORDER BY id DESC LIMIT ?",
             [host, limit],
         )
     else:
         rows = db.query(
-            "SELECT id, host, root_path, started_at, status FROM scan_runs "
+            "SELECT id, host, root_path, root_path_display, started_at, status FROM scan_runs "
             "ORDER BY id DESC LIMIT ?",
             [limit],
         )
     return [
-        ScanRunResponse(id=r[0], host=r[1], root_path=r[2], started_at=r[3], status=r[4])
+        ScanRunResponse(id=r[0], host=r[1], root_path=r[2], root_path_display=r[3],
+                        started_at=r[4], status=r[5])
         for r in rows
     ]
 
@@ -136,6 +152,7 @@ def upsert_files(records: list[FileRecord]):
         for r in records
     ]
     db.executemany(sql, data)
+    _invalidate_stats_cache()
     return {"upserted": len(records)}
 
 
@@ -445,29 +462,23 @@ def init_data(request: Request, path: str = "/", min_size: int = Query(0, ge=0))
 @app.get("/hosts", response_model=list[HostEntry])
 def list_hosts():
     rows = db.query("""
-        WITH all_hosts AS (
-            SELECT host FROM files
-            UNION
-            SELECT host FROM scan_runs
-        ),
-        latest_run AS (
-            SELECT host, root_path, started_at,
+        WITH latest_run AS (
+            SELECT host, root_path, root_path_display, started_at,
                    ROW_NUMBER() OVER (PARTITION BY host ORDER BY id DESC) AS rn
             FROM scan_runs
+        ),
+        latest_complete AS (
+            SELECT host, MAX(started_at) AS last_scan_at
+            FROM scan_runs WHERE status = 'complete'
+            GROUP BY host
         )
-        SELECT
-            ah.host,
-            MAX(sr.started_at) AS last_scan_at,
-            ANY_VALUE(lr.root_path) AS last_scan_root,
-            COUNT(f.path) AS total_files,
-            SUM(f.size_bytes) AS total_bytes,
-            COUNT(CASE WHEN f.hash IS NOT NULL THEN 1 END) AS total_hashed
-        FROM all_hosts ah
-        LEFT JOIN files f ON f.host = ah.host
-        LEFT JOIN scan_runs sr ON sr.host = ah.host AND sr.status = 'complete'
-        LEFT JOIN latest_run lr ON lr.host = ah.host AND lr.rn = 1
-        GROUP BY ah.host
-        ORDER BY ah.host
+        SELECT hs.host, lc.last_scan_at,
+               COALESCE(lr.root_path_display, lr.root_path) AS last_scan_root,
+               hs.total_files, hs.total_bytes, hs.total_hashed
+        FROM host_stats hs
+        LEFT JOIN latest_run lr ON lr.host = hs.host AND lr.rn = 1
+        LEFT JOIN latest_complete lc ON lc.host = hs.host
+        ORDER BY hs.host
     """)
     return [
         HostEntry(
@@ -482,12 +493,31 @@ def list_hosts():
 # Stats
 # ---------------------------------------------------------------------------
 
+# Simple TTL cache for /stats/overview — the dup aggregation is expensive
+# on large tables. Cache keyed by (min_size, categories, hosts); entries
+# expire after SIFT_STATS_CACHE_TTL seconds (default 60).
+_stats_cache: dict[tuple, tuple] = {}  # key -> (StatsOverview, timestamp)
+_STATS_CACHE_TTL = int(os.environ.get("SIFT_STATS_CACHE_TTL", "60"))
+
+
+def _invalidate_stats_cache() -> None:
+    """Call after any write that changes file counts or hashes."""
+    _stats_cache.clear()
+
+
 @app.get("/stats/overview", response_model=StatsOverview)
 def stats_overview(
     min_size: int = Query(0, ge=0),
     categories: str = Query("", description="Comma-separated file categories to filter dup stats"),
     hosts: str = Query("", description="Comma-separated host names to filter stats"),
 ):
+    cache_key = (min_size, categories, hosts)
+    cached = _stats_cache.get(cache_key)
+    if cached is not None:
+        result, ts = cached
+        if time.monotonic() - ts < _STATS_CACHE_TTL:
+            return result
+
     host_list = [h.strip() for h in hosts.split(',') if h.strip()] if hosts else []
     host_where = ""
     if host_list:
@@ -543,7 +573,7 @@ def stats_overview(
     duplicate_sets = dup_row[0] if dup_row else 0
     wasted_bytes = dup_row[1] if dup_row else None
 
-    return StatsOverview(
+    result = StatsOverview(
         total_files=total_files,
         total_hosts=total_hosts,
         unique_hashes=unique_hashes,
@@ -551,6 +581,8 @@ def stats_overview(
         wasted_bytes=wasted_bytes,
         total_bytes=total_bytes,
     )
+    _stats_cache[cache_key] = (result, time.monotonic())
+    return result
 
 
 @app.get("/stats/duplicates", response_model=list[DuplicateSet])

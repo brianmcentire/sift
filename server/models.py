@@ -48,6 +48,7 @@ class SeenRequest(BaseModel):
 class ScanRunCreate(BaseModel):
     host: str
     root_path: str
+    root_path_display: Optional[str] = None
     started_at: datetime
 
 
@@ -59,6 +60,7 @@ class ScanRunResponse(BaseModel):
     id: int
     host: str
     root_path: str
+    root_path_display: Optional[str] = None
     started_at: datetime
     status: str
 
