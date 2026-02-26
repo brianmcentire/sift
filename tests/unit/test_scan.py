@@ -10,54 +10,26 @@ from sift.commands.scan import _is_macos_dataless, _print_progress
 
 
 # ---------------------------------------------------------------------------
-# _is_macos_dataless
+# _is_macos_dataless — APFS cloud-evicted stubs (st_blocks == 0 on darwin)
 # ---------------------------------------------------------------------------
 
 class TestIsMacosDataless:
-    """APFS dataless stub and .partial.emlx detection."""
-
-    # -- st_blocks == 0 (iCloud-evicted) ------------------------------------
+    """st_blocks == 0 detection, gated on darwin."""
 
     def test_zero_blocks_darwin_is_dataless(self):
-        assert _is_macos_dataless("photo.jpg", st_blocks=0, source_os="darwin")
+        assert _is_macos_dataless(st_blocks=0, source_os="darwin")
 
     def test_zero_blocks_linux_not_dataless(self):
-        # st_blocks==0 is irrelevant on Linux (e.g. empty file or sparse)
-        assert not _is_macos_dataless("photo.jpg", st_blocks=0, source_os="linux")
+        assert not _is_macos_dataless(st_blocks=0, source_os="linux")
 
     def test_zero_blocks_windows_not_dataless(self):
-        assert not _is_macos_dataless("photo.jpg", st_blocks=0, source_os="windows")
+        assert not _is_macos_dataless(st_blocks=0, source_os="windows")
 
     def test_nonzero_blocks_darwin_not_dataless(self):
-        assert not _is_macos_dataless("photo.jpg", st_blocks=8, source_os="darwin")
+        assert not _is_macos_dataless(st_blocks=8, source_os="darwin")
 
-    # -- .partial.emlx (Apple Mail incomplete download) ---------------------
-
-    def test_partial_emlx_darwin_is_dataless(self):
-        assert _is_macos_dataless("12345.partial.emlx", st_blocks=8, source_os="darwin")
-
-    def test_partial_emlx_linux_not_dataless(self):
-        assert not _is_macos_dataless("12345.partial.emlx", st_blocks=8, source_os="linux")
-
-    def test_regular_emlx_darwin_is_dataless(self):
-        # .emlx with st_blocks > 0 can still trigger iCloud downloads (partially cached)
-        assert _is_macos_dataless("12345.emlx", st_blocks=8, source_os="darwin")
-
-    def test_regular_emlx_linux_not_dataless(self):
-        assert not _is_macos_dataless("12345.emlx", st_blocks=8, source_os="linux")
-
-    # -- Combined: zero blocks + partial.emlx ------------------------------
-
-    def test_zero_blocks_and_partial_emlx_darwin(self):
-        assert _is_macos_dataless("12345.partial.emlx", st_blocks=0, source_os="darwin")
-
-    # -- Normal files -------------------------------------------------------
-
-    def test_pdf_darwin_not_dataless(self):
-        assert not _is_macos_dataless("report.pdf", st_blocks=16, source_os="darwin")
-
-    def test_pdf_linux_not_dataless(self):
-        assert not _is_macos_dataless("report.pdf", st_blocks=16, source_os="linux")
+    def test_nonzero_blocks_linux_not_dataless(self):
+        assert not _is_macos_dataless(st_blocks=16, source_os="linux")
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +76,6 @@ class TestPrintProgress:
     def test_total_known_renders_percentage(self):
         display = _make_display(total=100, total_is_estimate=False)
         stats = _make_stats(files_scanned=50, bytes_scanned=1024)
-        # Should not raise
         self._call(stats, display)
 
     def test_total_estimate_renders_tilde(self):
@@ -119,6 +90,5 @@ class TestPrintProgress:
         display = _make_display(total=None)
         display["precount"] = {"count": 500}
         self._call(_make_stats(files_scanned=100), display)
-        # After call, total should be populated from precount
         assert display["total"] == 500
         assert display["total_is_estimate"] is True

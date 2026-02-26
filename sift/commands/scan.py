@@ -79,18 +79,14 @@ def _precount_files(
         result["count"] = count
 
 
-def _is_macos_dataless(filename: str, st_blocks: int, source_os: str) -> bool:
-    """Return True for APFS cloud-evicted stubs and Apple Mail files.
+def _is_macos_dataless(st_blocks: int, source_os: str) -> bool:
+    """Return True for APFS cloud-evicted stubs (st_blocks == 0 on darwin).
 
-    .emlx files (including .partial.emlx) can trigger on-demand iCloud downloads
-    even when st_blocks > 0 — macOS may have only headers cached locally.
-    Skip all of them rather than risking a per-file network fetch.
+    iCloud-managed *directory trees* (Mail, Messages, Mobile Documents) are
+    excluded at the directory level in exclusions.py — this check catches
+    individual evicted files anywhere else on the filesystem.
     """
-    if source_os != "darwin":
-        return False
-    if st_blocks == 0:
-        return True
-    return filename.endswith(".emlx")
+    return source_os == "darwin" and st_blocks == 0
 
 
 def _format_size(n: Optional[int]) -> str:
@@ -498,7 +494,7 @@ def cmd_scan(args) -> None:
                     display["current_file"] = raw_path
 
                     # macOS: skip APFS dataless stubs and Mail partial downloads — no local bytes to hash
-                    if _is_macos_dataless(filename, stat_result.st_blocks, source_os):
+                    if _is_macos_dataless(stat_result.st_blocks, source_os):
                         if debug:
                             _debug(f"[macos_dataless] {raw_path}")
                         upsert_records.append(_make_record(

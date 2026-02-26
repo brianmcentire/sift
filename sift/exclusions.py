@@ -74,6 +74,18 @@ EXCLUDED_PATH_PREFIXES_POSIX: tuple[str, ...] = (
     "/var/cache",
 )
 
+# ---------------------------------------------------------------------------
+# macOS: iCloud-managed directory subtrees (matched as path segments)
+# Reading ANY file in these trees can trigger on-demand iCloud downloads,
+# even when st_blocks > 0. Exclude the entire tree rather than playing
+# whack-a-mole with extensions.
+# ---------------------------------------------------------------------------
+EXCLUDED_DARWIN_DIR_SEGMENTS: tuple[str, ...] = (
+    "/library/mail",              # Apple Mail — .mbox bundles, attachments, etc.
+    "/library/messages",          # iMessage/SMS attachments
+    "/library/mobile documents",  # iCloud Drive per-app containers
+)
+
 # Windows: drive letter excluded paths are handled separately at scan time
 EXCLUDED_PATH_PREFIXES_WINDOWS: tuple[str, ...] = (
     "windows/system32",
@@ -170,6 +182,13 @@ def is_excluded_dir(
     else:
         for prefix in EXCLUDED_PATH_PREFIXES_POSIX:
             if path_lower == prefix or path_lower.startswith(prefix + "/"):
+                return True
+
+    # macOS: exclude iCloud-managed directory trees (Mail, Messages, iCloud Drive
+    # app containers). Any file in these trees can trigger an on-demand download.
+    if source_os == "darwin":
+        for seg in EXCLUDED_DARWIN_DIR_SEGMENTS:
+            if seg in path_lower:
                 return True
 
     # Unraid: exclude raw disk mounts (/mnt/diskN) unless --yolo was passed.

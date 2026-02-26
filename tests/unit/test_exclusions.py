@@ -105,6 +105,65 @@ class TestIsExcludedDir:
         assert not _is_unraid_disk_path("/mnt/cache")
         assert not _is_unraid_disk_path("/mnt/diskabc")
 
+    # -- macOS iCloud-managed directory exclusions --------------------------
+
+    def test_darwin_library_mail_excluded(self):
+        assert is_excluded_dir(
+            "/Users/brian/Library/Mail", "Mail", "darwin"
+        )
+
+    def test_darwin_library_mail_subdir_excluded(self):
+        assert is_excluded_dir(
+            "/Users/brian/Library/Mail/V10/[Gmail].mbox/All Mail.mbox",
+            "All Mail.mbox", "darwin",
+        )
+
+    def test_darwin_library_messages_excluded(self):
+        assert is_excluded_dir(
+            "/Users/brian/Library/Messages", "Messages", "darwin"
+        )
+
+    def test_darwin_library_messages_attachments_excluded(self):
+        assert is_excluded_dir(
+            "/Users/brian/Library/Messages/Attachments/ab",
+            "ab", "darwin",
+        )
+
+    def test_darwin_mobile_documents_excluded(self):
+        assert is_excluded_dir(
+            "/Users/brian/Library/Mobile Documents/com~apple~CloudDocs",
+            "com~apple~CloudDocs", "darwin",
+        )
+
+    def test_darwin_library_mail_not_excluded_on_linux(self):
+        # Same path on Linux should NOT trigger the darwin exclusion
+        assert not is_excluded_dir(
+            "/Users/brian/Library/Mail", "Mail", "linux"
+        )
+
+    def test_darwin_documents_not_excluded(self):
+        assert not is_excluded_dir(
+            "/Users/brian/Documents", "Documents", "darwin"
+        )
+
+    def test_darwin_desktop_not_excluded(self):
+        assert not is_excluded_dir(
+            "/Users/brian/Desktop", "Desktop", "darwin"
+        )
+
+    def test_darwin_cloud_storage_not_excluded(self):
+        # CloudStorage (Dropbox, OneDrive, etc.) should be scanned
+        assert not is_excluded_dir(
+            "/Users/brian/Library/CloudStorage/Dropbox",
+            "Dropbox", "darwin",
+        )
+
+    def test_darwin_application_support_not_excluded(self):
+        assert not is_excluded_dir(
+            "/Users/brian/Library/Application Support",
+            "Application Support", "darwin",
+        )
+
 
 class TestIsExcludedFile:
     def test_ds_store(self):
