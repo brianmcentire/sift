@@ -483,6 +483,23 @@ def cmd_scan(args) -> None:
                     stats["bytes_scanned"] += stat_result.st_size
                     display["current_file"] = raw_path
 
+                    # macOS: skip APFS dataless stubs and Mail partial downloads — no local bytes to hash
+                    if source_os == "darwin" and (
+                        stat_result.st_blocks == 0 or filename.endswith(".partial.emlx")
+                    ):
+                        if debug:
+                            _debug(f"[macos_dataless] {raw_path}")
+                        upsert_records.append(_make_record(
+                            host=host, drive=drive, path=path_lower, path_display=path_display,
+                            filename=filename, ext=ext, file_category=category,
+                            size_bytes=stat_result.st_size, hash_val=None,
+                            mtime=mtime_val, scan_start_iso=scan_start_iso,
+                            source_os=source_os, skipped_reason="macos_dataless",
+                            inode=inode_val, device=device_val,
+                        ))
+                        stats["files_skipped"] += 1
+                        continue
+
                     # Check if volatile and active (skip hashing)
                     if is_volatile_active(
                         raw_path, filename, ext, stat_result.st_mtime, source_os, volatile_threshold
