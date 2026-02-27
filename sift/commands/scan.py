@@ -719,6 +719,13 @@ def cmd_scan(args) -> None:
                         stats["files_scanned"] += 1
                         now = time.time()
                         _maybe_render_progress(now)
+                        # Flush seen paths from main thread too — the heartbeat
+                        # alone can't keep up at high cache-hit rates (~10k/s).
+                        # Non-blocking: skips if heartbeat is already flushing.
+                        try:
+                            _flush_queued_seen()
+                        except _ServerDown:
+                            pass
                         continue
 
                     # --- File is new or changed — decide how to handle it ---
@@ -961,41 +968,45 @@ def cmd_scan(args) -> None:
             _error_log_fh.close()
 
         # -------------------------------------------------------------------
-        # 4. Flush batches
+        # 4. Flush remaining batches (with progress)
         # -------------------------------------------------------------------
         # Upsert: remaining records with new hash data
+        with _upsert_lock:
+            n_pending_upserts = len(upsert_records)
+        if n_pending_upserts and not quiet:
+            sys.stderr.write(
+                f"\nSaving {n_pending_upserts:,} file records..."
+            )
+            sys.stderr.flush()
         _flush_queued_upserts(force=True)
+        if n_pending_upserts and not quiet:
+            sys.stderr.write(" done.\n")
+            sys.stderr.flush()
 
-        # Pre-drain seen queue — the heartbeat delivers most paths during the
-        # walk; this catches the tail before we take the final snapshot.
-        try:
-            _flush_queued_seen(force=True)
-        except _ServerDown:
-            pass  # snapshot below captures anything that failed to send
-
-        # Seen: flush any remaining paths not yet delivered.
+        # Seen: snapshot and flush all remaining paths
         with _seen_lock:
             remaining_seen = seen_paths[:]
             seen_paths.clear()
-        if remaining_seen and not quiet:
-            n_batches = math.ceil(len(remaining_seen) / seen_batch_size)
-            sys.stderr.write(
-                f"\nSaving {len(remaining_seen):,} seen-path updates"
-                f" ({n_batches} batch{'es' if n_batches != 1 else ''})..."
-            )
-            sys.stderr.flush()
         sent_seen = 0
-        for chunk in _chunks(remaining_seen, seen_batch_size):
-            _flush_seen(chunk, host, scan_start_iso)
-            sent_seen += len(chunk)
-            if remaining_seen and not quiet:
+        if remaining_seen:
+            if not quiet:
                 n_batches = math.ceil(len(remaining_seen) / seen_batch_size)
-                done = math.ceil(sent_seen / seen_batch_size)
-                sys.stderr.write(f"\r  seen-path updates: {done}/{n_batches}")
+                sys.stderr.write(
+                    f"\nSaving {len(remaining_seen):,} seen-path updates"
+                    f" ({n_batches} batch{'es' if n_batches != 1 else ''})..."
+                )
                 sys.stderr.flush()
-        if remaining_seen and not quiet:
-            sys.stderr.write("\r  seen-path updates: done.              \n")
-            sys.stderr.flush()
+            for chunk in _chunks(remaining_seen, seen_batch_size):
+                _flush_seen(chunk, host, scan_start_iso)
+                sent_seen += len(chunk)
+                if not quiet:
+                    n_batches = math.ceil(len(remaining_seen) / seen_batch_size)
+                    done = math.ceil(sent_seen / seen_batch_size)
+                    sys.stderr.write(f"\r  seen-path updates: {done}/{n_batches}")
+                    sys.stderr.flush()
+            if not quiet:
+                sys.stderr.write("\r  seen-path updates: done.              \n")
+                sys.stderr.flush()
         if debug:
             _seen_stats["finalize_sent"] += sent_seen
             _debug(
