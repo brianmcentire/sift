@@ -512,14 +512,6 @@ def cmd_scan(args) -> None:
                 name="sift-progress-heartbeat",
             ).start()
 
-        def _on_chunk(_nbytes: int) -> None:
-            now = time.time()
-            if not quiet:
-                _maybe_render_progress(now)
-            # Flush accumulated records even while blocked mid-hash on a slow file,
-            # so Ctrl-C has nothing (or little) left to flush.
-            _flush_queued_upserts()
-
         onerror = _onerror_debug if debug else _onerror
 
         for dirpath, dirnames, filenames in os.walk(
@@ -738,7 +730,7 @@ def cmd_scan(args) -> None:
                             stats["files_hashed"] += 1
                         else:
                             hash_val = hash_file(
-                                sp, chunk_size=chunk_size_bytes, on_chunk=_on_chunk
+                                sp, chunk_size=chunk_size_bytes
                             )
                             if hash_val is None:
                                 msg = f"cannot read {raw_path}: permission denied"
