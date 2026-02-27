@@ -445,7 +445,7 @@ def get_cache_stream(host: str, root: str):
 
 
 @app.get("/files/ls/dup-hash")
-def ls_dup_hash(path: str = Query("/"), host: str = Query("")):
+def ls_dup_hash(path: str = Query("/"), host: str = Query(""), min_size: int = Query(0, ge=0)):
     """Return the first duplicated hash found within the given subtree for a host.
     Uses the same hard-link exclusion logic as the dupes CTE in ls_files so the
     returned hash is guaranteed to appear >= 2 times in /files?hash=X."""
@@ -462,24 +462,75 @@ def ls_dup_hash(path: str = Query("/"), host: str = Query("")):
         WHERE f.host = ?
           AND f.hash IS NOT NULL
           AND (f.path LIKE ? OR f.path = ?)
+          AND f.size_bytes >= ?
           AND NOT (f.inode IS NOT NULL AND f.device IS NOT NULL
                    AND (f.device, f.inode) IN (SELECT device, inode FROM hard_linked_inodes))
           AND f.hash IN (
               SELECT hash FROM files
               WHERE host = ? AND hash IS NOT NULL
+                AND size_bytes >= ?
                 AND NOT (inode IS NOT NULL AND device IS NOT NULL
                          AND (device, inode) IN (SELECT device, inode FROM hard_linked_inodes))
               GROUP BY hash HAVING COUNT(*) > 1
           )
         LIMIT 1
     """,
-        [host, host, prefix + "/%", prefix, host],
+        [host, host, prefix + "/%", prefix, min_size, host, min_size],
     )
     if row is None:
         raise HTTPException(
             status_code=404, detail="No duplicate hash found in subtree"
         )
     return {"hash": row[0]}
+
+
+@app.get("/files/duplicates-in-subtree", response_model=list[FileEntry])
+def duplicates_in_subtree(
+    host: str = Query(...),
+    path_prefix: str = Query(...),
+    min_size: int = Query(0, ge=0),
+    limit: int = Query(1000, le=10000),
+):
+    """Return all files that are duplicated within a subtree, grouped by hash."""
+    prefix = path_prefix.lower().rstrip("/")
+    sql = """
+    WITH hard_linked_inodes AS (
+        SELECT device, inode FROM files
+        WHERE host = ? AND inode IS NOT NULL AND device IS NOT NULL
+        GROUP BY device, inode HAVING COUNT(*) > 1
+    ),
+    dup_hashes AS (
+        SELECT hash FROM files
+        WHERE host = ? AND hash IS NOT NULL
+          AND (path LIKE ? OR path = ?)
+          AND size_bytes >= ?
+          AND NOT (inode IS NOT NULL AND device IS NOT NULL
+                   AND (device, inode) IN (SELECT device, inode FROM hard_linked_inodes))
+        GROUP BY hash HAVING COUNT(*) > 1
+    )
+    SELECT f.host, f.drive, f.path_display, f.filename, f.ext, f.file_category,
+           f.size_bytes, f.hash, f.mtime, f.last_seen_at
+    FROM files f
+    WHERE f.host = ? AND f.hash IN (SELECT hash FROM dup_hashes)
+      AND (f.path LIKE ? OR f.path = ?)
+    ORDER BY f.hash, f.path_display
+    LIMIT ?
+    """
+    params = [
+        host,                       # hard_linked_inodes
+        host, prefix + "/%", prefix, min_size,  # dup_hashes
+        host, prefix + "/%", prefix,  # result rows
+        limit,
+    ]
+    rows = db.query(sql, params)
+    return [
+        FileEntry(
+            host=r[0], drive=r[1], path_display=r[2], filename=r[3],
+            ext=r[4], file_category=r[5], size_bytes=r[6], hash=r[7],
+            mtime=r[8], last_seen_at=r[9], other_hosts=None,
+        )
+        for r in rows
+    ]
 
 
 @app.get("/files/ls", response_model=list[LsEntry])
@@ -629,7 +680,7 @@ def list_files(
         if len(h) == 64:
             conditions.append("f.hash = ?")
         else:
-            conditions.append("f.hash LIKE ? || '%'")
+            conditions.append("f.hash LIKE '%' || ? || '%'")
         params.append(h)
     if name:
         # glob-style: convert * → %, ? → _, escape literal % and _ with backslash.

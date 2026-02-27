@@ -25,6 +25,7 @@ export default function App() {
   const [hashResults, setHashResults] = useState(null)          // null | FileEntry[]
   const [pinnedResults, setPinnedResults] = useState(null)      // null | FileEntry[]
   const [highlightedPaths, setHighlightedPaths] = useState(new Set()) // paths (lowercase) to blue-highlight in results
+  const [subtreeDupPath, setSubtreeDupPath] = useState(null)          // string | null — path for subtree dup overlay
   const [categoryFilter, setCategoryFilter] = useState(new Set())
   const [minDupSize, setMinDupSize] = useState(0)
   const [onlyDups, setOnlyDups] = useState(false)
@@ -219,6 +220,7 @@ export default function App() {
     setFilenameQuery('')
     setCategoryFilter(new Set())
     setPinnedResults(null)
+    setSubtreeDupPath(null)
   }, [])
 
   // ── Reset all filters / selections ───────────────────────────────────────
@@ -231,6 +233,7 @@ export default function App() {
     setMinDupSize(0)
     setOnlyDups(false)
     setPinnedResults(null)
+    setSubtreeDupPath(null)
     setSelectedHosts(new Set(hosts.map(h => h.host)))
     setExpandedPaths(new Set())
   }, [hosts])
@@ -313,13 +316,25 @@ export default function App() {
     const host = entry.presentHosts?.[0]
     if (!host) return
     try {
-      const result = await api.dupHash(fullPath, host)
+      const result = await api.dupHash(fullPath, host, minDupSizeRef.current)
       if (result?.hash) {
         // Find the specific files in this subtree with that hash so we can highlight them
         const inDir = await api.files({ hash: result.hash, path_prefix: fullPath, host, limit: 50 })
         setHighlightedPaths(new Set(inDir.map(f => (f.path_display || '').toLowerCase())))
         setHashQuery(result.hash)
       }
+    } catch (_) {}
+  }, [])
+
+  // ── Handle subtree dup arrow → show all dups in subtree grouped by hash ──
+  const handleDupSubtreeClick = useCallback(async (fullPath, entry) => {
+    const host = entry.presentHosts?.[0]
+    if (!host) return
+    try {
+      const data = await api.subtreeDups(host, fullPath, minDupSizeRef.current)
+      setHighlightedPaths(new Set())
+      setSubtreeDupPath(fullPath)
+      setPinnedResults(data)
     } catch (_) {}
   }, [])
 
@@ -373,6 +388,10 @@ export default function App() {
   const searchRows = useMemo(() => {
     if (!activeResults) return null
     const converted = activeResults.map(fe => fileEntryToRow(fe))
+    // In subtree dup mode, mark all rows as dups so "only dups" filter doesn't hide them
+    if (subtreeDupPath) {
+      converted.forEach(r => { r.entry.dup_count = 1 })
+    }
     let filtered = categoryFilter.size > 0
       ? converted.filter(r => categoryFilter.has(r.entry.file_category))
       : converted
@@ -388,8 +407,46 @@ export default function App() {
         r.entry.dup_count > 0 || Boolean(r.entry.other_hosts)
       )
     }
+    // In subtree dup mode: deterministic hash→path→filename sort, ignore UI sort state
+    if (subtreeDupPath) {
+      const subtreeSorted = [...filtered].sort((a, b) => {
+        const hA = a.entry.hash || '', hB = b.entry.hash || ''
+        if (hA < hB) return -1
+        if (hA > hB) return 1
+        const dirA = (a.entry.path_display || '').split('/').slice(0, -1).join('/')
+        const dirB = (b.entry.path_display || '').split('/').slice(0, -1).join('/')
+        if (dirA < dirB) return -1
+        if (dirA > dirB) return 1
+        const nameA = a.entry.filename || '', nameB = b.entry.filename || ''
+        if (nameA < nameB) return -1
+        if (nameA > nameB) return 1
+        const pathA = a.entry.path_display || '', pathB = b.entry.path_display || ''
+        if (pathA < pathB) return -1
+        if (pathA > pathB) return 1
+        return 0
+      })
+      const grouped = []
+      let lastHash = null
+      let groupCount = 0
+      let groupStartIdx = -1
+      for (const row of subtreeSorted) {
+        const h = row.entry.hash
+        if (h !== lastHash) {
+          // Backfill count on previous group header
+          if (groupStartIdx >= 0) grouped[groupStartIdx].count = groupCount
+          grouped.push({ isGroupHeader: true, hash: h || '?', count: 0 })
+          groupStartIdx = grouped.length - 1
+          groupCount = 0
+          lastHash = h
+        }
+        grouped.push(row)
+        groupCount++
+      }
+      if (groupStartIdx >= 0) grouped[groupStartIdx].count = groupCount
+      return grouped
+    }
     return sortFileEntries(filtered, sortBy, sortDir)
-  }, [activeResults, categoryFilter, minDupSize, onlyDups, sortBy, sortDir])
+  }, [activeResults, subtreeDupPath, categoryFilter, minDupSize, onlyDups, sortBy, sortDir])
 
   // ── Unfiltered tree rows — used for available categories so the type picker
   //    doesn't collapse while multi-selecting ───────────────────────────────
@@ -491,9 +548,14 @@ export default function App() {
 
   // ── Search banner ─────────────────────────────────────────────────────────
   const searchBanner = useMemo(() => {
-    if (pinnedResults !== null) return {
-      label: 'all copies of file',
-      clear: () => setPinnedResults(null),
+    if (pinnedResults !== null) {
+      const label = subtreeDupPath
+        ? `duplicate files under ${subtreeDupPath}`
+        : 'all copies of file'
+      return {
+        label,
+        clear: () => { setPinnedResults(null); setSubtreeDupPath(null) },
+      }
     }
     if (filenameResults !== null) return {
       label: `filename: "${filenameQuery}"`,
@@ -504,7 +566,7 @@ export default function App() {
       clear: () => { setHashQuery('') },
     }
     return null
-  }, [pinnedResults, filenameResults, filenameQuery, hashResults, hashQuery])
+  }, [pinnedResults, subtreeDupPath, filenameResults, filenameQuery, hashResults, hashQuery])
 
   const isLoading = hosts.length === 0 || loadingPaths.has(currentPath)
 
@@ -564,6 +626,7 @@ export default function App() {
           onCopyPath={handleCopyPath}
           onTypeClick={handleTypeClick}
           onDupHashClick={handleDupHashClick}
+          onDupSubtreeClick={handleDupSubtreeClick}
           highlightedPaths={highlightedPaths}
           matchedDirPaths={matchedDirPaths}
           expandedPaths={expandedPaths}

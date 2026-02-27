@@ -31,6 +31,7 @@ export default function FileTable({
   onCopyPath,
   onTypeClick,
   onDupHashClick,
+  onDupSubtreeClick,
   highlightedPaths,
   matchedDirPaths,
   expandedPaths,
@@ -99,20 +100,27 @@ export default function FileTable({
                   </td>
                 </tr>
               )
-            : rows.map(({ entry, parentPath, fullPath, fullDisplayPath, depth }) => (
+            : rows.map((row, i) => row.isGroupHeader ? (
+                <tr key={`gh:${i}:${row.hash}`} className="bg-slate-100 border-t border-slate-200">
+                  <td colSpan={colCount} className="py-1 px-4 text-xs text-slate-500 font-medium">
+                    {row.hash.slice(0, 12)}… · {row.count} copies
+                  </td>
+                </tr>
+              ) : (
                 <FileRow
-                  key={`${fullPath}:${entry.presentHosts?.join(',')}`}
-                  entry={entry}
-                  parentPath={parentPath}
-                  fullPath={fullPath}
-                  fullDisplayPath={fullDisplayPath}
-                  depth={depth}
-                  isExpanded={expandedPaths.has(fullPath)}
+                  key={`${row.fullPath}:${row.entry.presentHosts?.join(',')}`}
+                  entry={row.entry}
+                  parentPath={row.parentPath}
+                  fullPath={row.fullPath}
+                  fullDisplayPath={row.fullDisplayPath}
+                  depth={row.depth}
+                  isExpanded={expandedPaths.has(row.fullPath)}
                   onToggleDir={onToggleDir}
                   onFileClick={onFileClick}
                   onCopyPath={onCopyPath}
                   onTypeClick={onTypeClick}
                   onDupHashClick={onDupHashClick}
+                  onDupSubtreeClick={onDupSubtreeClick}
                   highlightedPaths={highlightedPaths}
                   matchedDirPaths={matchedDirPaths}
                   hostColorMap={hostColorMap}

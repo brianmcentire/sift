@@ -42,22 +42,33 @@ const CELL_RENDERERS = {
     </td>
   ),
 
-  hash: ({ entry, extraCopies, fullPath, onDupHashClick }) => (
+  hash: ({ entry, extraCopies, fullPath, onDupHashClick, onDupSubtreeClick }) => (
     <td key="hash" className="py-1.5 pr-4">
       {entry.entry_type === 'dir' ? (
         extraCopies > 0 ? (
-          <span
-            className={`text-[11px] text-amber-600 font-medium ${
-              extraCopies === 1 && onDupHashClick
-                ? 'cursor-pointer hover:text-amber-800 hover:underline'
-                : ''
-            }`}
-            title={extraCopies === 1 && onDupHashClick ? 'Show all copies' : undefined}
-            onClick={extraCopies === 1 && onDupHashClick
-              ? e => { e.stopPropagation(); onDupHashClick(fullPath, entry) }
-              : undefined}
-          >
-            {extraCopies} extra cop{extraCopies !== 1 ? 'ies' : 'y'}
+          <span className="inline-flex items-center gap-1">
+            <span
+              className={`text-[11px] text-amber-600 font-medium ${
+                extraCopies === 1 && onDupHashClick
+                  ? 'cursor-pointer hover:text-amber-800 hover:underline'
+                  : ''
+              }`}
+              title={extraCopies === 1 && onDupHashClick ? 'Show all copies' : undefined}
+              onClick={extraCopies === 1 && onDupHashClick
+                ? e => { e.stopPropagation(); onDupHashClick(fullPath, entry) }
+                : undefined}
+            >
+              {extraCopies} extra cop{extraCopies !== 1 ? 'ies' : 'y'}
+            </span>
+            {onDupSubtreeClick && (
+              <span
+                className="text-[11px] text-blue-500 cursor-pointer hover:text-blue-700 font-medium select-none"
+                title="Show duplicate files in subtree"
+                onClick={e => { e.stopPropagation(); onDupSubtreeClick(fullPath, entry) }}
+              >
+                ☰
+              </span>
+            )}
           </span>
         ) : null
       ) : (
@@ -89,6 +100,7 @@ export default function FileRow({
   onCopyPath,
   onTypeClick,
   onDupHashClick,
+  onDupSubtreeClick,
   highlightedPaths,
   matchedDirPaths,
   hostColorMap,
@@ -138,7 +150,7 @@ export default function FileRow({
     }
   }
 
-  const cellOpts = { entry, extraCopies, allHostsSet, hostColorMap, onTypeClick, fullPath, onDupHashClick }
+  const cellOpts = { entry, extraCopies, allHostsSet, hostColorMap, onTypeClick, fullPath, onDupHashClick, onDupSubtreeClick }
 
   return (
     <tr
