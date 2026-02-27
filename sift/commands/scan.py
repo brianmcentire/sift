@@ -1,4 +1,5 @@
 """sift scan — scan a directory and POST file metadata to the server."""
+
 from __future__ import annotations
 
 import json
@@ -13,7 +14,12 @@ from typing import Optional
 from sift import client
 from sift.classify import classify_file
 from sift.config import get_agent_config
-from sift.exclusions import is_excluded_dir, is_excluded_file, is_sparse_file, is_volatile_active
+from sift.exclusions import (
+    is_excluded_dir,
+    is_excluded_file,
+    is_sparse_file,
+    is_volatile_active,
+)
 from sift.hash_utils import hash_file, needs_rehash
 from sift.normalize import (
     get_source_os,
@@ -63,9 +69,14 @@ def _precount_files(
                         if entry.is_symlink():
                             continue
                         if entry.is_dir(follow_symlinks=False):
-                            if root_dev is not None and os.stat(entry.path).st_dev != root_dev:
+                            if (
+                                root_dev is not None
+                                and os.stat(entry.path).st_dev != root_dev
+                            ):
                                 continue
-                            if not is_excluded_dir(entry.path, entry.name, source_os, allow_unraid_disks):
+                            if not is_excluded_dir(
+                                entry.path, entry.name, source_os, allow_unraid_disks
+                            ):
                                 stack.append(entry.path)
                         elif entry.is_file(follow_symlinks=False):
                             ext, _ = classify_file(entry.name)
@@ -93,11 +104,12 @@ def _is_macos_dataless(st_blocks: int, source_os: str) -> bool:
 def _format_size(n: Optional[int]) -> str:
     if n is None:
         return "0 B"
+    value = float(n)
     for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
-        n /= 1024
-    return f"{n:.1f} PB"
+        if value < 1024:
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} PB"
 
 
 def _format_duration(seconds: float) -> str:
@@ -127,7 +139,9 @@ def _print_progress(
 
     total = display["total"]
     if total is not None and total > 0:
-        total_label = f"~{total:,}" if display.get("total_is_estimate") else f"{total:,}"
+        total_label = (
+            f"~{total:,}" if display.get("total_is_estimate") else f"{total:,}"
+        )
         line1 = (
             f"Scanned {stats['files_scanned']:,} of {total_label} files"
             f" | {files_rate:,.0f} files/s"
@@ -162,14 +176,14 @@ def _print_progress(
 
     # Truncate line1 to prevent wrapping — a wrapped line breaks \r and cursor-up ANSI codes
     if len(line1) > cols - 1:
-        line1 = line1[:cols - 1]
+        line1 = line1[: cols - 1]
 
     if is_tty and current_file and not final:
         # Two-line mode: status line + current file being hashed
         line2 = f"  {current_file}"
         if len(line2) > cols:
             # Keep the tail of the path so the filename is always visible
-            line2 = "  ..." + current_file[-(cols - 5):]
+            line2 = "  ..." + current_file[-(cols - 5) :]
         if prev >= 2:
             sys.stderr.write(f"\x1b[1A\r\x1b[2K{line1}\n\r\x1b[2K{line2}")
         else:
@@ -208,7 +222,7 @@ def _print_current_file_only(display: dict) -> None:
 
     line2 = f"  {current_file}"
     if len(line2) > cols:
-        line2 = "  ..." + current_file[-(cols - 5):]
+        line2 = "  ..." + current_file[-(cols - 5) :]
 
     # Rewrite line 2. Leave cursor on line 2 (same as _print_progress does),
     # so the next _print_progress call's \x1b[1A correctly moves back to line 1.
@@ -220,7 +234,7 @@ class _ServerDown(Exception):
     """Raised when the sift server has been unreachable for too long."""
 
 
-_RETRY_TIMEOUT = 90          # seconds before giving up and aborting the scan
+_RETRY_TIMEOUT = 90  # seconds before giving up and aborting the scan
 _INTERRUPT_RETRY_TIMEOUT = 15  # shorter timeout when flushing on Ctrl-C
 _FLUSH_INTERVAL = 60  # flush accumulated records at least every minute
 
@@ -290,6 +304,7 @@ def cmd_scan(args) -> None:
 
     if getattr(args, "ask", False):
         from sift.config import get_server_url
+
         print(file=sys.stderr)
         print(f"  Directory : {root}", file=sys.stderr)
         print(f"  Host tag  : {host}", file=sys.stderr)
@@ -320,14 +335,18 @@ def cmd_scan(args) -> None:
         print(f"Registering scan run for {host}:{root_path}...", file=sys.stderr)
 
     stop_event = threading.Event()
+    _progress_stop = threading.Event()
     run_id = None
     try:
-        run_resp = client.post("/scan-runs", {
-            "host": host,
-            "root_path": root_path,
-            "root_path_display": root_path_display,
-            "started_at": scan_start_iso,
-        })
+        run_resp = client.post(
+            "/scan-runs",
+            {
+                "host": host,
+                "root_path": root_path,
+                "root_path_display": root_path_display,
+                "started_at": scan_start_iso,
+            },
+        )
         run_id = run_resp["id"]
     except Exception as e:
         print(f"sift: failed to register scan run: {e}", file=sys.stderr)
@@ -338,7 +357,14 @@ def cmd_scan(args) -> None:
     if not quiet:
         threading.Thread(
             target=_precount_files,
-            args=(root, source_os, precount_result, stop_event, root_dev, allow_unraid_disks),
+            args=(
+                root,
+                source_os,
+                precount_result,
+                stop_event,
+                root_dev,
+                allow_unraid_disks,
+            ),
             daemon=True,
             name="sift-precount",
         ).start()
@@ -349,6 +375,8 @@ def cmd_scan(args) -> None:
         "lines": 0,
         "precount": precount_result,
     }
+    upsert_records: list[dict] = []
+    _upsert_lock = threading.Lock()
 
     try:
         # -------------------------------------------------------------------
@@ -359,7 +387,9 @@ def cmd_scan(args) -> None:
             sys.stderr.flush()
         try:
             cache: dict[str, dict] = {}
-            with client.get_stream("/files/cache/stream", params={"host": host, "root": root_path}) as resp:
+            with client.get_stream(
+                "/files/cache/stream", params={"host": host, "root": root_path}
+            ) as resp:
                 for line in resp.iter_lines():
                     if line:
                         entry = json.loads(line)
@@ -379,7 +409,6 @@ def cmd_scan(args) -> None:
         # -------------------------------------------------------------------
         # 3. Walk
         # -------------------------------------------------------------------
-        upsert_records: list[dict] = []
         seen_paths: list[dict] = []
         # Maps (st_dev, st_ino) → hash for reusing hash across hard-linked paths.
         # Only populated when inode is non-zero (i.e., not Windows with st_ino=0).
@@ -406,40 +435,96 @@ def cmd_scan(args) -> None:
                 )
             _error_log_fh.write(path + "\n")
 
-        _stats_progress_interval = 1.0   # stats line refresh cadence
-        _file_progress_interval = 0.10   # current-file line refresh cadence
+        _stats_progress_interval = 1.0  # stats line refresh cadence
+        _file_progress_interval = 0.10  # current-file line refresh cadence
         _last_stats_progress = time.time()
         _last_file_progress = _last_stats_progress
         _last_flush_time = time.time()
+        _render_lock = threading.Lock()
+
+        def _queue_upsert(record: dict) -> None:
+            with _upsert_lock:
+                upsert_records.append(record)
+
+        def _flush_queued_upserts(
+            *,
+            force: bool = False,
+            retry_timeout: int = _RETRY_TIMEOUT,
+        ) -> int:
+            nonlocal _last_flush_time
+            now = time.time()
+            with _upsert_lock:
+                if not upsert_records:
+                    return 0
+                should_flush = (
+                    force
+                    or len(upsert_records) >= 10_000
+                    or (now - _last_flush_time >= _FLUSH_INTERVAL)
+                )
+                if not should_flush:
+                    return 0
+                pending = upsert_records[:]
+                upsert_records.clear()
+                _last_flush_time = now
+
+            for chunk in _chunks(pending, upsert_batch_size):
+                _flush_upsert(
+                    chunk,
+                    host,
+                    scan_start_iso,
+                    retry_timeout=retry_timeout,
+                )
+            return len(pending)
 
         def _maybe_render_progress(now: float) -> None:
             nonlocal _last_stats_progress, _last_file_progress
             if quiet:
                 return
-            if now - _last_stats_progress >= _stats_progress_interval:
-                _print_progress(stats, scan_start, display)
-                _last_stats_progress = now
-                _last_file_progress = now
-            elif now - _last_file_progress >= _file_progress_interval:
-                _print_current_file_only(display)
-                _last_file_progress = now
+            with _render_lock:
+                if now - _last_stats_progress >= _stats_progress_interval:
+                    _print_progress(stats, scan_start, display)
+                    _last_stats_progress = now
+                    _last_file_progress = now
+                elif now - _last_file_progress >= _file_progress_interval:
+                    _print_current_file_only(display)
+                    _last_file_progress = now
+
+        def _progress_heartbeat() -> None:
+            """Keep elapsed time moving during slow blocking reads/network stalls."""
+            nonlocal _last_stats_progress, _last_file_progress
+            while not _progress_stop.wait(0.25):
+                if quiet:
+                    continue
+                now = time.time()
+                with _render_lock:
+                    if now - _last_stats_progress >= _stats_progress_interval:
+                        _print_progress(stats, scan_start, display)
+                        _last_stats_progress = now
+                        _last_file_progress = now
+                # Continue delivering buffered records even if the main thread is
+                # blocked in a slow read (e.g., cloud recall on first chunk).
+                _flush_queued_upserts()
+
+        if not quiet:
+            threading.Thread(
+                target=_progress_heartbeat,
+                daemon=True,
+                name="sift-progress-heartbeat",
+            ).start()
 
         def _on_chunk(_nbytes: int) -> None:
-            nonlocal _last_flush_time
             now = time.time()
             if not quiet:
                 _maybe_render_progress(now)
             # Flush accumulated records even while blocked mid-hash on a slow file,
             # so Ctrl-C has nothing (or little) left to flush.
-            if upsert_records and now - _last_flush_time >= _FLUSH_INTERVAL:
-                for chunk in _chunks(upsert_records, upsert_batch_size):
-                    _flush_upsert(chunk, host, scan_start_iso)
-                upsert_records.clear()
-                _last_flush_time = now
+            _flush_queued_upserts()
 
         onerror = _onerror_debug if debug else _onerror
 
-        for dirpath, dirnames, filenames in os.walk(walk_root, onerror=onerror, followlinks=False):
+        for dirpath, dirnames, filenames in os.walk(
+            walk_root, onerror=onerror, followlinks=False
+        ):
             # Prune excluded directories in place
             kept = []
             for d in dirnames:
@@ -487,7 +572,9 @@ def cmd_scan(args) -> None:
                             _debug(f"[excluded file] {raw_path}")
                         continue
 
-                    path_lower, path_display, drive = normalize_path_for_storage(raw_path, source_os)
+                    path_lower, path_display, drive = normalize_path_for_storage(
+                        raw_path, source_os
+                    )
                     cached = cache.get(path_lower)
                     mtime_val = math.floor(stat_result.st_mtime)
 
@@ -510,17 +597,30 @@ def cmd_scan(args) -> None:
                     # Sparse files (VM disk images, container stores, etc.):
                     # logical size >> actual on-disk bytes — hashing would read
                     # the full logical size (potentially TBs of holes).
-                    if is_sparse_file(stat_result.st_size, stat_result.st_blocks, source_os):
+                    if is_sparse_file(
+                        stat_result.st_size, stat_result.st_blocks, source_os
+                    ):
                         if debug:
                             _debug(f"[sparse_file]    {raw_path}")
-                        upsert_records.append(_make_record(
-                            host=host, drive=drive, path=path_lower, path_display=path_display,
-                            filename=filename, ext=ext, file_category=category,
-                            size_bytes=stat_result.st_size, hash_val=None,
-                            mtime=mtime_val, scan_start_iso=scan_start_iso,
-                            source_os=source_os, skipped_reason="sparse_file",
-                            inode=inode_val, device=device_val,
-                        ))
+                        _queue_upsert(
+                            _make_record(
+                                host=host,
+                                drive=drive,
+                                path=path_lower,
+                                path_display=path_display,
+                                filename=filename,
+                                ext=ext,
+                                file_category=category,
+                                size_bytes=stat_result.st_size,
+                                hash_val=None,
+                                mtime=mtime_val,
+                                scan_start_iso=scan_start_iso,
+                                source_os=source_os,
+                                skipped_reason="sparse_file",
+                                inode=inode_val,
+                                device=device_val,
+                            )
+                        )
                         stats["files_skipped"] += 1
                         continue
 
@@ -528,31 +628,58 @@ def cmd_scan(args) -> None:
                     if _is_macos_dataless(stat_result.st_blocks, source_os):
                         if debug:
                             _debug(f"[macos_dataless] {raw_path}")
-                        upsert_records.append(_make_record(
-                            host=host, drive=drive, path=path_lower, path_display=path_display,
-                            filename=filename, ext=ext, file_category=category,
-                            size_bytes=stat_result.st_size, hash_val=None,
-                            mtime=mtime_val, scan_start_iso=scan_start_iso,
-                            source_os=source_os, skipped_reason="macos_dataless",
-                            inode=inode_val, device=device_val,
-                        ))
+                        _queue_upsert(
+                            _make_record(
+                                host=host,
+                                drive=drive,
+                                path=path_lower,
+                                path_display=path_display,
+                                filename=filename,
+                                ext=ext,
+                                file_category=category,
+                                size_bytes=stat_result.st_size,
+                                hash_val=None,
+                                mtime=mtime_val,
+                                scan_start_iso=scan_start_iso,
+                                source_os=source_os,
+                                skipped_reason="macos_dataless",
+                                inode=inode_val,
+                                device=device_val,
+                            )
+                        )
                         stats["files_skipped"] += 1
                         continue
 
                     # Check if volatile and active (skip hashing)
                     if is_volatile_active(
-                        raw_path, filename, ext, stat_result.st_mtime, source_os, volatile_threshold
+                        raw_path,
+                        filename,
+                        ext,
+                        stat_result.st_mtime,
+                        source_os,
+                        volatile_threshold,
                     ):
                         if debug:
                             _debug(f"[volatile]      {raw_path}")
-                        upsert_records.append(_make_record(
-                            host=host, drive=drive, path=path_lower, path_display=path_display,
-                            filename=filename, ext=ext, file_category=category,
-                            size_bytes=stat_result.st_size, hash_val=None,
-                            mtime=mtime_val, scan_start_iso=scan_start_iso,
-                            source_os=source_os, skipped_reason="volatile_active",
-                            inode=inode_val, device=device_val,
-                        ))
+                        _queue_upsert(
+                            _make_record(
+                                host=host,
+                                drive=drive,
+                                path=path_lower,
+                                path_display=path_display,
+                                filename=filename,
+                                ext=ext,
+                                file_category=category,
+                                size_bytes=stat_result.st_size,
+                                hash_val=None,
+                                mtime=mtime_val,
+                                scan_start_iso=scan_start_iso,
+                                source_os=source_os,
+                                skipped_reason="volatile_active",
+                                inode=inode_val,
+                                device=device_val,
+                            )
+                        )
                         stats["files_skipped"] += 1
 
                     elif needs_rehash(stat_result, cached):
@@ -562,46 +689,81 @@ def cmd_scan(args) -> None:
                         if time.time() - stat_result.st_mtime < fresh_threshold:
                             if debug:
                                 _debug(f"[fresh_mtime]   {raw_path}")
-                            upsert_records.append(_make_record(
-                                host=host, drive=drive, path=path_lower, path_display=path_display,
-                                filename=filename, ext=ext, file_category=category,
-                                size_bytes=stat_result.st_size, hash_val=None,
-                                mtime=mtime_val, scan_start_iso=scan_start_iso,
-                                source_os=source_os, skipped_reason="recently_modified",
-                                inode=inode_val, device=device_val,
-                            ))
+                            _queue_upsert(
+                                _make_record(
+                                    host=host,
+                                    drive=drive,
+                                    path=path_lower,
+                                    path_display=path_display,
+                                    filename=filename,
+                                    ext=ext,
+                                    file_category=category,
+                                    size_bytes=stat_result.st_size,
+                                    hash_val=None,
+                                    mtime=mtime_val,
+                                    scan_start_iso=scan_start_iso,
+                                    source_os=source_os,
+                                    skipped_reason="recently_modified",
+                                    inode=inode_val,
+                                    device=device_val,
+                                )
+                            )
                             stats["files_skipped"] += 1
 
                         # If we've already hashed another path with the same inode on
                         # this device (a hard link), reuse the cached hash — no I/O needed.
-                        if inode_key is not None and inode_key in seen_inodes:
+                        elif inode_key is not None and inode_key in seen_inodes:
                             hash_val = seen_inodes[inode_key]
                             if debug:
                                 _debug(f"[hard link]     {raw_path}")
-                            upsert_records.append(_make_record(
-                                host=host, drive=drive, path=path_lower, path_display=path_display,
-                                filename=filename, ext=ext, file_category=category,
-                                size_bytes=stat_result.st_size, hash_val=hash_val,
-                                mtime=mtime_val, scan_start_iso=scan_start_iso,
-                                source_os=source_os, skipped_reason=None,
-                                inode=inode_val, device=device_val,
-                            ))
+                            _queue_upsert(
+                                _make_record(
+                                    host=host,
+                                    drive=drive,
+                                    path=path_lower,
+                                    path_display=path_display,
+                                    filename=filename,
+                                    ext=ext,
+                                    file_category=category,
+                                    size_bytes=stat_result.st_size,
+                                    hash_val=hash_val,
+                                    mtime=mtime_val,
+                                    scan_start_iso=scan_start_iso,
+                                    source_os=source_os,
+                                    skipped_reason=None,
+                                    inode=inode_val,
+                                    device=device_val,
+                                )
+                            )
                             stats["files_hashed"] += 1
                         else:
-                            hash_val = hash_file(sp, chunk_size=chunk_size_bytes, on_chunk=_on_chunk)
+                            hash_val = hash_file(
+                                sp, chunk_size=chunk_size_bytes, on_chunk=_on_chunk
+                            )
                             if hash_val is None:
                                 msg = f"cannot read {raw_path}: permission denied"
                                 if debug:
                                     print(f"\nsift: {msg}", file=sys.stderr)
                                     sys.exit(1)
-                                upsert_records.append(_make_record(
-                                    host=host, drive=drive, path=path_lower, path_display=path_display,
-                                    filename=filename, ext=ext, file_category=category,
-                                    size_bytes=stat_result.st_size, hash_val=None,
-                                    mtime=mtime_val, scan_start_iso=scan_start_iso,
-                                    source_os=source_os, skipped_reason="permission_error",
-                                    inode=inode_val, device=device_val,
-                                ))
+                                _queue_upsert(
+                                    _make_record(
+                                        host=host,
+                                        drive=drive,
+                                        path=path_lower,
+                                        path_display=path_display,
+                                        filename=filename,
+                                        ext=ext,
+                                        file_category=category,
+                                        size_bytes=stat_result.st_size,
+                                        hash_val=None,
+                                        mtime=mtime_val,
+                                        scan_start_iso=scan_start_iso,
+                                        source_os=source_os,
+                                        skipped_reason="permission_error",
+                                        inode=inode_val,
+                                        device=device_val,
+                                    )
+                                )
                                 _log_error(raw_path)
                                 stats["read_errors"] += 1
                                 stats["files_skipped"] += 1
@@ -609,14 +771,25 @@ def cmd_scan(args) -> None:
                                 if inode_key is not None:
                                     seen_inodes[inode_key] = hash_val
                                 stats["bytes_hashed"] += stat_result.st_size
-                                upsert_records.append(_make_record(
-                                    host=host, drive=drive, path=path_lower, path_display=path_display,
-                                    filename=filename, ext=ext, file_category=category,
-                                    size_bytes=stat_result.st_size, hash_val=hash_val,
-                                    mtime=mtime_val, scan_start_iso=scan_start_iso,
-                                    source_os=source_os, skipped_reason=None,
-                                    inode=inode_val, device=device_val,
-                                ))
+                                _queue_upsert(
+                                    _make_record(
+                                        host=host,
+                                        drive=drive,
+                                        path=path_lower,
+                                        path_display=path_display,
+                                        filename=filename,
+                                        ext=ext,
+                                        file_category=category,
+                                        size_bytes=stat_result.st_size,
+                                        hash_val=hash_val,
+                                        mtime=mtime_val,
+                                        scan_start_iso=scan_start_iso,
+                                        source_os=source_os,
+                                        skipped_reason=None,
+                                        inode=inode_val,
+                                        device=device_val,
+                                    )
+                                )
                                 stats["files_hashed"] += 1
 
                     else:
@@ -626,13 +799,18 @@ def cmd_scan(args) -> None:
 
                 except PermissionError as e:
                     if debug:
-                        print(f"\nsift: permission denied: {raw_path}: {e.strerror}", file=sys.stderr)
+                        print(
+                            f"\nsift: permission denied: {raw_path}: {e.strerror}",
+                            file=sys.stderr,
+                        )
                         sys.exit(1)
                     _log_error(raw_path)
                     stats["read_errors"] += 1
                 except OSError as e:
                     if debug:
-                        print(f"\nsift: error: {raw_path}: {e.strerror}", file=sys.stderr)
+                        print(
+                            f"\nsift: error: {raw_path}: {e.strerror}", file=sys.stderr
+                        )
                         sys.exit(1)
                     _log_error(raw_path)
                     stats["read_errors"] += 1
@@ -640,14 +818,7 @@ def cmd_scan(args) -> None:
                 stats["files_scanned"] += 1
 
                 # Flush on time interval (or when batch grows very large as a memory safety net)
-                if (
-                    len(upsert_records) >= 10_000
-                    or (upsert_records and time.time() - _last_flush_time >= _FLUSH_INTERVAL)
-                ):
-                    for chunk in _chunks(upsert_records, upsert_batch_size):
-                        _flush_upsert(chunk, host, scan_start_iso)
-                    upsert_records.clear()
-                    _last_flush_time = time.time()
+                _flush_queued_upserts()
 
                 # seen_paths are flushed after the walk — don't block traversal with network I/O
 
@@ -655,6 +826,7 @@ def cmd_scan(args) -> None:
                 now = time.time()
                 _maybe_render_progress(now)
 
+        _progress_stop.set()
         display["current_file"] = ""
         if _error_log_fh is not None:
             _error_log_fh.close()
@@ -663,8 +835,7 @@ def cmd_scan(args) -> None:
         # 4. Flush batches
         # -------------------------------------------------------------------
         # Upsert: remaining records with new hash data
-        for chunk in _chunks(upsert_records, upsert_batch_size):
-            _flush_upsert(chunk, host, scan_start_iso)
+        _flush_queued_upserts(force=True)
 
         # Seen: all collected after the walk in one or a few large requests.
         # seen_batch_size is the max per request; server handles each as a single bulk UPDATE.
@@ -677,16 +848,21 @@ def cmd_scan(args) -> None:
         try:
             client.patch(f"/scan-runs/{run_id}", {"status": "complete"})
         except Exception as e:
-            print(f"\nsift: warning — failed to mark scan complete: {e}", file=sys.stderr)
+            print(
+                f"\nsift: warning — failed to mark scan complete: {e}", file=sys.stderr
+            )
 
         if not quiet:
             _print_progress(stats, scan_start, display, final=True)
         elapsed = time.time() - scan_start.timestamp()
         err_suffix = (
             f", {stats['read_errors']:,} read errors (see {_error_log_path})"
-            if stats["read_errors"] else ""
+            if stats["read_errors"]
+            else ""
         )
-        cached_str = f", {stats['files_cached']:,} cached" if stats["files_cached"] else ""
+        cached_str = (
+            f", {stats['files_cached']:,} cached" if stats["files_cached"] else ""
+        )
         print(
             f"\nScan complete: {stats['files_scanned']:,} files scanned, "
             f"{stats['files_hashed']:,} hashed{cached_str}, "
@@ -698,8 +874,11 @@ def cmd_scan(args) -> None:
 
     except _ServerDown as e:
         stop_event.set()
+        _progress_stop.set()
         print(f"\nsift: {e}", file=sys.stderr)
-        print("Scan aborted. Re-run to resume once the server is back.", file=sys.stderr)
+        print(
+            "Scan aborted. Re-run to resume once the server is back.", file=sys.stderr
+        )
         try:
             client.patch(f"/scan-runs/{run_id}", {"status": "failed"})
         except Exception:
@@ -708,18 +887,26 @@ def cmd_scan(args) -> None:
 
     except KeyboardInterrupt:
         stop_event.set()
+        _progress_stop.set()
         print("\nScan interrupted.", file=sys.stderr)
-        if upsert_records:
-            total = len(upsert_records)
+        with _upsert_lock:
+            pending_on_interrupt = upsert_records[:]
+            upsert_records.clear()
+        if pending_on_interrupt:
+            total = len(pending_on_interrupt)
             print(
                 f"Saving {total:,} buffered records (Ctrl-C again to discard)...",
                 file=sys.stderr,
             )
             flushed = 0
             try:
-                for chunk in _chunks(upsert_records, upsert_batch_size):
-                    _flush_upsert(chunk, host, scan_start_iso,
-                                  retry_timeout=_INTERRUPT_RETRY_TIMEOUT)
+                for chunk in _chunks(pending_on_interrupt, upsert_batch_size):
+                    _flush_upsert(
+                        chunk,
+                        host,
+                        scan_start_iso,
+                        retry_timeout=_INTERRUPT_RETRY_TIMEOUT,
+                    )
                     flushed += len(chunk)
                     sys.stderr.write(f"\r  {flushed:,} / {total:,}")
                     sys.stderr.flush()
@@ -733,7 +920,10 @@ def cmd_scan(args) -> None:
                 sys.stderr.flush()
             except _ServerDown:
                 sys.stderr.write("\n")
-                print("sift: server unreachable, buffered records not saved.", file=sys.stderr)
+                print(
+                    "sift: server unreachable, buffered records not saved.",
+                    file=sys.stderr,
+                )
         try:
             client.patch(f"/scan-runs/{run_id}", {"status": "interrupted"})
         except Exception:
@@ -742,9 +932,22 @@ def cmd_scan(args) -> None:
 
 
 def _make_record(
-    *, host, drive, path, path_display, filename, ext, file_category,
-    size_bytes, hash_val, mtime, scan_start_iso, source_os, skipped_reason,
-    inode=None, device=None,
+    *,
+    host,
+    drive,
+    path,
+    path_display,
+    filename,
+    ext,
+    file_category,
+    size_bytes,
+    hash_val,
+    mtime,
+    scan_start_iso,
+    source_os,
+    skipped_reason,
+    inode=None,
+    device=None,
 ) -> dict:
     return {
         "host": host,
@@ -766,8 +969,12 @@ def _make_record(
     }
 
 
-def _flush_upsert(records: list[dict], host: str, scan_start_iso: str,
-                  retry_timeout: int = _RETRY_TIMEOUT) -> None:
+def _flush_upsert(
+    records: list[dict],
+    host: str,
+    scan_start_iso: str,
+    retry_timeout: int = _RETRY_TIMEOUT,
+) -> None:
     if not records:
         return
     _post_with_retry(lambda: client.post("/files", records), "upsert", retry_timeout)
@@ -777,10 +984,13 @@ def _flush_seen(paths: list[dict], host: str, scan_start_iso: str) -> None:
     if not paths:
         return
     _post_with_retry(
-        lambda: client.post("/files/seen", {
-            "host": host,
-            "last_seen_at": scan_start_iso,
-            "paths": paths,
-        }),
+        lambda: client.post(
+            "/files/seen",
+            {
+                "host": host,
+                "last_seen_at": scan_start_iso,
+                "paths": paths,
+            },
+        ),
         "seen",
     )
