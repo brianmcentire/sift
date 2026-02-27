@@ -533,6 +533,51 @@ def duplicates_in_subtree(
     ]
 
 
+@app.get("/files/dup-ancestor-dirs")
+def dup_ancestor_dirs(
+    host: str = Query(...),
+    path_prefix: str = Query(...),
+    min_size: int = Query(0, ge=0),
+):
+    """Return directory paths that contain duplicate files under a subtree.
+    Walks up from each leaf dir to path_prefix to fill in intermediate ancestors."""
+    prefix = path_prefix.lower().rstrip("/")
+    sql = """
+    WITH hard_linked_inodes AS (
+        SELECT device, inode FROM files
+        WHERE host = ? AND inode IS NOT NULL AND device IS NOT NULL
+        GROUP BY device, inode HAVING COUNT(*) > 1
+    ),
+    dupes AS (
+        SELECT hash FROM files
+        WHERE hash IS NOT NULL AND host = ?
+          AND size_bytes >= ?
+          AND NOT (inode IS NOT NULL AND device IS NOT NULL
+                   AND (device, inode) IN (SELECT device, inode FROM hard_linked_inodes))
+        GROUP BY hash HAVING COUNT(*) > 1
+    )
+    SELECT DISTINCT regexp_replace(f.path, '/[^/]+$', '') AS dir_path
+    FROM files f
+    WHERE f.host = ?
+      AND f.hash IS NOT NULL
+      AND f.hash IN (SELECT hash FROM dupes)
+      AND (f.path LIKE ? OR f.path = ?)
+    ORDER BY dir_path
+    """
+    params = [host, host, min_size, host, prefix + "/%", prefix]
+    rows = db.query(sql, params)
+
+    leaf_dirs = {r[0] for r in rows if r[0]}
+    all_paths = set(leaf_dirs)
+    for leaf in leaf_dirs:
+        d = leaf
+        while d != prefix and '/' in d:
+            d = d.rsplit('/', 1)[0]
+            if d and d != prefix and (d == prefix or d.startswith(prefix + '/')):
+                all_paths.add(d)
+    return {"paths": sorted(all_paths)}
+
+
 @app.get("/files/ls", response_model=list[LsEntry])
 def ls_files(
     path: str = "/",

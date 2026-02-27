@@ -44,6 +44,8 @@ export default function App() {
   const [cacheVersion, setCacheVersion] = useState(0)
   const [lsFetchKey, setLsFetchKey] = useState(0)
   const minDupSizeRef = useRef(minDupSize)
+  const [dupAutoExpanded, setDupAutoExpanded] = useState(new Map())  // Map<rootPath, Set<autoExpandedPaths>>
+  const onlyDupsRef = useRef(onlyDups)
 
   // ── Stats ───────────────────────────────────────────────────────────────
   const [stats, setStats] = useState(null)
@@ -132,11 +134,28 @@ export default function App() {
       .catch(() => {})
   }, [minDupSize, categoryFilter, selectedHosts, hosts.length])
 
+  // ── Sync onlyDupsRef + clear auto-expanded on toggle off ──────────────
+  useEffect(() => {
+    onlyDupsRef.current = onlyDups
+    if (!onlyDups) setDupAutoExpanded(new Map())
+  }, [onlyDups])
+
+  // ── effectiveExpanded: manual + auto-expanded paths ──────────────────────
+  const effectiveExpanded = useMemo(() => {
+    if (dupAutoExpanded.size === 0) return expandedPaths
+    const union = new Set(expandedPaths)
+    for (const paths of dupAutoExpanded.values()) {
+      for (const p of paths) union.add(p)
+    }
+    return union
+  }, [expandedPaths, dupAutoExpanded])
+
   // ── When minDupSize changes, bust the ls cache so dup counts refresh ──────
   useEffect(() => {
     minDupSizeRef.current = minDupSize
     cacheRef.current.clear()
     setExpandedPaths(new Set())
+    setDupAutoExpanded(new Map())
     setLsFetchKey(k => k + 1)
   }, [minDupSize])
 
@@ -164,6 +183,24 @@ export default function App() {
     })
     setCacheVersion(v => v + 1)
   }, [])
+
+  // ── Fetch dup ancestor dirs for auto-expand ─────────────────────────────
+  const fetchDupAncestors = useCallback(async (rootPath) => {
+    const results = await Promise.allSettled(
+      [...selectedHosts].map(host =>
+        api.dupDirAncestors(host, rootPath, minDupSizeRef.current)
+      )
+    )
+    const allPaths = new Set()
+    for (const r of results) {
+      if (r.status === 'fulfilled' && Array.isArray(r.value?.paths)) {
+        for (const p of r.value.paths) allPaths.add(p)
+      }
+    }
+    if (allPaths.size === 0) return
+    setDupAutoExpanded(prev => { const next = new Map(prev); next.set(rootPath, allPaths); return next })
+    for (const p of allPaths) fetchPath(p, hosts)
+  }, [selectedHosts, hosts, fetchPath])
 
   // ── Directory search → expand tree to matching dirs ─────────────────────
   // NOTE: must be after `fetchPath` useCallback to avoid TDZ
@@ -217,6 +254,7 @@ export default function App() {
   const navigate = useCallback((path) => {
     setCurrentPath(path)
     setExpandedPaths(new Set())
+    setDupAutoExpanded(new Map())
     setFilenameQuery('')
     setCategoryFilter(new Set())
     setPinnedResults(null)
@@ -236,23 +274,45 @@ export default function App() {
     setSubtreeDupPath(null)
     setSelectedHosts(new Set(hosts.map(h => h.host)))
     setExpandedPaths(new Set())
+    setDupAutoExpanded(new Map())
   }, [hosts])
 
   // ── Toggle dir expansion ─────────────────────────────────────────────────
   const toggleDir = useCallback((fullPath) => {
-    setExpandedPaths(prev => {
-      const next = new Set(prev)
-      if (next.has(fullPath)) {
+    const isCurrentlyExpanded = effectiveExpanded.has(fullPath)
+    if (isCurrentlyExpanded) {
+      // Collapse manual expandedPaths
+      setExpandedPaths(prev => {
+        const next = new Set(prev)
         for (const p of next) {
           if (p === fullPath || p.startsWith(fullPath + '/')) next.delete(p)
         }
-      } else {
-        next.add(fullPath)
-        fetchPath(fullPath, hosts)
-      }
-      return next
-    })
-  }, [hosts, fetchPath])
+        return next
+      })
+      // Collapse auto-expanded: remove entry for this root + descendants from other roots
+      setDupAutoExpanded(prev => {
+        const next = new Map(prev)
+        next.delete(fullPath)
+        for (const [root, paths] of next) {
+          const filtered = new Set()
+          for (const p of paths) {
+            if (p !== fullPath && !p.startsWith(fullPath + '/')) filtered.add(p)
+          }
+          if (filtered.size !== paths.size) {
+            if (filtered.size === 0) next.delete(root)
+            else next.set(root, filtered)
+          }
+        }
+        return next
+      })
+    } else {
+      // Normal expand
+      setExpandedPaths(prev => new Set([...prev, fullPath]))
+      fetchPath(fullPath, hosts)
+      // Auto-expand if onlyDups is active
+      if (onlyDupsRef.current) fetchDupAncestors(fullPath)
+    }
+  }, [effectiveExpanded, hosts, fetchPath, fetchDupAncestors])
 
   // ── Handle sort column click (fixed: no nested setState) ─────────────────
   const handleSort = useCallback((col) => {
@@ -366,14 +426,14 @@ export default function App() {
       const fullPath = joinPath(parentPath, entry.segment)
       const fullDisplayPath = joinPath(parentDisplayPath, entry.segment_display || entry.segment)
       rows.push({ entry, parentPath, fullPath, fullDisplayPath, depth })
-      if (entry.entry_type === 'dir' && expandedPaths.has(fullPath)) {
+      if (entry.entry_type === 'dir' && effectiveExpanded.has(fullPath)) {
         rows.push(...buildRows(fullPath, depth + 1, fullDisplayPath))
       }
     }
 
     return rows
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hosts, selectedHosts, sortBy, sortDir, expandedPaths, cacheVersion])
+  }, [hosts, selectedHosts, sortBy, sortDir, effectiveExpanded, cacheVersion])
 
   // ── Active results: pinned > filename > hash ──────────────────────────────
   const activeResults = pinnedResults ?? filenameResults ?? hashResults
@@ -475,38 +535,39 @@ export default function App() {
         return row.entry.dup_count > 0 || Boolean(row.entry.other_hosts)
       })
 
-      // Find dirs that are expanded, have extraCopies>0, but have NO children surviving
-      // the strict filter. This happens when the duplicate is split across two sibling
-      // subdirectories — neither sibling has its own extraCopies but together they create
-      // the parent's. We need to let the user navigate into those dirs.
-      const strictChildPaths = new Set(strictFiltered.map(r => r.parentPath))
-      const emptyExpandedDirs = new Set()
+      // Build keep-set: strict rows + every ancestor dir up to root.
+      // This ensures the tree path to any dup is always visible, even
+      // through dirs whose own extraCopies is 0.
+      const keepPaths = new Set()
       strictFiltered.forEach(row => {
-        if (
-          row.entry.entry_type === 'dir' &&
-          expandedPaths.has(row.fullPath) &&
-          Math.max(0, (row.entry.dup_count || 0) - (row.entry.dup_hash_count || 0)) > 0 &&
-          !strictChildPaths.has(row.fullPath)
-        ) {
-          emptyExpandedDirs.add(row.fullPath)
+        keepPaths.add(row.fullPath)
+        const parts = row.fullPath.split('/').filter(Boolean)
+        for (let i = 1; i < parts.length; i++) {
+          keepPaths.add('/' + parts.slice(0, i).join('/'))
         }
       })
 
-      if (emptyExpandedDirs.size === 0) {
-        filtered = strictFiltered
-      } else {
-        const strictSet = new Set(strictFiltered)
-        filtered = filtered.filter(row => {
-          if (strictSet.has(row)) return true
-          if (row.entry.entry_type === 'dir' && emptyExpandedDirs.has(row.parentPath)) {
-            return (row.entry.dup_count || 0) > 0
-          }
-          return false
-        })
-      }
+      // Lenient expansion: when a strict dir is expanded but has no strict
+      // children (dup is split across sibling subdirs), show children with
+      // dup_count > 0 so the user can navigate into the split-dup structure.
+      const strictChildParents = new Set(strictFiltered.map(r => r.parentPath))
+      filtered.forEach(row => {
+        if (keepPaths.has(row.fullPath)) return
+        if (
+          row.entry.entry_type === 'dir' &&
+          effectiveExpanded.has(row.parentPath) &&
+          keepPaths.has(row.parentPath) &&
+          !strictChildParents.has(row.parentPath) &&
+          (row.entry.dup_count || 0) > 0
+        ) {
+          keepPaths.add(row.fullPath)
+        }
+      })
+
+      filtered = filtered.filter(row => keepPaths.has(row.fullPath))
     }
     return filtered
-  }, [allTreeRows, categoryFilter, minDupSize, onlyDups, expandedPaths])
+  }, [allTreeRows, categoryFilter, minDupSize, onlyDups, effectiveExpanded])
 
   // ── Rows: search overlay > dir-search path-chain filter > plain tree ──────
   const rows = useMemo(() => {
@@ -629,7 +690,7 @@ export default function App() {
           onDupSubtreeClick={handleDupSubtreeClick}
           highlightedPaths={highlightedPaths}
           matchedDirPaths={matchedDirPaths}
-          expandedPaths={expandedPaths}
+          expandedPaths={effectiveExpanded}
           isLoading={isLoading && !isSearchMode}
           filterActive={isSearchMode}
         />
