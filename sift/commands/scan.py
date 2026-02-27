@@ -237,7 +237,8 @@ class _ServerDown(Exception):
 
 _RETRY_TIMEOUT = 90  # seconds before giving up and aborting the scan
 _INTERRUPT_RETRY_TIMEOUT = 15  # shorter timeout when flushing on Ctrl-C
-_FLUSH_INTERVAL = 10  # flush accumulated records every 10 seconds
+_FLUSH_INTERVAL = 10       # flush upsert records every 10 seconds
+_SEEN_FLUSH_INTERVAL = 30  # flush seen-path records every 30 seconds
 
 
 def _post_with_retry(fn, label: str, retry_timeout: int = _RETRY_TIMEOUT) -> None:
@@ -436,7 +437,8 @@ def cmd_scan(args) -> None:
         # -------------------------------------------------------------------
         # 3. Walk
         # -------------------------------------------------------------------
-        seen_paths: list[dict] = []
+        seen_paths: list[dict] = []  # guarded by _seen_lock
+        _seen_lock = threading.Lock()
         # Maps (st_dev, st_ino) → hash for reusing hash across hard-linked paths.
         # Only populated when inode is non-zero (i.e., not Windows with st_ino=0).
         seen_inodes: dict[tuple[int, int], str] = {}
@@ -467,7 +469,9 @@ def cmd_scan(args) -> None:
         _last_stats_progress = time.time()
         _last_file_progress = _last_stats_progress
         _last_flush_time = time.time()
-        _flush_in_progress = threading.Lock()  # prevents concurrent flush attempts
+        _last_seen_flush_time = time.time()
+        _flush_in_progress = threading.Lock()  # prevents concurrent upsert flush attempts
+        _seen_flush_in_progress = threading.Lock()  # prevents concurrent seen flush attempts
         _render_lock = threading.Lock()
 
         def _queue_upsert(record: dict) -> None:
@@ -541,6 +545,49 @@ def cmd_scan(args) -> None:
                 _flush_in_progress.release()
             return len(pending)
 
+        def _queue_seen(path_entry: dict) -> None:
+            with _seen_lock:
+                seen_paths.append(path_entry)
+
+        def _flush_queued_seen(*, force: bool = False) -> int:
+            nonlocal _last_seen_flush_time
+            now = time.time()
+            with _seen_lock:
+                if not seen_paths:
+                    return 0
+                should_flush = (
+                    force
+                    or len(seen_paths) >= 10_000
+                    or (now - _last_seen_flush_time >= _SEEN_FLUSH_INTERVAL)
+                )
+                if not should_flush:
+                    return 0
+                pending = seen_paths[:]
+                seen_paths.clear()
+                prev_seen_flush_time = _last_seen_flush_time
+                _last_seen_flush_time = now
+
+            acquired = _seen_flush_in_progress.acquire(blocking=force)
+            if not acquired:
+                with _seen_lock:
+                    seen_paths[:0] = pending
+                    _last_seen_flush_time = prev_seen_flush_time
+                return 0
+            sent = 0
+            try:
+                for chunk in _chunks(pending, seen_batch_size):
+                    _flush_seen(chunk, host, scan_start_iso)
+                    sent += len(chunk)
+            except _ServerDown:
+                unsent = pending[sent:]
+                if unsent:
+                    with _seen_lock:
+                        seen_paths[:0] = unsent
+                raise
+            finally:
+                _seen_flush_in_progress.release()
+            return len(pending)
+
         def _maybe_render_progress(now: float) -> None:
             nonlocal _last_stats_progress, _last_file_progress
             if quiet:
@@ -570,6 +617,7 @@ def cmd_scan(args) -> None:
                 # blocked in a slow read (e.g., cloud recall on first chunk).
                 try:
                     _flush_queued_upserts()
+                    _flush_queued_seen()
                 except _ServerDown:
                     pass  # main thread handles the abort
                 if debug:
@@ -659,7 +707,7 @@ def cmd_scan(args) -> None:
                     # Cache check — if mtime+size unchanged, the DB record
                     # is already correct.  Just update last_seen_at.
                     if not needs_rehash(stat_result, cached):
-                        seen_paths.append({"drive": drive, "path": path_lower})
+                        _queue_seen({"drive": drive, "path": path_lower})
                         stats["files_cached"] += 1
                         stats["files_scanned"] += 1
                         now = time.time()
@@ -903,10 +951,29 @@ def cmd_scan(args) -> None:
         # Upsert: remaining records with new hash data
         _flush_queued_upserts(force=True)
 
-        # Seen: all collected after the walk in one or a few large requests.
-        # seen_batch_size is the max per request; server handles each as a single bulk UPDATE.
-        for chunk in _chunks(seen_paths, seen_batch_size):
+        # Seen: flush any remaining paths not yet delivered by the heartbeat.
+        with _seen_lock:
+            remaining_seen = seen_paths[:]
+            seen_paths.clear()
+        if remaining_seen and not quiet:
+            n_batches = math.ceil(len(remaining_seen) / seen_batch_size)
+            sys.stderr.write(
+                f"\nSaving {len(remaining_seen):,} seen-path updates"
+                f" ({n_batches} batch{'es' if n_batches != 1 else ''})..."
+            )
+            sys.stderr.flush()
+        sent_seen = 0
+        for chunk in _chunks(remaining_seen, seen_batch_size):
             _flush_seen(chunk, host, scan_start_iso)
+            sent_seen += len(chunk)
+            if remaining_seen and not quiet:
+                n_batches = math.ceil(len(remaining_seen) / seen_batch_size)
+                done = math.ceil(sent_seen / seen_batch_size)
+                sys.stderr.write(f"\r  seen-path updates: {done}/{n_batches}")
+                sys.stderr.flush()
+        if remaining_seen and not quiet:
+            sys.stderr.write("\r  seen-path updates: done.              \n")
+            sys.stderr.flush()
 
         # -------------------------------------------------------------------
         # 5. Finalize
@@ -994,6 +1061,26 @@ def cmd_scan(args) -> None:
                 sys.stderr.write("\n")
                 print(
                     "sift: server unreachable, buffered records not saved.",
+                    file=sys.stderr,
+                )
+        # Also flush pending seen-path updates (best-effort; lost paths just
+        # get a stale last_seen_at until the next scan, not a data loss).
+        with _seen_lock:
+            pending_seen_on_interrupt = seen_paths[:]
+            seen_paths.clear()
+        if pending_seen_on_interrupt:
+            print(
+                f"Saving {len(pending_seen_on_interrupt):,} seen-path updates"
+                " (Ctrl-C again to skip)...",
+                file=sys.stderr,
+            )
+            try:
+                for chunk in _chunks(pending_seen_on_interrupt, seen_batch_size):
+                    _flush_seen(chunk, host, scan_start_iso)
+                print("  done.", file=sys.stderr)
+            except (KeyboardInterrupt, _ServerDown):
+                print(
+                    "  skipped — affected files will be reprocessed on next scan.",
                     file=sys.stderr,
                 )
         try:
