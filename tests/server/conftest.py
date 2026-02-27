@@ -27,6 +27,9 @@ def fresh_db():
     """Give every server test a clean in-memory DuckDB."""
     db_module._conn = None
     db_module.init_db(":memory:")
+    # Clear any module-level caches that survive across tests
+    from server.main import _stats_cache
+    _stats_cache.clear()
     yield
     if db_module._conn:
         db_module._conn.close()
@@ -98,6 +101,10 @@ def insert_files(records: list[dict]) -> None:
         for r in records
     ]
     db_module.executemany(sql, data)
+    # Keep host_stats in sync — /hosts reads from this table, not files directly
+    hosts_seen = {r["host"] for r in records}
+    for host in hosts_seen:
+        db_module.refresh_host_stats(host)
 
 
 def insert_scan_run(host="mac", root_path="/", status="complete") -> int:

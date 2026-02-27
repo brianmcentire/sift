@@ -1,15 +1,17 @@
 """Pydantic request/response models for the sift server API."""
+
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
 # Ingest models
 # ---------------------------------------------------------------------------
+
 
 class FileRecord(BaseModel):
     host: str
@@ -45,6 +47,7 @@ class SeenRequest(BaseModel):
 # Scan run models
 # ---------------------------------------------------------------------------
 
+
 class ScanRunCreate(BaseModel):
     host: str
     root_path: str
@@ -69,6 +72,7 @@ class ScanRunResponse(BaseModel):
 # Response models
 # ---------------------------------------------------------------------------
 
+
 class UpsertResponse(BaseModel):
     upserted: int
 
@@ -80,6 +84,23 @@ class SeenResponse(BaseModel):
 class ScanRunCreatedResponse(BaseModel):
     id: int
 
+
+class TrimRequest(BaseModel):
+    host: str
+    path_prefix: str
+    recursive: bool = False
+    deleted_only: bool = False
+    patterns: list[str] = Field(default_factory=list)
+    limit: int = 5000
+    count_only: bool = False
+    preview: bool = False
+    offset: int = 0
+
+
+class TrimResponse(BaseModel):
+    matched: int
+    deleted: int
+    preview_paths: list[str] = Field(default_factory=list)
 
 
 class LsEntry(BaseModel):

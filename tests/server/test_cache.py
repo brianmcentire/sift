@@ -18,7 +18,8 @@ class TestGetCache:
         insert_files([make_file(path="/users/brian/file.txt")])
         resp = client.get("/files/cache", params={"host": "mac", "root": "/users/brian"})
         files = resp.json()["files"]
-        paths = [f["path"] for f in files]
+        # Cache returns compact arrays: [path, mtime, size_bytes]
+        paths = [f[0] for f in files]
         assert "/users/brian/file.txt" in paths
 
     def test_files_outside_root_excluded(self, client):
@@ -28,7 +29,7 @@ class TestGetCache:
         ])
         resp = client.get("/files/cache", params={"host": "mac", "root": "/users/brian"})
         files = resp.json()["files"]
-        paths = [f["path"] for f in files]
+        paths = [f[0] for f in files]
         assert all(p.startswith("/users/brian") for p in paths)
 
     def test_other_host_files_excluded(self, client):
@@ -43,9 +44,10 @@ class TestGetCache:
     def test_response_includes_mtime_and_size(self, client):
         insert_files([make_file(path="/users/brian/file.txt", size=4096, mtime=1700000000)])
         resp = client.get("/files/cache", params={"host": "mac", "root": "/users/brian"})
+        # Cache returns compact arrays: [path, mtime, size_bytes]
         f = resp.json()["files"][0]
-        assert f["mtime"] == 1700000000
-        assert f["size_bytes"] == 4096
+        assert f[1] == 1700000000
+        assert f[2] == 4096
 
     def test_empty_root_returns_empty(self, client):
         resp = client.get("/files/cache", params={"host": "mac", "root": "/users/nobody"})
@@ -63,6 +65,6 @@ class TestGetCache:
         ])
         resp = client.get("/files/cache", params={"host": "mac", "root": "/users/brian"})
         files = resp.json()["files"]
-        paths = [f["path"] for f in files]
+        paths = [f[0] for f in files]
         assert all(p.startswith("/users/brian/") or p == "/users/brian" for p in paths)
         assert not any(p.startswith("/users/brian2") for p in paths)

@@ -1,4 +1,5 @@
 """FastAPI application — all endpoints."""
+
 from __future__ import annotations
 
 import logging
@@ -37,6 +38,8 @@ from server.models import (
     SeenRequest,
     SeenResponse,
     StatsOverview,
+    TrimRequest,
+    TrimResponse,
     UpsertResponse,
 )
 
@@ -62,9 +65,13 @@ async def log_requests(request: Request, call_next):
     if path.startswith("/assets/") or path == "/favicon.ico":
         return response
     if elapsed > 1.0:
-        logger.warning("%s %s %d — %.1fs", request.method, path, response.status_code, elapsed)
+        logger.warning(
+            "%s %s %d — %.1fs", request.method, path, response.status_code, elapsed
+        )
     elif request.method in ("POST", "PATCH"):
-        logger.info("%s %s %d — %.3fs", request.method, path, response.status_code, elapsed)
+        logger.info(
+            "%s %s %d — %.3fs", request.method, path, response.status_code, elapsed
+        )
     return response
 
 
@@ -74,6 +81,7 @@ async def log_requests(request: Request, call_next):
 # ---------------------------------------------------------------------------
 # Scan runs
 # ---------------------------------------------------------------------------
+
 
 @app.post("/scan-runs", response_model=ScanRunCreatedResponse)
 def create_scan_run(body: ScanRunCreate):
@@ -94,20 +102,29 @@ def create_scan_run(body: ScanRunCreate):
     db.execute(
         "INSERT INTO scan_runs (host, root_path, root_path_display, started_at, status) "
         "VALUES (?, ?, ?, ?, 'running')",
-        [body.host, body.root_path, body.root_path_display, body.started_at.isoformat()],
+        [
+            body.host,
+            body.root_path,
+            body.root_path_display,
+            body.started_at.isoformat(),
+        ],
     )
     row = db.query_one(
         "SELECT id FROM scan_runs WHERE host = ? AND root_path = ? AND status = 'running' "
         "ORDER BY id DESC LIMIT 1",
         [body.host, body.root_path],
     )
+    if row is None:
+        raise HTTPException(500, "failed to create scan run")
     return {"id": row[0]}
 
 
 @app.patch("/scan-runs/{run_id}")
 def patch_scan_run(run_id: int, body: ScanRunPatch):
     if body.status not in ("complete", "failed", "interrupted"):
-        raise HTTPException(400, "status must be 'complete', 'failed', or 'interrupted'")
+        raise HTTPException(
+            400, "status must be 'complete', 'failed', or 'interrupted'"
+        )
     # Look up host before UPDATE so we can refresh its stats
     row = db.query_one("SELECT host FROM scan_runs WHERE id = ?", [run_id])
     db.execute(
@@ -135,8 +152,14 @@ def list_scan_runs(host: Optional[str] = None, limit: int = Query(50, le=500)):
             [limit],
         )
     return [
-        ScanRunResponse(id=r[0], host=r[1], root_path=r[2], root_path_display=r[3],
-                        started_at=r[4], status=r[5])
+        ScanRunResponse(
+            id=r[0],
+            host=r[1],
+            root_path=r[2],
+            root_path_display=r[3],
+            started_at=r[4],
+            status=r[5],
+        )
         for r in rows
     ]
 
@@ -144,6 +167,7 @@ def list_scan_runs(host: Optional[str] = None, limit: int = Query(50, le=500)):
 # ---------------------------------------------------------------------------
 # File ingest
 # ---------------------------------------------------------------------------
+
 
 @app.post("/files", response_model=UpsertResponse)
 def upsert_files(records: list[FileRecord]):
@@ -179,13 +203,26 @@ def upsert_files(records: list[FileRecord]):
     """
     params: list = []
     for r in records:
-        params.extend([
-            r.host, r.drive, r.path, r.path_display, r.filename, r.ext, r.file_category,
-            r.size_bytes, r.hash, r.mtime,
-            r.last_checked.isoformat(), r.source_os, r.skipped_reason,
-            r.last_seen_at.isoformat(),
-            r.inode, r.device,
-        ])
+        params.extend(
+            [
+                r.host,
+                r.drive,
+                r.path,
+                r.path_display,
+                r.filename,
+                r.ext,
+                r.file_category,
+                r.size_bytes,
+                r.hash,
+                r.mtime,
+                r.last_checked.isoformat(),
+                r.source_os,
+                r.skipped_reason,
+                r.last_seen_at.isoformat(),
+                r.inode,
+                r.device,
+            ]
+        )
     db.execute(sql, params)
     elapsed = time.monotonic() - start
     if elapsed > 2.0:
@@ -216,8 +253,159 @@ def mark_files_seen(body: SeenRequest):
 
 
 # ---------------------------------------------------------------------------
+# Trim
+# ---------------------------------------------------------------------------
+
+
+def _glob_to_like(glob_pat: str) -> str:
+    return (
+        glob_pat.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+        .replace("*", "%")
+        .replace("?", "_")
+    )
+
+
+def _trim_scope_sql(path_prefix: str, recursive: bool) -> tuple[str, list]:
+    prefix = path_prefix.lower().rstrip("/")
+    if recursive:
+        return "(f.path = ? OR f.path LIKE ?)", [prefix, prefix + "/%"]
+
+    if prefix == "":
+        # Direct children of root only: '/a' yes, '/a/b' no
+        return (
+            "(f.path LIKE '/%' AND POSITION('/' IN SUBSTR(f.path, 2)) = 0)",
+            [],
+        )
+
+    # Direct children of /a/b only: /a/b/x yes, /a/b/x/y no
+    base = prefix + "/"
+    start_idx = len(base) + 1  # DuckDB SUBSTR is 1-indexed
+    return (
+        "(f.path LIKE ? AND POSITION('/' IN SUBSTR(f.path, ?)) = 0)",
+        [base + "%", start_idx],
+    )
+
+
+def _trim_candidates_cte(body: TrimRequest) -> tuple[str, list]:
+    where = ["f.host = ?"]
+    params: list = [body.host]
+
+    scope_sql, scope_params = _trim_scope_sql(body.path_prefix, body.recursive)
+    where.append(scope_sql)
+    params.extend(scope_params)
+
+    if body.patterns:
+        clauses = []
+        for pat in body.patterns:
+            clauses.append("f.filename LIKE ? ESCAPE '\\'")
+            params.append(_glob_to_like(pat))
+        where.append("(" + " OR ".join(clauses) + ")")
+
+    base_where = " AND ".join(where)
+
+    if not body.deleted_only:
+        sql = f"""
+            candidates AS (
+                SELECT f.host, f.drive, f.path
+                FROM files f
+                WHERE {base_where}
+            )
+        """
+        return sql, params
+
+    # deleted_only: only rows stale relative to latest covering COMPLETE scan.
+    # Rows with no covering complete scan are intentionally excluded.
+    sql = f"""
+        covered AS (
+            SELECT
+                f.host, f.drive, f.path,
+                MAX(sr.started_at) AS latest_complete_started_at
+            FROM files f
+            JOIN scan_runs sr
+              ON sr.host = f.host
+             AND sr.status = 'complete'
+             AND (f.path = sr.root_path OR f.path LIKE sr.root_path || '/%')
+            WHERE {base_where}
+            GROUP BY f.host, f.drive, f.path
+        ),
+        candidates AS (
+            SELECT f.host, f.drive, f.path
+            FROM files f
+            JOIN covered c
+              ON c.host = f.host AND c.drive = f.drive AND c.path = f.path
+            WHERE f.last_seen_at < c.latest_complete_started_at
+        )
+    """
+    return sql, params
+
+
+@app.post("/trim", response_model=TrimResponse)
+def trim_files(body: TrimRequest):
+    if body.limit < 1 or body.limit > 100_000:
+        raise HTTPException(400, "limit must be between 1 and 100000")
+    if body.offset < 0:
+        raise HTTPException(400, "offset must be >= 0")
+
+    body.path_prefix = body.path_prefix.lower().rstrip("/")
+    if body.path_prefix == ".":
+        body.path_prefix = ""
+
+    cte_sql, cte_params = _trim_candidates_cte(body)
+
+    count_row = db.query_one(
+        f"""
+        WITH {cte_sql}
+        SELECT COUNT(*) FROM candidates
+        """,
+        cte_params,
+    )
+    matched = count_row[0] if count_row else 0
+
+    if body.count_only or matched == 0:
+        preview_paths: list[str] = []
+        if body.preview and matched > 0:
+            preview_rows = db.query(
+                f"""
+                WITH {cte_sql}
+                SELECT f.path_display
+                FROM files f
+                JOIN candidates c
+                  ON c.host = f.host AND c.drive = f.drive AND c.path = f.path
+                ORDER BY f.path
+                LIMIT ? OFFSET ?
+                """,
+                cte_params + [body.limit, body.offset],
+            )
+            preview_paths = [r[0] for r in preview_rows]
+        return {"matched": matched, "deleted": 0, "preview_paths": preview_paths}
+
+    to_delete_sql = f"""
+        WITH {cte_sql},
+        to_delete AS (
+            SELECT host, drive, path
+            FROM candidates
+            LIMIT ?
+        )
+        DELETE FROM files f
+        USING to_delete d
+        WHERE f.host = d.host AND f.drive = d.drive AND f.path = d.path
+    """
+    db.execute(to_delete_sql, cte_params + [body.limit])
+    deleted = min(matched, body.limit)
+
+    if deleted > 0:
+        db.refresh_host_stats(body.host)
+        _invalidate_stats_cache()
+
+    return {"matched": matched, "deleted": deleted, "preview_paths": []}
+
+
+# ---------------------------------------------------------------------------
 # Cache endpoint (rehash optimization)
 # ---------------------------------------------------------------------------
+
 
 @app.get("/files/cache")
 def get_cache(host: str, root: str):
@@ -255,13 +443,15 @@ def get_cache_stream(host: str, root: str):
 # File listing
 # ---------------------------------------------------------------------------
 
+
 @app.get("/files/ls/dup-hash")
 def ls_dup_hash(path: str = Query("/"), host: str = Query("")):
     """Return the first duplicated hash found within the given subtree for a host.
     Uses the same hard-link exclusion logic as the dupes CTE in ls_files so the
     returned hash is guaranteed to appear >= 2 times in /files?hash=X."""
     prefix = path.lower().rstrip("/")
-    row = db.query_one("""
+    row = db.query_one(
+        """
         WITH hard_linked_inodes AS (
             SELECT device, inode FROM files
             WHERE host = ? AND inode IS NOT NULL AND device IS NOT NULL
@@ -282,9 +472,13 @@ def ls_dup_hash(path: str = Query("/"), host: str = Query("")):
               GROUP BY hash HAVING COUNT(*) > 1
           )
         LIMIT 1
-    """, [host, host, prefix + "/%", prefix, host])
+    """,
+        [host, host, prefix + "/%", prefix, host],
+    )
     if row is None:
-        raise HTTPException(status_code=404, detail="No duplicate hash found in subtree")
+        raise HTTPException(
+            status_code=404, detail="No duplicate hash found in subtree"
+        )
     return {"hash": row[0]}
 
 
@@ -367,24 +561,26 @@ def ls_files(
     rows = db.query(sql, params)
     result = []
     for r in rows:
-        result.append(LsEntry(
-            segment=r[0],
-            entry_type=r[1],
-            file_count=r[2] or 0,
-            total_bytes=r[3],
-            dup_count=r[4] or 0,
-            dup_hash_count=r[5] or 0,
-            filename=r[6],
-            size_bytes=r[7],
-            hash=r[8],
-            mtime=r[9],
-            last_seen_at=r[10],
-            file_category=r[11],
-            path_display=r[12],
-            segment_display=r[13],
-            other_hosts=r[14],
-            is_hard_linked=bool(r[15]),
-        ))
+        result.append(
+            LsEntry(
+                segment=r[0],
+                entry_type=r[1],
+                file_count=r[2] or 0,
+                total_bytes=r[3],
+                dup_count=r[4] or 0,
+                dup_hash_count=r[5] or 0,
+                filename=r[6],
+                size_bytes=r[7],
+                hash=r[8],
+                mtime=r[9],
+                last_seen_at=r[10],
+                file_category=r[11],
+                path_display=r[12],
+                segment_display=r[13],
+                other_hosts=r[14],
+                is_hard_linked=bool(r[15]),
+            )
+        )
     return result
 
 
@@ -438,11 +634,23 @@ def list_files(
     if name:
         # glob-style: convert * → %, ? → _, escape literal % and _ with backslash.
         # ESCAPE '\' tells DuckDB to treat \ as the escape character in this LIKE.
-        sql_pat = name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_").replace("*", "%").replace("?", "_")
+        sql_pat = (
+            name.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+            .replace("*", "%")
+            .replace("?", "_")
+        )
         conditions.append("f.filename LIKE ? ESCAPE '\\'")
         params.append(sql_pat)
     if iname:
-        sql_pat = iname.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_").replace("*", "%").replace("?", "_")
+        sql_pat = (
+            iname.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+            .replace("*", "%")
+            .replace("?", "_")
+        )
         conditions.append("LOWER(f.filename) LIKE LOWER(?) ESCAPE '\\'")
         params.append(sql_pat)
 
@@ -480,9 +688,17 @@ def list_files(
     rows = db.query(sql, params)
     return [
         FileEntry(
-            host=r[0], drive=r[1], path_display=r[2], filename=r[3],
-            ext=r[4], file_category=r[5], size_bytes=r[6], hash=r[7],
-            mtime=r[8], last_seen_at=r[9], other_hosts=r[10],
+            host=r[0],
+            drive=r[1],
+            path_display=r[2],
+            filename=r[3],
+            ext=r[4],
+            file_category=r[5],
+            size_bytes=r[6],
+            hash=r[7],
+            mtime=r[8],
+            last_seen_at=r[9],
+            other_hosts=r[10],
         )
         for r in rows
     ]
@@ -491,6 +707,7 @@ def list_files(
 # ---------------------------------------------------------------------------
 # Hosts
 # ---------------------------------------------------------------------------
+
 
 @app.get("/init")
 def init_data(request: Request, path: str = "/", min_size: int = Query(0, ge=0)):
@@ -519,7 +736,12 @@ def init_data(request: Request, path: str = "/", min_size: int = Query(0, ge=0))
 @app.get("/hosts", response_model=list[HostEntry])
 def list_hosts():
     rows = db.query("""
-        WITH latest_run AS (
+        WITH all_hosts AS (
+            SELECT host FROM host_stats
+            UNION
+            SELECT DISTINCT host FROM scan_runs
+        ),
+        latest_run AS (
             SELECT host, root_path, root_path_display, started_at,
                    ROW_NUMBER() OVER (PARTITION BY host ORDER BY id DESC) AS rn
             FROM scan_runs
@@ -529,18 +751,23 @@ def list_hosts():
             FROM scan_runs WHERE status = 'complete'
             GROUP BY host
         )
-        SELECT hs.host, lc.last_scan_at,
+        SELECT ah.host, lc.last_scan_at,
                COALESCE(lr.root_path_display, lr.root_path) AS last_scan_root,
-               hs.total_files, hs.total_bytes, hs.total_hashed
-        FROM host_stats hs
-        LEFT JOIN latest_run lr ON lr.host = hs.host AND lr.rn = 1
-        LEFT JOIN latest_complete lc ON lc.host = hs.host
-        ORDER BY hs.host
+               COALESCE(hs.total_files, 0), hs.total_bytes, COALESCE(hs.total_hashed, 0)
+        FROM all_hosts ah
+        LEFT JOIN host_stats hs ON hs.host = ah.host
+        LEFT JOIN latest_run lr ON lr.host = ah.host AND lr.rn = 1
+        LEFT JOIN latest_complete lc ON lc.host = ah.host
+        ORDER BY ah.host
     """)
     return [
         HostEntry(
-            host=r[0], last_scan_at=r[1], last_scan_root=r[2],
-            total_files=r[3], total_bytes=r[4], total_hashed=r[5],
+            host=r[0],
+            last_scan_at=r[1],
+            last_scan_root=r[2],
+            total_files=r[3],
+            total_bytes=r[4],
+            total_hashed=r[5],
         )
         for r in rows
     ]
@@ -565,7 +792,9 @@ def _invalidate_stats_cache() -> None:
 @app.get("/stats/overview", response_model=StatsOverview)
 def stats_overview(
     min_size: int = Query(0, ge=0),
-    categories: str = Query("", description="Comma-separated file categories to filter dup stats"),
+    categories: str = Query(
+        "", description="Comma-separated file categories to filter dup stats"
+    ),
     hosts: str = Query("", description="Comma-separated host names to filter stats"),
 ):
     cache_key = (min_size, categories, hosts)
@@ -575,13 +804,14 @@ def stats_overview(
         if time.monotonic() - ts < _STATS_CACHE_TTL:
             return result
 
-    host_list = [h.strip() for h in hosts.split(',') if h.strip()] if hosts else []
+    host_list = [h.strip() for h in hosts.split(",") if h.strip()] if hosts else []
     host_where = ""
     if host_list:
-        placeholders = ', '.join(['?' for _ in host_list])
+        placeholders = ", ".join(["?" for _ in host_list])
         host_where = f"AND host IN ({placeholders})"
 
-    row = db.query_one(f"""
+    row = db.query_one(
+        f"""
         WITH dup_hashes AS (
             SELECT hash FROM files
             WHERE hash IS NOT NULL {host_where}
@@ -596,18 +826,23 @@ def stats_overview(
         FROM files f
         LEFT JOIN dup_hashes dh ON f.hash = dh.hash
         WHERE 1=1 {host_where}
-    """, host_list + host_list)
+    """,
+        host_list + host_list,
+    )
 
     # Dup sets / wasted bytes, optionally filtered by min_size, categories, and hosts
-    category_list = [c.strip() for c in categories.split(',') if c.strip()] if categories else []
+    category_list = (
+        [c.strip() for c in categories.split(",") if c.strip()] if categories else []
+    )
     cat_clause = ""
     dup_params = [min_size] + host_list
     if category_list:
-        placeholders = ', '.join(['?' for _ in category_list])
+        placeholders = ", ".join(["?" for _ in category_list])
         cat_clause = f"AND file_category IN ({placeholders})"
         dup_params += category_list
 
-    dup_row = db.query_one(f"""
+    dup_row = db.query_one(
+        f"""
         SELECT
             COUNT(DISTINCT hash) AS dup_sets,
             SUM(size_bytes) - SUM(min_size) AS wasted
@@ -621,7 +856,9 @@ def stats_overview(
             GROUP BY hash
             HAVING COUNT(*) > 1
         ) t
-    """, dup_params)
+    """,
+        dup_params,
+    )
 
     total_files = row[0] if row else 0
     total_hosts = row[1] if row else 0
@@ -675,20 +912,23 @@ def stats_duplicates(
             DuplicateLocation(host=lr[0], drive=lr[1], path_display=lr[2])
             for lr in loc_rows
         ]
-        result.append(DuplicateSet(
-            hash=hash_val,
-            filename=filename,
-            size_bytes=size_bytes,
-            copy_count=copy_count,
-            wasted_bytes=wasted_bytes,
-            locations=locations,
-        ))
+        result.append(
+            DuplicateSet(
+                hash=hash_val,
+                filename=filename,
+                size_bytes=size_bytes,
+                copy_count=copy_count,
+                wasted_bytes=wasted_bytes,
+                locations=locations,
+            )
+        )
     return result
 
 
 # ---------------------------------------------------------------------------
 # Directory autocomplete
 # ---------------------------------------------------------------------------
+
 
 @app.get("/directories")
 def list_directories(q: str = "", limit: int = Query(20, le=100)):
@@ -719,17 +959,20 @@ def list_directories(q: str = "", limit: int = Query(20, le=100)):
     q_lower = q.lower()
     extra = {}
     for dir_path in list(results):
-        parts = dir_path.split("/")  # ['', 'users', 'brian', 'downloads', 'betterzip.app', ...]
+        parts = dir_path.split(
+            "/"
+        )  # ['', 'users', 'brian', 'downloads', 'betterzip.app', ...]
         for i in range(2, len(parts)):
             ancestor = "/".join(parts[:i])
-            if q_lower in ancestor.lower() and ancestor not in results and ancestor not in extra:
+            if (
+                q_lower in ancestor.lower()
+                and ancestor not in results
+                and ancestor not in extra
+            ):
                 extra[ancestor] = ancestor  # no display path available; use raw path
 
     results.update(extra)
-    return [
-        {"dir_path": p, "dir_display": results[p]}
-        for p in sorted(results)[:limit]
-    ]
+    return [{"dir_path": p, "dir_display": results[p]} for p in sorted(results)[:limit]]
 
 
 # ---------------------------------------------------------------------------

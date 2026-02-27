@@ -39,10 +39,11 @@ class TestUpsertFiles:
         client.post("/files", json=[updated])
 
         # Verify update took effect via cache endpoint
+        # Cache returns compact arrays: [path, mtime, size_bytes]
         resp = client.get("/files/cache", params={"host": "mac", "root": "/users/brian"})
         files = resp.json()["files"]
         assert len(files) == 1
-        assert files[0]["size_bytes"] == 2000
+        assert files[0][2] == 2000
 
     def test_upsert_conflict_on_host_drive_path(self, client):
         """Inserting the same (host, drive, path) twice should not double-count."""
