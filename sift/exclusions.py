@@ -121,7 +121,7 @@ EXCLUDED_EXTENSIONS: frozenset[str] = frozenset(
 # ---------------------------------------------------------------------------
 VOLATILE_EXTENSIONS: frozenset[str] = frozenset(
     """
-    vmdk vdi vhd vhdx qcow2 img
+    vmdk vdi vhd vhdx qcow2 img raw
     ost nst pst
     """.split()
 )
@@ -245,3 +245,18 @@ def is_volatile_active(
     age_seconds = time.time() - mtime
     threshold_seconds = threshold_days * 86400
     return age_seconds < threshold_seconds
+
+
+def is_sparse_file(st_size: int, st_blocks: int, source_os: str) -> bool:
+    """Return True for large sparse files (VM disk images, container stores, etc.).
+
+    st_blocks is in 512-byte units on POSIX. A file is considered sparse when
+    it is >= 1 GB in logical size but less than 10% of that is actually
+    allocated on disk. Skipped on Windows where st_blocks is unreliable.
+    """
+    if source_os == "windows":
+        return False
+    if st_size < 1_000_000_000:  # ignore sub-1GB files
+        return False
+    actual_bytes = st_blocks * 512
+    return actual_bytes < st_size // 10

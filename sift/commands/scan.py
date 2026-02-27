@@ -13,7 +13,7 @@ from typing import Optional
 from sift import client
 from sift.classify import classify_file
 from sift.config import get_agent_config
-from sift.exclusions import is_excluded_dir, is_excluded_file, is_volatile_active
+from sift.exclusions import is_excluded_dir, is_excluded_file, is_sparse_file, is_volatile_active
 from sift.hash_utils import hash_file, needs_rehash
 from sift.normalize import (
     get_source_os,
@@ -497,6 +497,23 @@ def cmd_scan(args) -> None:
 
                     stats["bytes_scanned"] += stat_result.st_size
                     display["current_file"] = raw_path
+
+                    # Sparse files (VM disk images, container stores, etc.):
+                    # logical size >> actual on-disk bytes — hashing would read
+                    # the full logical size (potentially TBs of holes).
+                    if is_sparse_file(stat_result.st_size, stat_result.st_blocks, source_os):
+                        if debug:
+                            _debug(f"[sparse_file]    {raw_path}")
+                        upsert_records.append(_make_record(
+                            host=host, drive=drive, path=path_lower, path_display=path_display,
+                            filename=filename, ext=ext, file_category=category,
+                            size_bytes=stat_result.st_size, hash_val=None,
+                            mtime=mtime_val, scan_start_iso=scan_start_iso,
+                            source_os=source_os, skipped_reason="sparse_file",
+                            inode=inode_val, device=device_val,
+                        ))
+                        stats["files_skipped"] += 1
+                        continue
 
                     # macOS: skip APFS dataless stubs and Mail partial downloads — no local bytes to hash
                     if _is_macos_dataless(stat_result.st_blocks, source_os):
