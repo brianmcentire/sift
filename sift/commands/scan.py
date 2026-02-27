@@ -221,16 +221,17 @@ class _ServerDown(Exception):
 
 
 _RETRY_TIMEOUT = 90          # seconds before giving up and aborting the scan
+_INTERRUPT_RETRY_TIMEOUT = 15  # shorter timeout when flushing on Ctrl-C
 _FLUSH_INTERVAL = 60  # flush accumulated records at least every minute
 
 
-def _post_with_retry(fn, label: str) -> None:
-    """Call fn(), retrying with exponential backoff up to _RETRY_TIMEOUT seconds.
+def _post_with_retry(fn, label: str, retry_timeout: int = _RETRY_TIMEOUT) -> None:
+    """Call fn(), retrying with exponential backoff up to retry_timeout seconds.
 
     Prints a single warning on first failure, then retries silently.
     Raises _ServerDown if the server remains unreachable for the full timeout.
     """
-    deadline = time.time() + _RETRY_TIMEOUT
+    deadline = time.time() + retry_timeout
     delay = 2
     first = True
     while True:
@@ -241,11 +242,11 @@ def _post_with_retry(fn, label: str) -> None:
             remaining = deadline - time.time()
             if remaining <= 0:
                 raise _ServerDown(
-                    f"server unreachable for {_RETRY_TIMEOUT}s ({label}): {e}"
+                    f"server unreachable for {retry_timeout}s ({label}): {e}"
                 ) from e
             if first:
                 print(
-                    f"\nsift: server unreachable ({label}), retrying for up to {_RETRY_TIMEOUT}s…",
+                    f"\nsift: server unreachable ({label}), retrying for up to {retry_timeout}s…",
                     file=sys.stderr,
                 )
                 first = False
@@ -424,10 +425,17 @@ def cmd_scan(args) -> None:
                 _last_file_progress = now
 
         def _on_chunk(_nbytes: int) -> None:
-            if quiet:
-                return
+            nonlocal _last_flush_time
             now = time.time()
-            _maybe_render_progress(now)
+            if not quiet:
+                _maybe_render_progress(now)
+            # Flush accumulated records even while blocked mid-hash on a slow file,
+            # so Ctrl-C has nothing (or little) left to flush.
+            if upsert_records and now - _last_flush_time >= _FLUSH_INTERVAL:
+                for chunk in _chunks(upsert_records, upsert_batch_size):
+                    _flush_upsert(chunk, host, scan_start_iso)
+                upsert_records.clear()
+                _last_flush_time = now
 
         onerror = _onerror_debug if debug else _onerror
 
@@ -702,11 +710,29 @@ def cmd_scan(args) -> None:
         stop_event.set()
         print("\nScan interrupted.", file=sys.stderr)
         if upsert_records:
-            print(f"Flushing {len(upsert_records)} buffered records...", file=sys.stderr)
+            total = len(upsert_records)
+            print(
+                f"Saving {total:,} buffered records (Ctrl-C again to discard)...",
+                file=sys.stderr,
+            )
+            flushed = 0
             try:
                 for chunk in _chunks(upsert_records, upsert_batch_size):
-                    _flush_upsert(chunk, host, scan_start_iso)
+                    _flush_upsert(chunk, host, scan_start_iso,
+                                  retry_timeout=_INTERRUPT_RETRY_TIMEOUT)
+                    flushed += len(chunk)
+                    sys.stderr.write(f"\r  {flushed:,} / {total:,}")
+                    sys.stderr.flush()
+                sys.stderr.write(f"\r  {total:,} / {total:,}  done.\n")
+                sys.stderr.flush()
+            except KeyboardInterrupt:
+                sys.stderr.write(
+                    f"\n  Discarded {total - flushed:,} records"
+                    " — they'll be rehashed on next scan.\n"
+                )
+                sys.stderr.flush()
             except _ServerDown:
+                sys.stderr.write("\n")
                 print("sift: server unreachable, buffered records not saved.", file=sys.stderr)
         try:
             client.patch(f"/scan-runs/{run_id}", {"status": "interrupted"})
@@ -740,10 +766,11 @@ def _make_record(
     }
 
 
-def _flush_upsert(records: list[dict], host: str, scan_start_iso: str) -> None:
+def _flush_upsert(records: list[dict], host: str, scan_start_iso: str,
+                  retry_timeout: int = _RETRY_TIMEOUT) -> None:
     if not records:
         return
-    _post_with_retry(lambda: client.post("/files", records), "upsert")
+    _post_with_retry(lambda: client.post("/files", records), "upsert", retry_timeout)
 
 
 def _flush_seen(paths: list[dict], host: str, scan_start_iso: str) -> None:
