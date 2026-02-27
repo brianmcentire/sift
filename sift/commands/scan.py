@@ -149,9 +149,9 @@ def _print_progress(
             f" | {mb_rate:.1f} MB/s"
             f" | {_format_size(stats['bytes_scanned'])}"
         )
-        pct = min(100.0, stats["files_scanned"] * 100.0 / total)
+        pct = 100.0 if final else min(100.0, stats["files_scanned"] * 100.0 / total)
         line1 += f" | {pct:.0f}%"
-        if files_rate > 0 and stats["files_scanned"] < total:
+        if not final and files_rate > 0 and stats["files_scanned"] < total:
             ete_secs = (total - stats["files_scanned"]) / files_rate
             line1 += f" ETE {_format_duration(ete_secs)}"
     else:
@@ -238,7 +238,7 @@ class _ServerDown(Exception):
 _RETRY_TIMEOUT = 90  # seconds before giving up and aborting the scan
 _INTERRUPT_RETRY_TIMEOUT = 15  # shorter timeout when flushing on Ctrl-C
 _FLUSH_INTERVAL = 10       # flush upsert records every 10 seconds
-_SEEN_FLUSH_INTERVAL = 30  # flush seen-path records every 30 seconds
+_SEEN_FLUSH_INTERVAL = 10  # flush seen-path records every 10 seconds
 
 
 def _post_with_retry(fn, label: str, retry_timeout: int = _RETRY_TIMEOUT) -> None:
@@ -473,6 +473,7 @@ def cmd_scan(args) -> None:
         _flush_in_progress = threading.Lock()  # prevents concurrent upsert flush attempts
         _seen_flush_in_progress = threading.Lock()  # prevents concurrent seen flush attempts
         _render_lock = threading.Lock()
+        _seen_stats = {"queued": 0, "heartbeat_sent": 0, "finalize_sent": 0, "max_depth": 0}
 
         def _queue_upsert(record: dict) -> None:
             with _upsert_lock:
@@ -548,6 +549,11 @@ def cmd_scan(args) -> None:
         def _queue_seen(path_entry: dict) -> None:
             with _seen_lock:
                 seen_paths.append(path_entry)
+                if debug:
+                    _seen_stats["queued"] += 1
+                    depth = len(seen_paths)
+                    if depth > _seen_stats["max_depth"]:
+                        _seen_stats["max_depth"] = depth
 
         def _flush_queued_seen(*, force: bool = False) -> int:
             nonlocal _last_seen_flush_time
@@ -557,7 +563,7 @@ def cmd_scan(args) -> None:
                     return 0
                 should_flush = (
                     force
-                    or len(seen_paths) >= 10_000
+                    or len(seen_paths) >= 2_000
                     or (now - _last_seen_flush_time >= _SEEN_FLUSH_INTERVAL)
                 )
                 if not should_flush:
@@ -586,7 +592,7 @@ def cmd_scan(args) -> None:
                 raise
             finally:
                 _seen_flush_in_progress.release()
-            return len(pending)
+            return sent
 
         def _maybe_render_progress(now: float) -> None:
             nonlocal _last_stats_progress, _last_file_progress
@@ -602,33 +608,33 @@ def cmd_scan(args) -> None:
                     _last_file_progress = now
 
         def _progress_heartbeat() -> None:
-            """Keep elapsed time moving during slow blocking reads/network stalls."""
+            """Keep elapsed time moving and deliver buffered records continuously."""
             nonlocal _last_stats_progress, _last_file_progress
             while not _progress_stop.wait(0.25):
-                if quiet:
-                    continue
-                now = time.time()
-                with _render_lock:
-                    if now - _last_stats_progress >= _stats_progress_interval:
-                        _print_progress(stats, scan_start, display)
-                        _last_stats_progress = now
-                        _last_file_progress = now
-                # Continue delivering buffered records even if the main thread is
-                # blocked in a slow read (e.g., cloud recall on first chunk).
+                # UI rendering — quiet mode skips all stderr output
+                if not quiet:
+                    now = time.time()
+                    with _render_lock:
+                        if now - _last_stats_progress >= _stats_progress_interval:
+                            _print_progress(stats, scan_start, display)
+                            _last_stats_progress = now
+                            _last_file_progress = now
+                # Delivery always runs — quiet mode still needs records flushed
                 try:
                     _flush_queued_upserts()
-                    _flush_queued_seen()
+                    n = _flush_queued_seen()
+                    if debug and n:
+                        _seen_stats["heartbeat_sent"] += n
                 except _ServerDown:
                     pass  # main thread handles the abort
                 if debug:
                     _dump_api_log("heartbeat")
 
-        if not quiet:
-            threading.Thread(
-                target=_progress_heartbeat,
-                daemon=True,
-                name="sift-progress-heartbeat",
-            ).start()
+        threading.Thread(
+            target=_progress_heartbeat,
+            daemon=True,
+            name="sift-progress-heartbeat",
+        ).start()
 
         onerror = _onerror_debug if debug else _onerror
 
@@ -942,6 +948,11 @@ def cmd_scan(args) -> None:
 
         _progress_stop.set()
         display["current_file"] = ""
+        # Collapse the 2-line display (stats + filename) down to 1 line so
+        # subsequent writes start on a clean line below the stats bar.
+        if not quiet and display.get("lines", 0) >= 2:
+            with _render_lock:
+                _print_progress(stats, scan_start, display)
         if _error_log_fh is not None:
             _error_log_fh.close()
 
@@ -951,7 +962,14 @@ def cmd_scan(args) -> None:
         # Upsert: remaining records with new hash data
         _flush_queued_upserts(force=True)
 
-        # Seen: flush any remaining paths not yet delivered by the heartbeat.
+        # Pre-drain seen queue — the heartbeat delivers most paths during the
+        # walk; this catches the tail before we take the final snapshot.
+        try:
+            _flush_queued_seen(force=True)
+        except _ServerDown:
+            pass  # snapshot below captures anything that failed to send
+
+        # Seen: flush any remaining paths not yet delivered.
         with _seen_lock:
             remaining_seen = seen_paths[:]
             seen_paths.clear()
@@ -974,6 +992,14 @@ def cmd_scan(args) -> None:
         if remaining_seen and not quiet:
             sys.stderr.write("\r  seen-path updates: done.              \n")
             sys.stderr.flush()
+        if debug:
+            _seen_stats["finalize_sent"] += sent_seen
+            _debug(
+                f"[seen] queued={_seen_stats['queued']}"
+                f" heartbeat_sent={_seen_stats['heartbeat_sent']}"
+                f" finalize_sent={_seen_stats['finalize_sent']}"
+                f" max_depth={_seen_stats['max_depth']}"
+            )
 
         # -------------------------------------------------------------------
         # 5. Finalize
@@ -985,10 +1011,10 @@ def cmd_scan(args) -> None:
                 f"\nsift: warning — failed to mark scan complete: {e}", file=sys.stderr
             )
 
-        if debug:
-            _dump_api_log("final")
         if not quiet:
             _print_progress(stats, scan_start, display, final=True)
+        if debug:
+            _dump_api_log("final")
         elapsed = time.time() - scan_start.timestamp()
         err_suffix = (
             f", {stats['read_errors']:,} read errors (see {_error_log_path})"
