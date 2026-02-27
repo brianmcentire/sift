@@ -121,7 +121,7 @@ EXCLUDED_EXTENSIONS: frozenset[str] = frozenset(
 # ---------------------------------------------------------------------------
 VOLATILE_EXTENSIONS: frozenset[str] = frozenset(
     """
-    vmdk vdi vhd vhdx qcow2 img raw
+    vmdk vdi vhd vhdx qcow2 img
     ost nst pst
     """.split()
 )

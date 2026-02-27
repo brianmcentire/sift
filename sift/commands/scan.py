@@ -305,7 +305,8 @@ def cmd_scan(args) -> None:
     scan_start = datetime.now(timezone.utc)
     scan_start_iso = scan_start.isoformat()
 
-    volatile_threshold = cfg.get("volatile_mtime_threshold_days", 30)
+    volatile_threshold = cfg.get("volatile_mtime_threshold_days", 7)
+    fresh_threshold = cfg.get("fresh_mtime_threshold_seconds", 60)
     upsert_batch_size = cfg.get("upsert_batch_size", 500)
     seen_batch_size = cfg.get("seen_batch_size", 5000)
     chunk_size_mb = cfg.get("chunk_size_mb", 8)
@@ -547,6 +548,22 @@ def cmd_scan(args) -> None:
                         stats["files_skipped"] += 1
 
                     elif needs_rehash(stat_result, cached):
+                        # Skip hashing files modified very recently — likely mid-write
+                        # (active download, recording, DB flush, etc.). Recorded without
+                        # a hash; next scan will hash it once mtime has settled.
+                        if time.time() - stat_result.st_mtime < fresh_threshold:
+                            if debug:
+                                _debug(f"[fresh_mtime]   {raw_path}")
+                            upsert_records.append(_make_record(
+                                host=host, drive=drive, path=path_lower, path_display=path_display,
+                                filename=filename, ext=ext, file_category=category,
+                                size_bytes=stat_result.st_size, hash_val=None,
+                                mtime=mtime_val, scan_start_iso=scan_start_iso,
+                                source_os=source_os, skipped_reason="recently_modified",
+                                inode=inode_val, device=device_val,
+                            ))
+                            stats["files_skipped"] += 1
+
                         # If we've already hashed another path with the same inode on
                         # this device (a hard link), reuse the cached hash — no I/O needed.
                         if inode_key is not None and inode_key in seen_inodes:
