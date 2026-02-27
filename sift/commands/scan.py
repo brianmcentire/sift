@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from sift import client
+from sift.client import dump_request_log, enable_request_log
 from sift.classify import classify_file
 from sift.config import get_agent_config
 from sift.exclusions import (
@@ -283,6 +284,29 @@ def _debug(msg: str) -> None:
     print(f"  {msg}", file=sys.stderr)
 
 
+def _dump_api_log(label: str = "") -> None:
+    """Print and clear the request log (only produces output when debug is on)."""
+    entries = dump_request_log()
+    if not entries:
+        return
+    prefix = f"[api-log {label}] " if label else "[api-log] "
+    # Summarize: count by (method, path, thread)
+    from collections import Counter
+
+    counts: Counter = Counter()
+    callers_by_key: dict[tuple, str] = {}
+    for e in entries:
+        key = (e["method"], e["path"], e["thread"])
+        counts[key] += 1
+        callers_by_key[key] = e["callers"]  # keep last caller chain
+    for (method, path, thread), n in counts.most_common():
+        caller = callers_by_key[(method, path, thread)]
+        print(
+            f"  {prefix}{method} {path} ×{n}  thread={thread}  via {caller}",
+            file=sys.stderr,
+        )
+
+
 def cmd_scan(args) -> None:
     cfg = get_agent_config()
     source_os = get_source_os()
@@ -291,6 +315,9 @@ def cmd_scan(args) -> None:
     quiet = getattr(args, "quiet", False)
     one_filesystem = getattr(args, "one_filesystem", False)
     allow_unraid_disks = getattr(args, "yolo", False)
+
+    if debug:
+        enable_request_log()
 
     raw_root = getattr(args, "path", ".") or "."
     root = os.path.realpath(os.path.expanduser(raw_root))
@@ -504,6 +531,8 @@ def cmd_scan(args) -> None:
                 # Continue delivering buffered records even if the main thread is
                 # blocked in a slow read (e.g., cloud recall on first chunk).
                 _flush_queued_upserts()
+                if debug:
+                    _dump_api_log("heartbeat")
 
         if not quiet:
             threading.Thread(
@@ -809,9 +838,6 @@ def cmd_scan(args) -> None:
 
                 stats["files_scanned"] += 1
 
-                # Flush on time interval (or when batch grows very large as a memory safety net)
-                _flush_queued_upserts()
-
                 # seen_paths are flushed after the walk — don't block traversal with network I/O
 
                 # Progress update
@@ -844,6 +870,8 @@ def cmd_scan(args) -> None:
                 f"\nsift: warning — failed to mark scan complete: {e}", file=sys.stderr
             )
 
+        if debug:
+            _dump_api_log("final")
         if not quiet:
             _print_progress(stats, scan_start, display, final=True)
         elapsed = time.time() - scan_start.timestamp()
