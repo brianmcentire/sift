@@ -630,11 +630,12 @@ def cmd_scan(args) -> None:
                 if debug:
                     _dump_api_log("heartbeat")
 
-        threading.Thread(
+        _heartbeat_thread = threading.Thread(
             target=_progress_heartbeat,
             daemon=True,
             name="sift-progress-heartbeat",
-        ).start()
+        )
+        _heartbeat_thread.start()
 
         onerror = _onerror_debug if debug else _onerror
 
@@ -947,12 +948,15 @@ def cmd_scan(args) -> None:
                 _maybe_render_progress(now)
 
         _progress_stop.set()
+        # Wait for the heartbeat thread to finish its current iteration before
+        # writing any further output — prevents _dump_api_log("heartbeat") from
+        # interleaving with finalize progress lines.
+        _heartbeat_thread.join(timeout=1.0)
         display["current_file"] = ""
         # Collapse the 2-line display (stats + filename) down to 1 line so
         # subsequent writes start on a clean line below the stats bar.
         if not quiet and display.get("lines", 0) >= 2:
-            with _render_lock:
-                _print_progress(stats, scan_start, display)
+            _print_progress(stats, scan_start, display)
         if _error_log_fh is not None:
             _error_log_fh.close()
 
