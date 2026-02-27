@@ -9,6 +9,15 @@ def print_server_info() -> None:
 
 
 def get_version() -> str:
+    # Prefer pyproject.toml so editable installs always reflect the latest version
+    try:
+        import tomllib
+        from pathlib import Path
+        pyproject = Path(__file__).resolve().parent.parent.parent / "pyproject.toml"
+        with open(pyproject, "rb") as f:
+            return tomllib.load(f)["project"]["version"]
+    except Exception:
+        pass
     try:
         from importlib.metadata import version
         return version("sift")

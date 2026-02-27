@@ -1,6 +1,7 @@
 """FastAPI application — all endpoints."""
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import time
@@ -13,6 +14,13 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-5s [%(name)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("sift.server")
 
 from server import db
 from server.models import (
@@ -42,6 +50,23 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="sift", version="0.1.0", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.monotonic()
+    response = await call_next(request)
+    elapsed = time.monotonic() - start
+    path = request.url.path
+    # Skip static asset noise
+    if path.startswith("/assets/") or path == "/favicon.ico":
+        return response
+    if elapsed > 1.0:
+        logger.warning("%s %s %d — %.1fs", request.method, path, response.status_code, elapsed)
+    elif request.method in ("POST", "PATCH"):
+        logger.info("%s %s %d — %.3fs", request.method, path, response.status_code, elapsed)
+    return response
+
 
 # Static frontend is mounted AFTER all API routes (see bottom of file)
 
@@ -124,13 +149,19 @@ def list_scan_runs(host: Optional[str] = None, limit: int = Query(50, le=500)):
 def upsert_files(records: list[FileRecord]):
     if not records:
         return {"upserted": 0}
+    start = time.monotonic()
 
-    sql = """
+    # Build a single multi-row INSERT so DuckDB can batch index lookups and
+    # updates in one pass.  executemany runs each row as a separate statement
+    # which is catastrophically slow on a columnar DB with many indexes.
+    row_ph = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    values_ph = ", ".join([row_ph] * len(records))
+    sql = f"""
         INSERT INTO files (
             host, drive, path, path_display, filename, ext, file_category,
             size_bytes, hash, mtime, last_checked, source_os, skipped_reason, last_seen_at,
             inode, device
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES {values_ph}
         ON CONFLICT (host, drive, path) DO UPDATE SET
             path_display   = excluded.path_display,
             filename       = excluded.filename,
@@ -146,17 +177,19 @@ def upsert_files(records: list[FileRecord]):
             inode          = excluded.inode,
             device         = excluded.device
     """
-    data = [
-        [
+    params: list = []
+    for r in records:
+        params.extend([
             r.host, r.drive, r.path, r.path_display, r.filename, r.ext, r.file_category,
             r.size_bytes, r.hash, r.mtime,
             r.last_checked.isoformat(), r.source_os, r.skipped_reason,
             r.last_seen_at.isoformat(),
             r.inode, r.device,
-        ]
-        for r in records
-    ]
-    db.executemany(sql, data)
+        ])
+    db.execute(sql, params)
+    elapsed = time.monotonic() - start
+    if elapsed > 2.0:
+        logger.warning("POST /files: %d records in %.1fs", len(records), elapsed)
     _invalidate_stats_cache()
     return {"upserted": len(records)}
 

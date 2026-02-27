@@ -1,4 +1,5 @@
 """Exclusion rules and volatile file detection."""
+
 from __future__ import annotations
 
 import fnmatch
@@ -21,42 +22,77 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 # Excluded directory names (leaf name only)
 # ---------------------------------------------------------------------------
-EXCLUDED_DIR_NAMES: frozenset[str] = frozenset([
-    # VCS
-    ".git", ".svn", ".hg", ".bzr",
-    # Python tooling
-    "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".hypothesis",
-    # Python virtual environments
-    ".venv", "venv",
-    # Node
-    "node_modules", ".yarn", ".npm", ".pnpm-store",
-    # JVM build/package caches
-    ".gradle", ".m2",
-    # Rust
-    ".cargo",
-    # .NET
-    ".nuget",
-    # Caches
-    "Caches", "Cache", ".cache",
-    # Linux thumbnail and font caches
-    ".thumbnails", "fontconfig", "mesa_shader_cache",
-    # macOS system
-    ".Trash", ".trash", ".Spotlight-V100", ".fseventsd", ".DocumentRevisions-V100",
-    ".TemporaryItems", ".DS_Store",
-    # macOS app internals
-    "PhotoLibraryThumbnails",
-    # macOS metadata injected into zip archives
-    "__MACOSX",
-    # Unix system
-    "lost+found", "proc", "sys", "dev", "run",
-    # Linux package systems
-    "snap", ".var",
-    # Windows
-    "$RECYCLE.BIN", "System Volume Information",
-    # Browser / Electron internal storage (Chrome, Edge, VS Code, Slack, Discord, etc.)
-    "CacheStorage", "Code Cache", "GPUCache", "ShaderCache", "DawnCache",
-    "blob_storage", "IndexedDB", "Service Worker",
-])
+EXCLUDED_DIR_NAMES: frozenset[str] = frozenset(
+    [
+        # VCS
+        ".git",
+        ".svn",
+        ".hg",
+        ".bzr",
+        # Python tooling
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".hypothesis",
+        # Python virtual environments
+        ".venv",
+        "venv",
+        # Node
+        "node_modules",
+        ".yarn",
+        ".npm",
+        ".pnpm-store",
+        # JVM build/package caches
+        ".gradle",
+        ".m2",
+        # Rust
+        ".cargo",
+        # .NET
+        ".nuget",
+        # Caches
+        "Caches",
+        "Cache",
+        ".cache",
+        # Linux thumbnail and font caches
+        ".thumbnails",
+        "fontconfig",
+        "mesa_shader_cache",
+        # macOS system
+        ".Trash",
+        ".trash",
+        ".Spotlight-V100",
+        ".fseventsd",
+        ".DocumentRevisions-V100",
+        ".TemporaryItems",
+        ".DS_Store",
+        # macOS app internals
+        "PhotoLibraryThumbnails",
+        # macOS metadata injected into zip archives
+        "__MACOSX",
+        # Unix system
+        "lost+found",
+        "proc",
+        "sys",
+        "dev",
+        "run",
+        # Linux package systems
+        "snap",
+        ".var",
+        # Windows
+        "$RECYCLE.BIN",
+        "System Volume Information",
+        # Browser / Electron internal storage (Chrome, Edge, VS Code, Slack, Discord, etc.)
+        "CacheStorage",
+        "Code Cache",
+        "GPUCache",
+        "ShaderCache",
+        "DawnCache",
+        "blob_storage",
+        "IndexedDB",
+        "Service Worker",
+    ]
+)
 
 # ---------------------------------------------------------------------------
 # Excluded path prefixes (lowercased, forward slashes)
@@ -81,9 +117,10 @@ EXCLUDED_PATH_PREFIXES_POSIX: tuple[str, ...] = (
 # whack-a-mole with extensions.
 # ---------------------------------------------------------------------------
 EXCLUDED_DARWIN_DIR_SEGMENTS: tuple[str, ...] = (
-    "/library/mail",              # Apple Mail — .mbox bundles, attachments, etc.
-    "/library/messages",          # iMessage/SMS attachments
+    "/library/mail",  # Apple Mail — .mbox bundles, attachments, etc.
+    "/library/messages",  # iMessage/SMS attachments
     "/library/mobile documents",  # iCloud Drive per-app containers
+    "/library/com.apple.deviceactivity",  # Screen Time / DeviceActivity cloud shards
 )
 
 # Windows: drive letter excluded paths are handled separately at scan time

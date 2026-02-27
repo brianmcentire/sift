@@ -1,10 +1,14 @@
 """Unit tests for sift.exclusions."""
+
 import time
 from unittest.mock import patch
 import pytest
 from sift.exclusions import (
-    _is_unraid, _is_unraid_disk_path,
-    is_excluded_dir, is_excluded_file, is_volatile_active,
+    _is_unraid,
+    _is_unraid_disk_path,
+    is_excluded_dir,
+    is_excluded_file,
+    is_volatile_active,
 )
 
 
@@ -68,7 +72,9 @@ class TestIsExcludedDir:
         assert is_excluded_dir("C:\\$RECYCLE.BIN", "$RECYCLE.BIN", "windows")
 
     def test_windows_documents_not_excluded(self):
-        assert not is_excluded_dir("C:\\Users\\Brian\\Documents", "Documents", "windows")
+        assert not is_excluded_dir(
+            "C:\\Users\\Brian\\Documents", "Documents", "windows"
+        )
 
     # -- Unraid /mnt/diskN exclusion ---------------------------------------
 
@@ -82,7 +88,9 @@ class TestIsExcludedDir:
 
     def test_unraid_disk_not_excluded_with_yolo(self):
         with patch("sift.exclusions._is_unraid", return_value=True):
-            assert not is_excluded_dir("/mnt/disk1", "disk1", "linux", allow_unraid_disks=True)
+            assert not is_excluded_dir(
+                "/mnt/disk1", "disk1", "linux", allow_unraid_disks=True
+            )
 
     def test_unraid_disk_not_excluded_on_non_unraid(self):
         with patch("sift.exclusions._is_unraid", return_value=False):
@@ -108,60 +116,63 @@ class TestIsExcludedDir:
     # -- macOS iCloud-managed directory exclusions --------------------------
 
     def test_darwin_library_mail_excluded(self):
-        assert is_excluded_dir(
-            "/Users/brian/Library/Mail", "Mail", "darwin"
-        )
+        assert is_excluded_dir("/Users/brian/Library/Mail", "Mail", "darwin")
 
     def test_darwin_library_mail_subdir_excluded(self):
         assert is_excluded_dir(
             "/Users/brian/Library/Mail/V10/[Gmail].mbox/All Mail.mbox",
-            "All Mail.mbox", "darwin",
+            "All Mail.mbox",
+            "darwin",
         )
 
     def test_darwin_library_messages_excluded(self):
-        assert is_excluded_dir(
-            "/Users/brian/Library/Messages", "Messages", "darwin"
-        )
+        assert is_excluded_dir("/Users/brian/Library/Messages", "Messages", "darwin")
 
     def test_darwin_library_messages_attachments_excluded(self):
         assert is_excluded_dir(
             "/Users/brian/Library/Messages/Attachments/ab",
-            "ab", "darwin",
+            "ab",
+            "darwin",
         )
 
     def test_darwin_mobile_documents_excluded(self):
         assert is_excluded_dir(
             "/Users/brian/Library/Mobile Documents/com~apple~CloudDocs",
-            "com~apple~CloudDocs", "darwin",
+            "com~apple~CloudDocs",
+            "darwin",
+        )
+
+    def test_darwin_deviceactivity_cloud_excluded(self):
+        assert is_excluded_dir(
+            "/Users/brian/Library/.apple.DeviceActivity/Library/com.apple.DeviceActivity/Cloud/"
+            "000380-05-0ce7e314-3f38-41b9-8118-b11902b72fd6",
+            "000380-05-0ce7e314-3f38-41b9-8118-b11902b72fd6",
+            "darwin",
         )
 
     def test_darwin_library_mail_not_excluded_on_linux(self):
         # Same path on Linux should NOT trigger the darwin exclusion
-        assert not is_excluded_dir(
-            "/Users/brian/Library/Mail", "Mail", "linux"
-        )
+        assert not is_excluded_dir("/Users/brian/Library/Mail", "Mail", "linux")
 
     def test_darwin_documents_not_excluded(self):
-        assert not is_excluded_dir(
-            "/Users/brian/Documents", "Documents", "darwin"
-        )
+        assert not is_excluded_dir("/Users/brian/Documents", "Documents", "darwin")
 
     def test_darwin_desktop_not_excluded(self):
-        assert not is_excluded_dir(
-            "/Users/brian/Desktop", "Desktop", "darwin"
-        )
+        assert not is_excluded_dir("/Users/brian/Desktop", "Desktop", "darwin")
 
     def test_darwin_cloud_storage_not_excluded(self):
         # CloudStorage (Dropbox, OneDrive, etc.) should be scanned
         assert not is_excluded_dir(
             "/Users/brian/Library/CloudStorage/Dropbox",
-            "Dropbox", "darwin",
+            "Dropbox",
+            "darwin",
         )
 
     def test_darwin_application_support_not_excluded(self):
         assert not is_excluded_dir(
             "/Users/brian/Library/Application Support",
-            "Application Support", "darwin",
+            "Application Support",
+            "darwin",
         )
 
 
@@ -205,28 +216,24 @@ class TestIsVolatileActive:
 
     def test_vmdk_recent_is_volatile(self):
         assert is_volatile_active(
-            "/vms/ubuntu.vmdk", "ubuntu.vmdk", "vmdk",
-            self._recent_mtime(), "linux"
+            "/vms/ubuntu.vmdk", "ubuntu.vmdk", "vmdk", self._recent_mtime(), "linux"
         )
 
     def test_vmdk_old_not_volatile(self):
         # Old enough to be a dormant backup — hash it
         assert not is_volatile_active(
-            "/backups/old.vmdk", "old.vmdk", "vmdk",
-            self._old_mtime(), "linux"
+            "/backups/old.vmdk", "old.vmdk", "vmdk", self._old_mtime(), "linux"
         )
 
     def test_ost_recent_is_volatile(self):
         assert is_volatile_active(
-            "/Users/brian/mail.ost", "mail.ost", "ost",
-            self._recent_mtime(), "darwin"
+            "/Users/brian/mail.ost", "mail.ost", "ost", self._recent_mtime(), "darwin"
         )
 
     def test_iso_not_volatile(self):
         # iso is in disk category but NOT in VOLATILE_EXTENSIONS
         assert not is_volatile_active(
-            "/isos/ubuntu.iso", "ubuntu.iso", "iso",
-            self._recent_mtime(), "linux"
+            "/isos/ubuntu.iso", "ubuntu.iso", "iso", self._recent_mtime(), "linux"
         )
 
     # -- Volatile by directory pattern ------------------------------------
@@ -234,28 +241,37 @@ class TestIsVolatileActive:
     def test_virtualbox_dir_recent_is_volatile(self):
         assert is_volatile_active(
             "/Users/brian/VirtualBox VMs/ubuntu/ubuntu.vdi",
-            "ubuntu.vdi", "vdi",
-            self._recent_mtime(), "darwin"
+            "ubuntu.vdi",
+            "vdi",
+            self._recent_mtime(),
+            "darwin",
         )
 
     def test_docker_dir_recent_is_volatile(self):
         assert is_volatile_active(
             "/var/lib/docker/overlay2/abc123/diff/file.bin",
-            "file.bin", "bin",
-            self._recent_mtime(), "linux"
+            "file.bin",
+            "bin",
+            self._recent_mtime(),
+            "linux",
         )
 
     def test_docker_dir_old_not_volatile(self):
         assert not is_volatile_active(
             "/var/lib/docker/overlay2/abc123/diff/file.bin",
-            "file.bin", "bin",
-            self._old_mtime(), "linux"
+            "file.bin",
+            "bin",
+            self._old_mtime(),
+            "linux",
         )
 
     def test_normal_file_not_volatile(self):
         assert not is_volatile_active(
-            "/Users/brian/Documents/report.pdf", "report.pdf", "pdf",
-            self._recent_mtime(), "darwin"
+            "/Users/brian/Documents/report.pdf",
+            "report.pdf",
+            "pdf",
+            self._recent_mtime(),
+            "darwin",
         )
 
     # -- Custom threshold --------------------------------------------------
@@ -263,12 +279,26 @@ class TestIsVolatileActive:
     def test_custom_threshold(self):
         mtime_10_days_ago = time.time() - (10 * 86400)
         # Within 5-day threshold → volatile
-        assert is_volatile_active(
-            "/vms/test.vmdk", "test.vmdk", "vmdk",
-            mtime_10_days_ago, "linux", threshold_days=5
-        ) is False
+        assert (
+            is_volatile_active(
+                "/vms/test.vmdk",
+                "test.vmdk",
+                "vmdk",
+                mtime_10_days_ago,
+                "linux",
+                threshold_days=5,
+            )
+            is False
+        )
         # Within 15-day threshold → volatile
-        assert is_volatile_active(
-            "/vms/test.vmdk", "test.vmdk", "vmdk",
-            mtime_10_days_ago, "linux", threshold_days=15
-        ) is True
+        assert (
+            is_volatile_active(
+                "/vms/test.vmdk",
+                "test.vmdk",
+                "vmdk",
+                mtime_10_days_ago,
+                "linux",
+                threshold_days=15,
+            )
+            is True
+        )

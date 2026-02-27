@@ -1,10 +1,14 @@
 """DuckDB connection, schema DDL, thread-safe query helpers."""
+import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import duckdb
+
+logger = logging.getLogger("sift.db")
 
 _lock = threading.RLock()
 _conn: duckdb.DuckDBPyConnection | None = None
@@ -136,21 +140,30 @@ def execute(sql: str, params: list[Any] | None = None) -> None:
     """Execute a write statement under the global lock."""
     with _lock:
         conn = get_connection()
+        start = time.monotonic()
         if params:
             conn.execute(sql, params)
         else:
             conn.execute(sql)
+        elapsed = time.monotonic() - start
+        if elapsed > 1.0:
+            logger.warning("slow execute (%.1fs): %s", elapsed, sql[:120])
 
 
 def query(sql: str, params: list[Any] | None = None) -> list[tuple]:
     """Execute a SELECT and return all rows under the global lock."""
     with _lock:
         conn = get_connection()
+        start = time.monotonic()
         if params:
             result = conn.execute(sql, params)
         else:
             result = conn.execute(sql)
-        return result.fetchall()
+        rows = result.fetchall()
+        elapsed = time.monotonic() - start
+        if elapsed > 1.0:
+            logger.warning("slow query (%.1fs, %d rows): %s", elapsed, len(rows), sql[:120])
+        return rows
 
 
 def query_one(sql: str, params: list[Any] | None = None) -> tuple | None:
@@ -163,7 +176,11 @@ def executemany(sql: str, data: list[list[Any]]) -> None:
     """Execute a write statement for many rows under the global lock."""
     with _lock:
         conn = get_connection()
+        start = time.monotonic()
         conn.executemany(sql, data)
+        elapsed = time.monotonic() - start
+        if elapsed > 1.0:
+            logger.warning("slow executemany (%.1fs, %d rows): %s", elapsed, len(data), sql[:120])
 
 
 def refresh_host_stats(host: str) -> None:

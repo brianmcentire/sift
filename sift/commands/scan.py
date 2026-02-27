@@ -237,7 +237,7 @@ class _ServerDown(Exception):
 
 _RETRY_TIMEOUT = 90  # seconds before giving up and aborting the scan
 _INTERRUPT_RETRY_TIMEOUT = 15  # shorter timeout when flushing on Ctrl-C
-_FLUSH_INTERVAL = 60  # flush accumulated records at least every minute
+_FLUSH_INTERVAL = 10  # flush accumulated records every 10 seconds
 
 
 def _post_with_retry(fn, label: str, retry_timeout: int = _RETRY_TIMEOUT) -> None:
@@ -467,6 +467,7 @@ def cmd_scan(args) -> None:
         _last_stats_progress = time.time()
         _last_file_progress = _last_stats_progress
         _last_flush_time = time.time()
+        _flush_in_progress = threading.Lock()  # prevents concurrent flush attempts
         _render_lock = threading.Lock()
 
         def _queue_upsert(record: dict) -> None:
@@ -485,22 +486,59 @@ def cmd_scan(args) -> None:
                     return 0
                 should_flush = (
                     force
-                    or len(upsert_records) >= 10_000
+                    or len(upsert_records) >= 1_000
                     or (now - _last_flush_time >= _FLUSH_INTERVAL)
                 )
                 if not should_flush:
                     return 0
                 pending = upsert_records[:]
                 upsert_records.clear()
+                prev_flush_time = _last_flush_time
                 _last_flush_time = now
 
-            for chunk in _chunks(pending, upsert_batch_size):
-                _flush_upsert(
-                    chunk,
-                    host,
-                    scan_start_iso,
-                    retry_timeout=retry_timeout,
-                )
+            # Prevent two threads from flushing simultaneously.
+            # If another thread is mid-flush, put records back and skip.
+            acquired = _flush_in_progress.acquire(blocking=force)
+            if not acquired:
+                with _upsert_lock:
+                    upsert_records[:0] = pending
+                    _last_flush_time = prev_flush_time  # restore so timer fires next cycle
+                if debug:
+                    _debug(
+                        f"[flush] skipped — another thread is flushing"
+                        f"  thread={threading.current_thread().name}"
+                    )
+                return 0
+            try:
+                if debug:
+                    n_chunks = math.ceil(len(pending) / upsert_batch_size)
+                    _debug(
+                        f"[flush] {len(pending):,} records in {n_chunks} batch(es)"
+                        f"  thread={threading.current_thread().name}"
+                    )
+                sent = 0
+                for chunk in _chunks(pending, upsert_batch_size):
+                    _flush_upsert(
+                        chunk,
+                        host,
+                        scan_start_iso,
+                        retry_timeout=retry_timeout,
+                    )
+                    sent += len(chunk)
+            except _ServerDown:
+                # Put unsent records back so they aren't lost
+                unsent = pending[sent:]
+                if unsent:
+                    with _upsert_lock:
+                        upsert_records[:0] = unsent
+                    if debug:
+                        _debug(
+                            f"[flush] server down — {len(unsent):,} records"
+                            f" returned to queue ({sent:,} sent)"
+                        )
+                raise
+            finally:
+                _flush_in_progress.release()
             return len(pending)
 
         def _maybe_render_progress(now: float) -> None:
@@ -530,7 +568,10 @@ def cmd_scan(args) -> None:
                         _last_file_progress = now
                 # Continue delivering buffered records even if the main thread is
                 # blocked in a slow read (e.g., cloud recall on first chunk).
-                _flush_queued_upserts()
+                try:
+                    _flush_queued_upserts()
+                except _ServerDown:
+                    pass  # main thread handles the abort
                 if debug:
                     _dump_api_log("heartbeat")
 
@@ -614,6 +655,18 @@ def cmd_scan(args) -> None:
 
                     stats["bytes_scanned"] += stat_result.st_size
                     display["current_file"] = raw_path
+
+                    # Cache check — if mtime+size unchanged, the DB record
+                    # is already correct.  Just update last_seen_at.
+                    if not needs_rehash(stat_result, cached):
+                        seen_paths.append({"drive": drive, "path": path_lower})
+                        stats["files_cached"] += 1
+                        stats["files_scanned"] += 1
+                        now = time.time()
+                        _maybe_render_progress(now)
+                        continue
+
+                    # --- File is new or changed — decide how to handle it ---
 
                     # Sparse files (VM disk images, container stores, etc.):
                     # logical size >> actual on-disk bytes — hashing would read
@@ -703,7 +756,7 @@ def cmd_scan(args) -> None:
                         )
                         stats["files_skipped"] += 1
 
-                    elif needs_rehash(stat_result, cached):
+                    else:
                         # Skip hashing files modified very recently — likely mid-write
                         # (active download, recording, DB flush, etc.). Recorded without
                         # a hash; next scan will hash it once mtime has settled.
@@ -813,11 +866,6 @@ def cmd_scan(args) -> None:
                                 )
                                 stats["files_hashed"] += 1
 
-                    else:
-                        # Unchanged — just update last_seen_at
-                        seen_paths.append({"drive": drive, "path": path_lower})
-                        stats["files_cached"] += 1
-
                 except PermissionError as e:
                     if debug:
                         print(
@@ -895,6 +943,8 @@ def cmd_scan(args) -> None:
     except _ServerDown as e:
         stop_event.set()
         _progress_stop.set()
+        if debug:
+            _dump_api_log("server-down")
         print(f"\nsift: {e}", file=sys.stderr)
         print(
             "Scan aborted. Re-run to resume once the server is back.", file=sys.stderr
@@ -908,6 +958,8 @@ def cmd_scan(args) -> None:
     except KeyboardInterrupt:
         stop_event.set()
         _progress_stop.set()
+        if debug:
+            _dump_api_log("interrupted")
         print("\nScan interrupted.", file=sys.stderr)
         with _upsert_lock:
             pending_on_interrupt = upsert_records[:]
