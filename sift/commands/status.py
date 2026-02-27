@@ -1,4 +1,5 @@
 """sift status — show server and host status."""
+
 from __future__ import annotations
 
 import sys
@@ -21,11 +22,12 @@ def _fmt_dt(dt_str: str | None) -> str:
 def _human_size(n: int | None) -> str:
     if n is None:
         return "0B"
+    val = float(n)
     for unit in ("B", "K", "M", "G", "T", "P"):
-        if abs(n) < 1024:
-            return f"{n:.1f}{unit}" if unit != "B" else f"{n}B"
-        n /= 1024
-    return f"{n:.1f}P"
+        if abs(val) < 1024:
+            return f"{val:.1f}{unit}" if unit != "B" else f"{int(val)}B"
+        val /= 1024
+    return f"{val:.1f}P"
 
 
 def cmd_status(args) -> None:
@@ -42,6 +44,11 @@ def cmd_status(args) -> None:
 
     if filter_host:
         hosts = [h for h in hosts if h["host"] == filter_host]
+    else:
+        # Keep default status focused on currently indexed hosts.
+        # Hosts that have been fully trimmed (0 files) still appear in -v
+        # scan-run history below.
+        hosts = [h for h in hosts if h.get("total_files", 0) > 0]
 
     # Compute totals from /hosts response (no full-table scan needed)
     total_hosts = len(hosts)
@@ -69,12 +76,12 @@ def cmd_status(args) -> None:
     print()
 
     try:
-        runs = client.get("/scan-runs", params={"limit": 10})
+        run_params = {"limit": 50 if filter_host else 10}
+        if filter_host:
+            run_params["host"] = filter_host
+        runs = client.get("/scan-runs", params=run_params)
     except Exception:
         runs = []
-
-    if filter_host:
-        runs = [r for r in runs if r["host"] == filter_host]
 
     scanning = set()
     seen_hosts = set()
@@ -93,14 +100,16 @@ def cmd_status(args) -> None:
             last = "scanning..." if host in scanning else _fmt_dt(h.get("last_scan_at"))
             root = h.get("last_scan_root") or "?"
 
-            rows.append({
-                "host": host,
-                "files": f"{h.get('total_files', 0):,}",
-                "size": _human_size(h.get('total_bytes')),
-                "hashed": f"{h.get('total_hashed', 0):,}",
-                "last_scan": last,
-                "scan_root": root,
-            })
+            rows.append(
+                {
+                    "host": host,
+                    "files": f"{h.get('total_files', 0):,}",
+                    "size": _human_size(h.get("total_bytes")),
+                    "hashed": f"{h.get('total_hashed', 0):,}",
+                    "last_scan": last,
+                    "scan_root": root,
+                }
+            )
 
         host_w = max(len("host"), max(len(r["host"]) for r in rows))
         files_w = max(len("files"), max(len(r["files"]) for r in rows))
@@ -124,7 +133,8 @@ def cmd_status(args) -> None:
             )
         print()
 
-    verbose = getattr(args, "verbose", False)
+    # Host-focused status implies verbose so scan history context is shown.
+    verbose = bool(getattr(args, "verbose", False) or filter_host)
     if verbose and runs:
         print("recent scans")
         for r in runs:
