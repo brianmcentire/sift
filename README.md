@@ -95,6 +95,17 @@ Requires Docker on your build machine. Produces a self-contained binary with no 
 
 Download `sift.exe` from the [latest release](https://github.com/brianmcentire/sift/releases) on GitHub. No Python installation required. The exe includes both the scan agent and the server.
 
+Put it somewhere on your PATH. A good convention is `C:\Users\<you>\bin`:
+
+```powershell
+mkdir "$env:USERPROFILE\bin"
+# Move sift.exe there, then add to PATH via:
+# Settings → System → About → Advanced system settings → Environment Variables
+# → User variables → Path → Edit → New → C:\Users\<you>\bin
+```
+
+Then open a new terminal and:
+
 ```powershell
 sift config                        # set your server address (or keep localhost default)
 sift scan C:\Users\me\Documents    # scan a directory
