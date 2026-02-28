@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 
 from sift import client
-from sift.commands import get_version, print_server_info
+from sift.commands import print_server_info
 
 
 def _fmt_dt(dt_str: str | None) -> str:
@@ -56,7 +56,6 @@ def cmd_status(args) -> None:
     total_bytes = sum(h.get("total_bytes") or 0 for h in hosts)
 
     summary = (
-        f"sift {get_version()}  ·  "
         f"{total_hosts} hosts  ·  "
         f"{total_files:,} files  ·  "
         f"{_human_size(total_bytes)}"
@@ -72,7 +71,8 @@ def cmd_status(args) -> None:
         except Exception as e:
             summary += f"  ·  (dup stats unavailable: {e})"
 
-    print(summary)
+    print()
+    print(f"  {summary}")
     print()
 
     try:

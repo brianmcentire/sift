@@ -1,11 +1,19 @@
+import os
 import sys
-from sift.config import get_server_url
+from sift.config import get_cli_config, get_server_url
+from sift.normalize import local_hostname
+
+
+def _effective_hostname() -> str:
+    """Return the hostname sift will use: SIFT_HOST env > config > auto-detect."""
+    return os.environ.get("SIFT_HOST") or get_cli_config().get("host") or local_hostname()
 
 
 def print_server_info() -> None:
-    """Print the active server URL to stderr, but only when output is a TTY."""
+    """Print version, server URL, and client hostname to stderr (TTY only)."""
     if sys.stderr.isatty():
-        print(f"sift server: {get_server_url()}", file=sys.stderr)
+        print(f"sift {get_version()}", file=sys.stderr)
+        print(f"  {_effective_hostname()} \u2192 {get_server_url()}", file=sys.stderr)
 
 
 def get_version() -> str:
