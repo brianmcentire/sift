@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import threading
 import time
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -49,6 +50,37 @@ async def lifespan(app: FastAPI):
     db_path = os.environ.get("SIFT_DB_PATH") or db.get_db_path()
     db.init_db(db_path)
     yield
+
+
+# ---------------------------------------------------------------------------
+# Periodic host stats refresh (during active scans)
+# ---------------------------------------------------------------------------
+
+_STATS_REFRESH_INTERVAL = 60  # seconds between mid-scan refreshes
+_last_stats_refresh: dict[str, float] = {}  # host -> monotonic time
+_stats_refresh_lock = threading.Lock()
+
+
+def _maybe_refresh_host_stats(host: str) -> None:
+    """Refresh host_stats if it's been ≥10 min since last refresh for this host.
+
+    Runs in a background thread so it doesn't add latency to the flush response.
+    Skips if a refresh is already in progress for this host.
+    """
+    now = time.monotonic()
+    with _stats_refresh_lock:
+        if now - _last_stats_refresh.get(host, 0) < _STATS_REFRESH_INTERVAL:
+            return
+        _last_stats_refresh[host] = now
+
+    def _do_refresh():
+        try:
+            db.refresh_host_stats(host)
+            _invalidate_stats_cache()
+        except Exception:
+            pass
+
+    threading.Thread(target=_do_refresh, daemon=True, name=f"stats-refresh-{host}").start()
 
 
 app = FastAPI(title="sift", version="0.1.0", lifespan=lifespan)
@@ -132,7 +164,11 @@ def patch_scan_run(run_id: int, body: ScanRunPatch):
         [body.status, run_id],
     )
     if row:
-        db.refresh_host_stats(row[0])
+        host = row[0]
+        # Reset throttle so the end-of-scan refresh always runs immediately.
+        with _stats_refresh_lock:
+            _last_stats_refresh.pop(host, None)
+        db.refresh_host_stats(host)
         _invalidate_stats_cache()
     return {"ok": True}
 
@@ -228,6 +264,10 @@ def upsert_files(records: list[FileRecord]):
     if elapsed > 2.0:
         logger.warning("POST /files: %d records in %.1fs", len(records), elapsed)
     _invalidate_stats_cache()
+    # Periodically refresh host stats mid-scan so sift status stays current.
+    # Throttled to once per 10 min per host; runs in background thread.
+    if records:
+        _maybe_refresh_host_stats(records[0].host)
     return {"upserted": len(records)}
 
 
