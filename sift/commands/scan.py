@@ -735,7 +735,7 @@ def cmd_scan(args) -> None:
                     # logical size >> actual on-disk bytes — hashing would read
                     # the full logical size (potentially TBs of holes).
                     if is_sparse_file(
-                        stat_result.st_size, stat_result.st_blocks, source_os
+                        stat_result.st_size, getattr(stat_result, "st_blocks", 0), source_os
                     ):
                         if debug:
                             _debug(f"[sparse_file]    {raw_path}")
@@ -762,7 +762,7 @@ def cmd_scan(args) -> None:
                         continue
 
                     # macOS: skip APFS dataless stubs and Mail partial downloads — no local bytes to hash
-                    if _is_macos_dataless(stat_result.st_blocks, source_os):
+                    if _is_macos_dataless(getattr(stat_result, "st_blocks", 0), source_os):
                         if debug:
                             _debug(f"[macos_dataless] {raw_path}")
                         _queue_upsert(
