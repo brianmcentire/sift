@@ -26,6 +26,7 @@ export default function App() {
   const [pinnedResults, setPinnedResults] = useState(null)      // null | FileEntry[]
   const [highlightedPaths, setHighlightedPaths] = useState(new Set()) // paths (lowercase) to blue-highlight in results
   const [subtreeDupPath, setSubtreeDupPath] = useState(null)          // string | null — path for subtree dup overlay
+  const [pinnedSourcePath, setPinnedSourcePath] = useState(null)      // string | null — clicked file's display path (lowercase)
   const [categoryFilter, setCategoryFilter] = useState(new Set())
   const [minDupSize, setMinDupSize] = useState(0)
   const [onlyDups, setOnlyDups] = useState(false)
@@ -258,6 +259,7 @@ export default function App() {
     setFilenameQuery('')
     setCategoryFilter(new Set())
     setPinnedResults(null)
+    setPinnedSourcePath(null)
     setSubtreeDupPath(null)
   }, [])
 
@@ -271,6 +273,7 @@ export default function App() {
     setMinDupSize(0)
     setOnlyDups(false)
     setPinnedResults(null)
+    setPinnedSourcePath(null)
     setSubtreeDupPath(null)
     setSelectedHosts(new Set(hosts.map(h => h.host)))
     setExpandedPaths(new Set())
@@ -327,7 +330,9 @@ export default function App() {
   // ── Handle file click → zoom to all copies ────────────────────────────────
   const handleFileClick = useCallback(async (entry) => {
     if (entry.hash) {
-      setHighlightedPaths(new Set([(entry.path_display || '').toLowerCase()]))
+      const srcPath = (entry.path_display || '').toLowerCase()
+      setHighlightedPaths(new Set([srcPath]))
+      setPinnedSourcePath(srcPath)
       try {
         const data = await api.files({ hash: entry.hash, limit: 500 })
         setPinnedResults(data)
@@ -466,6 +471,14 @@ export default function App() {
       filtered = filtered.filter(r =>
         r.entry.dup_count > 0 || Boolean(r.entry.other_hosts)
       )
+      // In pinned single-file mode, force-include the source file even if it has no dups
+      if (pinnedResults !== null && !subtreeDupPath && pinnedSourcePath) {
+        const hasSource = filtered.some(r => (r.entry.path_display || '').toLowerCase() === pinnedSourcePath)
+        if (!hasSource) {
+          const sourceRow = converted.find(r => (r.entry.path_display || '').toLowerCase() === pinnedSourcePath)
+          if (sourceRow) filtered = [sourceRow, ...filtered]
+        }
+      }
     }
     // In subtree dup mode: deterministic hash→path→filename sort, ignore UI sort state
     if (subtreeDupPath) {
@@ -506,7 +519,7 @@ export default function App() {
       return grouped
     }
     return sortFileEntries(filtered, sortBy, sortDir)
-  }, [activeResults, subtreeDupPath, categoryFilter, minDupSize, onlyDups, sortBy, sortDir])
+  }, [activeResults, subtreeDupPath, pinnedSourcePath, categoryFilter, minDupSize, onlyDups, sortBy, sortDir])
 
   // ── Unfiltered tree rows — used for available categories so the type picker
   //    doesn't collapse while multi-selecting ───────────────────────────────
@@ -615,7 +628,7 @@ export default function App() {
         : 'all copies of file'
       return {
         label,
-        clear: () => { setPinnedResults(null); setSubtreeDupPath(null) },
+        clear: () => { setPinnedResults(null); setPinnedSourcePath(null); setSubtreeDupPath(null) },
       }
     }
     if (filenameResults !== null) return {
