@@ -141,6 +141,9 @@ export default function FileRow({
         ? entry.path_display.split('/').slice(0, -1).join('/') || '/'
         : parentPath)
     : null
+  const copyTargetPath = isDir
+    ? (fullDisplayPath || fullPath)
+    : (entry.path_display || fullDisplayPath || fullPath)
 
   function handleRowClick() {
     if (isDir) {
@@ -183,11 +186,11 @@ export default function FileRow({
                 </div>
               )}
             </div>
-            {isDir && onCopyPath && (
+            {onCopyPath && (
               <button
-                onClick={e => { e.stopPropagation(); onCopyPath(fullDisplayPath || fullPath) }}
-                className="opacity-0 group-hover:opacity-100 shrink-0 ml-1 text-slate-300 hover:text-slate-500 transition-opacity leading-none"
-                title="Copy path to clipboard"
+                onClick={e => { e.stopPropagation(); onCopyPath(copyTargetPath) }}
+                className="opacity-0 group-hover:opacity-100 shrink-0 ml-1 text-slate-500 hover:text-slate-800 transition-opacity leading-none"
+                title={isDir ? 'Copy path to clipboard' : 'Copy file path to clipboard'}
               >
                 ⧉
               </button>
