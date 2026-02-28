@@ -1,7 +1,8 @@
-"""sift config — interactively configure the sift server URL."""
+"""sift config — interactively configure sift settings."""
 from __future__ import annotations
 import ipaddress
 import re
+import socket
 from pathlib import Path
 
 try:
@@ -35,6 +36,17 @@ def _validate_host(host: str) -> str | None:
     return "FQDNs are not supported — enter a hostname (e.g. 'unraid'), IP, or 'hostname.local'."
 
 
+def _prompt(label: str, current: str, default: str) -> str | None:
+    """Prompt for a value, showing current or default in brackets. Returns None on cancel."""
+    shown = current or default
+    try:
+        raw = input(f"{label} [{shown}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    return raw or shown
+
+
 def _read_config() -> dict:
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "rb") as f:
@@ -64,29 +76,46 @@ def _write_config(cfg: dict) -> None:
 
 
 def cmd_config(args) -> None:
-    current_url = _read_config().get("server", {}).get("url", "")
-    current_host = ""
-    if current_url.startswith("http://"):
-        current_host = current_url[len("http://"):].split(":")[0]
+    cfg = _read_config()
+    auto_hostname = socket.gethostname().split(".")[0]
 
-    default = current_host or "localhost"
-    try:
-        raw = input(f"Server hostname or IP [{default}]: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
+    # --- Server URL ---
+    current_url = cfg.get("server", {}).get("url", "")
+    current_server_host = ""
+    if current_url.startswith("http://"):
+        current_server_host = current_url[len("http://"):].split(":")[0]
+
+    server_host = _prompt("Server hostname or IP", current_server_host, "localhost")
+    if server_host is None:
         return
 
-    host = raw or default
-
-    error = _validate_host(host)
+    error = _validate_host(server_host)
     if error:
         print(f"Error: {error}")
         return
 
-    url = f"http://{host}:{DEFAULT_PORT}"
-    cfg = _read_config()
+    url = f"http://{server_host}:{DEFAULT_PORT}"
     cfg.setdefault("server", {})["url"] = url
+
+    # --- Hostname override ---
+    current_host = cfg.get("cli", {}).get("host", "")
+    host = _prompt("This host's name", current_host, auto_hostname)
+    if host is None:
+        return
+
+    if host == auto_hostname:
+        # Auto-detected — no need to store an override
+        cfg.get("cli", {}).pop("host", None)
+        cfg.get("agent", {}).pop("host", None)
+    else:
+        cfg.setdefault("cli", {})["host"] = host
+        cfg.setdefault("agent", {})["host"] = host
+
     _write_config(cfg)
 
+    print()
     print(f"Saved: {CONFIG_PATH}")
-    print(f"  server url = {url}  (port {DEFAULT_PORT} — change manually if needed)")
+    print(f"  server = {url}")
+    print(f"    host = {host}")
+    if host == auto_hostname:
+        print(f"           (auto-detected)")

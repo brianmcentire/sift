@@ -22,9 +22,9 @@ def cmd_upgrade(args) -> None:
 
     if getattr(sys, "frozen", False):
         print(
-            "This is a standalone binary install — pip cannot upgrade it.\n"
-            "To upgrade, rebuild with:  make dist-agent\n"
-            "then copy the new binary to this machine."
+            "This is a standalone binary — pip cannot upgrade it.\n"
+            "Download the latest release from:\n"
+            "  https://github.com/brianmcentire/sift/releases"
         )
         return
 

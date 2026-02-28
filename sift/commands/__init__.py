@@ -16,6 +16,14 @@ def print_server_info() -> None:
         print(f"  {_effective_hostname()} \u2192 {get_server_url()}", file=sys.stderr)
 
 
+def print_config_hint() -> None:
+    """Print a hint to run 'sift config' if no config file exists."""
+    from pathlib import Path
+    config_path = Path.home() / ".sift.config"
+    if not config_path.exists():
+        print("  hint: run 'sift config' to set your server address", file=sys.stderr)
+
+
 def get_version() -> str:
     # Prefer pyproject.toml so editable installs always reflect the latest version
     try:

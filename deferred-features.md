@@ -183,6 +183,31 @@ blocks. Sparse files edge case not worth special-casing here.
 
 ---
 
+## Config-driven `db_path`
+
+Add `db_path` setting to `~/.sift.config` so users can relocate the database without
+setting the `SIFT_DB_PATH` environment variable. Resolution order would be:
+`SIFT_DB_PATH` env → `db_path` in config → `~/.sift.duckdb` default.
+
+Relevant code: `server/db.py:get_db_path()`.
+
+---
+
+## `sift server --daemon` / `sift server stop`
+
+Background server management for non-Docker installs (e.g. Windows single-PC use).
+
+- `sift server --daemon` — start server in background, write PID to `~/.sift.pid`
+- `sift server stop` — read PID file, kill the process, clean up
+
+**Constraint:** avoid platform-specific code paths (no `os.fork()`). Use
+`subprocess.Popen` on all platforms so there's one implementation.
+
+Today's workflow is fine for MVP: run `sift server` in a terminal, Ctrl+C to stop.
+Docker/Unraid is unaffected — the container runs in foreground as normal.
+
+---
+
 ## Scan Cache Performance / Data Store Optimization
 
 **Context:** At scan startup, `GET /files/cache` fetches every previously-indexed file (path +

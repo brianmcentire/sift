@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 
 from sift import client
-from sift.commands import print_server_info
+from sift.commands import print_config_hint, print_server_info
 
 
 def _fmt_dt(dt_str: str | None) -> str:
@@ -40,6 +40,7 @@ def cmd_status(args) -> None:
         hosts = client.get("/hosts")
     except Exception as e:
         print(f"sift: cannot reach server: {e}", file=sys.stderr)
+        print_config_hint()
         sys.exit(1)
 
     if filter_host:

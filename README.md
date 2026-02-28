@@ -4,11 +4,7 @@
 
 Distributed file inventory and deduplication across your LAN. Scanner agents on each machine hash files locally and send metadata to a central server. Use the CLI or web UI to find duplicates, verify backups, and browse your file inventory across all your hosts.
 
----
-
-**Disclaimer:** sift is read-only with respect to the files it scans — it never writes, moves, modifies, renames, or deletes any file on the scanned host. The server does maintain its own database (`sift.duckdb`) on whatever machine it runs on, but that's the inventory, not your files. Reasonable efforts have been made to ensure this is actually true. That said, this is alpha software, and it comes with absolutely no warranty, no guarantee of fitness for any purpose, and no promise that your files will be any safer or better organized after using it. If it somehow causes data loss, existential dread, or unexpected charges from your cloud provider, that's on you. Use at your own risk.
-
----
+sift is read-only with respect to the files it scans — it never writes, moves, modifies, renames, or deletes any file on any scanned host. See [File Safety](#file-safety-still-no-guarantees) for details.
 
 ## How It Works
 
@@ -94,6 +90,25 @@ scp dist/sift-linux-amd64 root@unraid:/usr/local/bin/sift
 ```
 
 Requires Docker on your build machine. Produces a self-contained binary with no Python dependency on the target — works on any Linux x86_64 system with glibc 2.14+, which covers anything from the last decade.
+
+**Windows — standalone exe:**
+
+Download `sift.exe` from the [latest release](https://github.com/brianmcentire/sift/releases) on GitHub. No Python installation required. The exe includes both the scan agent and the server.
+
+```powershell
+sift config                        # set your server address (or keep localhost default)
+sift scan C:\Users\me\Documents    # scan a directory
+```
+
+To run the server locally on the same PC (single-machine use):
+
+```powershell
+# Terminal 1:
+sift server
+
+# Terminal 2:
+sift scan C:\Users\me\Documents
+```
 
 ### Point agents at the server
 
@@ -247,6 +262,24 @@ Environment variables take precedence over the config file:
 | `SIFT_HOST` | Hostname override for CLI queries |
 | `SIFT_DB_PATH` | Path to `sift.duckdb` (server) |
 | `SIFT_CONFIG_PATH` | Path to config file |
+
+## File Safety (Still no guarantees)
+
+sift is read-only with respect to the files it scans. It calls `os.stat()` and reads file bytes for hashing — it never writes, moves, modifies, renames, or deletes any file on any scanned host. `sift trim` removes inventory rows from the database, not files on disk.
+
+sift only writes to these locations:
+
+| File | Command | What it does |
+|---|---|---|
+| `~/.sift.config` | `sift config` | Saves your server URL and settings |
+| `~/.sift-scan-errors.log` | `sift scan` | Appends scan errors (permission denied, etc.) |
+| `~/.sift.duckdb` | `sift server` | The inventory database (server-side only) |
+
+That's it. No other files are created, modified, or deleted. There are no `--force` flags that override this behavior.
+
+`sift upgrade` reinstalls the sift package itself via pip. It does not touch your files or the database.
+
+**Disclaimer:** This is alpha software. It comes with no warranty, no guarantee of fitness for any purpose, and no promise that your files will be any safer or better organized after using it. Use at your own risk.
 
 ## Building a Standalone Agent Binary
 

@@ -6,7 +6,7 @@ import sys
 from typing import Optional
 
 from sift import client
-from sift.commands import print_server_info
+from sift.commands import print_config_hint, print_server_info
 from sift.config import get_cli_config
 from sift.normalize import local_hostname, normalize_query_path
 
@@ -49,6 +49,7 @@ def cmd_du(args) -> None:
             hosts_resp = client.get("/hosts")
         except Exception as e:
             print(f"sift: cannot reach server: {e}", file=sys.stderr)
+            print_config_hint()
             sys.exit(1)
         host_names = [h["host"] for h in hosts_resp]
     else:

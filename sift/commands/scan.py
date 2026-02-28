@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from sift import client
+from sift.commands import print_config_hint
 from sift.client import dump_request_log, enable_request_log
 from sift.classify import classify_file
 from sift.config import get_agent_config
@@ -1057,6 +1058,7 @@ def cmd_scan(args) -> None:
         print(
             "Scan aborted. Re-run to resume once the server is back.", file=sys.stderr
         )
+        print_config_hint()
         try:
             client.patch(f"/scan-runs/{run_id}", {"status": "failed"})
         except Exception:
