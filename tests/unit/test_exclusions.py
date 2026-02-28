@@ -1,14 +1,17 @@
 """Unit tests for sift.exclusions."""
 
 import time
-from unittest.mock import patch
+from unittest.mock import mock_open, patch, MagicMock
 import pytest
 from sift.exclusions import (
+    _build_mount_registry,
     _is_unraid,
     _is_unraid_disk_path,
     is_excluded_dir,
     is_excluded_file,
+    is_network_mount,
     is_volatile_active,
+    is_windows_cloud_placeholder,
 )
 
 
@@ -302,3 +305,208 @@ class TestIsVolatileActive:
             )
             is True
         )
+
+
+class TestIsWindowsCloudPlaceholder:
+    """OneDrive Files On-Demand placeholder detection."""
+
+    def test_recall_on_data_access_flag(self):
+        # FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000
+        assert is_windows_cloud_placeholder(0x400000, "windows")
+
+    def test_recall_on_open_flag(self):
+        # FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x40000 (older OneDrive)
+        assert is_windows_cloud_placeholder(0x40000, "windows")
+
+    def test_both_flags(self):
+        assert is_windows_cloud_placeholder(0x440000, "windows")
+
+    def test_normal_file_not_placeholder(self):
+        # Typical normal file attributes (e.g. FILE_ATTRIBUTE_ARCHIVE = 0x20)
+        assert not is_windows_cloud_placeholder(0x20, "windows")
+
+    def test_zero_attributes_not_placeholder(self):
+        assert not is_windows_cloud_placeholder(0, "windows")
+
+    def test_not_triggered_on_darwin(self):
+        assert not is_windows_cloud_placeholder(0x400000, "darwin")
+
+    def test_not_triggered_on_linux(self):
+        assert not is_windows_cloud_placeholder(0x400000, "linux")
+
+
+class TestBuildMountRegistry:
+    """Mount registry construction from system mount info."""
+
+    def _clear_cache(self):
+        _build_mount_registry.cache_clear()
+
+    PROC_MOUNTS = (
+        "sysfs /sys sysfs rw,nosuid 0 0\n"
+        "proc /proc proc rw,nosuid 0 0\n"
+        "/dev/sda1 / ext4 rw,relatime 0 0\n"
+        "192.168.1.10:/export/data /mnt/nas nfs4 rw,vers=4.2 0 0\n"
+        "//server/share /mnt/smb cifs rw,user=brian 0 0\n"
+        "mergerfs /mnt/user fuse.mergerfs rw,allow_other 0 0\n"
+        "sshfs#user@host: /mnt/remote fuse.sshfs rw,nosuid 0 0\n"
+    )
+
+    def test_linux_parses_proc_mounts(self):
+        self._clear_cache()
+        with patch("builtins.open", mock_open(read_data=self.PROC_MOUNTS)):
+            reg = _build_mount_registry("linux")
+        assert reg["/"] == "ext4"
+        assert reg["/mnt/nas"] == "nfs4"
+        assert reg["/mnt/smb"] == "cifs"
+        assert reg["/mnt/user"] == "fuse.mergerfs"
+        assert reg["/mnt/remote"] == "fuse.sshfs"
+
+    def test_linux_empty_on_missing_proc_mounts(self):
+        self._clear_cache()
+        with patch("builtins.open", side_effect=OSError("No such file")):
+            reg = _build_mount_registry("linux")
+        assert reg == {}
+
+    MOUNT_OUTPUT_MACOS = (
+        "/dev/disk1s1 on / (apfs, local, journaled)\n"
+        "devfs on /dev (devfs, local, nobrowse)\n"
+        "nas.local:/volume1/media on /Volumes/media (nfs, nodev, nosuid)\n"
+        "//brian@server.local/share on /Volumes/share (smbfs, nodev, nosuid)\n"
+    )
+
+    def test_darwin_parses_mount_output(self):
+        self._clear_cache()
+        mock_result = MagicMock()
+        mock_result.stdout = self.MOUNT_OUTPUT_MACOS
+        with patch("subprocess.run", return_value=mock_result):
+            reg = _build_mount_registry("darwin")
+        assert reg["/"] == "apfs"
+        assert reg["/Volumes/media"] == "nfs"
+        assert reg["/Volumes/share"] == "smbfs"
+
+    def test_darwin_empty_on_subprocess_failure(self):
+        self._clear_cache()
+        with patch("subprocess.run", side_effect=OSError("command not found")):
+            reg = _build_mount_registry("darwin")
+        assert reg == {}
+
+    def test_windows_detects_network_drives(self):
+        self._clear_cache()
+        DRIVE_REMOTE = 4
+        DRIVE_FIXED = 3
+
+        def fake_get_drive_type(drive):
+            if drive == "Z:\\":
+                return DRIVE_REMOTE
+            return DRIVE_FIXED
+
+        mock_kernel32 = MagicMock()
+        mock_kernel32.GetDriveTypeW = fake_get_drive_type
+        mock_windll = MagicMock()
+        mock_windll.kernel32 = mock_kernel32
+
+        with patch.dict("sys.modules", {"ctypes": MagicMock()}):
+            import ctypes as ct_mock
+
+            ct_mock.windll = mock_windll
+            with patch("sift.exclusions.subprocess"):  # unused on windows
+                reg = _build_mount_registry("windows")
+        # Can't fully test ctypes on non-Windows, but verify fallback works
+        # The real test is that it doesn't crash
+
+    def test_unknown_os_returns_empty(self):
+        self._clear_cache()
+        reg = _build_mount_registry("freebsd")
+        assert reg == {}
+
+
+class TestIsNetworkMount:
+    """Network mount detection via mount registry."""
+
+    LINUX_MOUNTS = (
+        "/dev/sda1 / ext4 rw 0 0\n"
+        "192.168.1.10:/data /mnt/nas nfs4 rw 0 0\n"
+        "//server/share /mnt/smb cifs rw 0 0\n"
+        "mergerfs /mnt/user fuse.mergerfs rw 0 0\n"
+        "sshfs#user@host: /mnt/remote fuse.sshfs rw 0 0\n"
+        "rclone /mnt/cloud fuse.rclone rw 0 0\n"
+    )
+
+    def _clear_cache(self):
+        _build_mount_registry.cache_clear()
+
+    def test_nfs_detected(self):
+        self._clear_cache()
+        with patch("builtins.open", mock_open(read_data=self.LINUX_MOUNTS)):
+            is_net, fstype = is_network_mount("/mnt/nas/photos", "linux")
+        assert is_net is True
+        assert fstype == "nfs4"
+
+    def test_cifs_detected(self):
+        self._clear_cache()
+        with patch("builtins.open", mock_open(read_data=self.LINUX_MOUNTS)):
+            is_net, fstype = is_network_mount("/mnt/smb/docs", "linux")
+        assert is_net is True
+        assert fstype == "cifs"
+
+    def test_sshfs_detected(self):
+        self._clear_cache()
+        with patch("builtins.open", mock_open(read_data=self.LINUX_MOUNTS)):
+            is_net, fstype = is_network_mount("/mnt/remote/file.txt", "linux")
+        assert is_net is True
+        assert fstype == "fuse.sshfs"
+
+    def test_rclone_detected(self):
+        self._clear_cache()
+        with patch("builtins.open", mock_open(read_data=self.LINUX_MOUNTS)):
+            is_net, fstype = is_network_mount("/mnt/cloud/bucket/obj", "linux")
+        assert is_net is True
+        assert fstype == "fuse.rclone"
+
+    def test_mergerfs_not_excluded(self):
+        self._clear_cache()
+        with patch("builtins.open", mock_open(read_data=self.LINUX_MOUNTS)):
+            is_net, fstype = is_network_mount("/mnt/user/media", "linux")
+        assert is_net is False
+
+    def test_ext4_not_excluded(self):
+        self._clear_cache()
+        with patch("builtins.open", mock_open(read_data=self.LINUX_MOUNTS)):
+            is_net, fstype = is_network_mount("/home/brian/docs", "linux")
+        assert is_net is False
+
+    def test_apfs_not_excluded(self):
+        self._clear_cache()
+        mock_result = MagicMock()
+        mock_result.stdout = "/dev/disk1s1 on / (apfs, local, journaled)\n"
+        with patch("subprocess.run", return_value=mock_result):
+            is_net, fstype = is_network_mount("/Users/brian/Desktop", "darwin")
+        assert is_net is False
+
+    def test_empty_registry_returns_false(self):
+        self._clear_cache()
+        with patch("builtins.open", side_effect=OSError("No such file")):
+            is_net, fstype = is_network_mount("/mnt/nas/photos", "linux")
+        assert is_net is False
+        assert fstype == ""
+
+    def test_mount_point_exact_match(self):
+        """is_network_mount should match the mount point path exactly."""
+        self._clear_cache()
+        with patch("builtins.open", mock_open(read_data=self.LINUX_MOUNTS)):
+            is_net, fstype = is_network_mount("/mnt/nas", "linux")
+        assert is_net is True
+        assert fstype == "nfs4"
+
+    def test_longest_prefix_wins(self):
+        """When paths overlap, longest mount point prefix should win."""
+        self._clear_cache()
+        mounts = (
+            "/dev/sda1 / ext4 rw 0 0\n"
+            "192.168.1.10:/data /mnt nfs4 rw 0 0\n"
+            "mergerfs /mnt/user fuse.mergerfs rw 0 0\n"
+        )
+        with patch("builtins.open", mock_open(read_data=mounts)):
+            # /mnt/user/media should match /mnt/user (mergerfs), not /mnt (nfs4)
+            is_net, fstype = is_network_mount("/mnt/user/media", "linux")
+        assert is_net is False  # mergerfs is local

@@ -6,6 +6,7 @@ import fnmatch
 import math
 import os
 import re
+import subprocess
 import time
 from functools import lru_cache
 from typing import Optional
@@ -203,6 +204,10 @@ def is_excluded_dir(
     dirpath is the full path of the directory; dirname is its basename.
     allow_unraid_disks: if True, skip the Unraid /mnt/diskN exclusion (--yolo).
     """
+    # UNC paths (\\server\share) — network mounts excluded by default
+    if dirpath.startswith("\\\\"):
+        return True
+
     # Leaf name check (case-insensitive)
     if dirname.lower() in {n.lower() for n in EXCLUDED_DIR_NAMES}:
         return True
@@ -282,6 +287,136 @@ def is_volatile_active(
     age_seconds = time.time() - mtime
     threshold_seconds = threshold_days * 86400
     return age_seconds < threshold_seconds
+
+
+# Windows OneDrive Files On-Demand: file exists as a cloud placeholder.
+# Reading it triggers a download — same problem as macOS APFS dataless stubs.
+# FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000
+# FILE_ATTRIBUTE_RECALL_ON_OPEN        = 0x40000  (older OneDrive versions)
+_WIN_RECALL_FLAGS = 0x400000 | 0x40000
+
+
+def is_windows_cloud_placeholder(st_file_attributes: int, source_os: str) -> bool:
+    """Return True for Windows OneDrive Files On-Demand placeholders.
+
+    These are cloud stubs — the file appears locally but bytes live in OneDrive.
+    Hashing would trigger a download. Record with skipped_reason='windows_cloud_placeholder'.
+    """
+    if source_os != "windows":
+        return False
+    return bool(st_file_attributes & _WIN_RECALL_FLAGS)
+
+
+# ---------------------------------------------------------------------------
+# Network filesystem detection
+# ---------------------------------------------------------------------------
+NETWORK_FS_TYPES: frozenset[str] = frozenset(
+    [
+        # Traditional network filesystems
+        "nfs",
+        "nfs4",
+        "cifs",
+        "smbfs",
+        "afp",
+        "afs",
+        "ncpfs",
+        "9p",
+        # Remote FUSE (known-remote whitelist)
+        "fuse.sshfs",
+        "fuse.rclone",
+        "fuse.s3fs",
+        "fuse.gcsfuse",
+        "fuse.nfs",
+    ]
+)
+
+
+@lru_cache(maxsize=1)
+def _build_mount_registry(source_os: str) -> dict[str, str]:
+    """Build a {mount_point: fstype} map from system mount info.
+
+    Linux: parse /proc/mounts
+    macOS: parse `mount` command output
+    Windows: check drive types via kernel32.GetDriveTypeW
+
+    Returns empty dict on failure (safe default — no exclusions).
+    """
+    registry: dict[str, str] = {}
+
+    if source_os == "linux":
+        try:
+            with open("/proc/mounts", "r") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        mount_point = parts[1]
+                        fstype = parts[2]
+                        registry[mount_point] = fstype
+        except OSError:
+            pass
+
+    elif source_os == "darwin":
+        try:
+            result = subprocess.run(
+                ["mount"], capture_output=True, text=True, timeout=10
+            )
+            # Format: <device> on <mount_point> (<fstype>, <options>)
+            for line in result.stdout.splitlines():
+                m = re.match(r".+ on (.+) \((\w[\w.]*)", line)
+                if m:
+                    mount_point = m.group(1)
+                    fstype = m.group(2)
+                    registry[mount_point] = fstype
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    elif source_os == "windows":
+        try:
+            import ctypes
+
+            get_drive_type = ctypes.windll.kernel32.GetDriveTypeW  # type: ignore[attr-defined]
+            DRIVE_REMOTE = 4
+            for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                drive = f"{letter}:\\"
+                if get_drive_type(drive) == DRIVE_REMOTE:
+                    registry[drive] = "network"
+        except (AttributeError, OSError):
+            pass
+
+    return registry
+
+
+def is_network_mount(dirpath: str, source_os: str) -> tuple[bool, str]:
+    """Check if dirpath sits on a network filesystem.
+
+    Returns (is_network, fstype_string). Uses longest-prefix match
+    against the mount registry to find the correct mount point.
+    """
+    registry = _build_mount_registry(source_os)
+    if not registry:
+        return False, ""
+
+    if source_os == "windows":
+        # Windows: check if drive letter matches a network drive
+        if len(dirpath) >= 2 and dirpath[1] == ":":
+            drive = dirpath[:3].upper()
+            if drive in registry:
+                return True, registry[drive]
+        return False, ""
+
+    # POSIX: find longest matching mount point prefix
+    best_mount = ""
+    best_fstype = ""
+    for mount_point, fstype in registry.items():
+        if dirpath == mount_point or dirpath.startswith(mount_point + "/"):
+            if len(mount_point) > len(best_mount):
+                best_mount = mount_point
+                best_fstype = fstype
+
+    if best_mount and best_fstype in NETWORK_FS_TYPES:
+        return True, best_fstype
+
+    return False, ""
 
 
 def is_sparse_file(st_size: int, st_blocks: int, source_os: str) -> bool:

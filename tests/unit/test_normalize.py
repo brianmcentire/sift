@@ -1,6 +1,7 @@
 """Unit tests for sift.normalize."""
 import pytest
-from sift.normalize import normalize_path, local_hostname, get_source_os
+from unittest.mock import patch
+from sift.normalize import normalize_path, local_hostname, get_source_os, safe_path
 
 
 class TestNormalizePath:
@@ -96,3 +97,26 @@ class TestGetSourceOs:
     def test_returns_known_value(self):
         os_name = get_source_os()
         assert os_name in ("darwin", "linux", "windows")
+
+
+class TestSafePath:
+    def test_posix_passthrough(self):
+        with patch("sift.normalize.get_source_os", return_value="darwin"):
+            assert safe_path("/Users/brian/file.txt") == "/Users/brian/file.txt"
+
+    def test_windows_adds_prefix(self):
+        with patch("sift.normalize.get_source_os", return_value="windows"):
+            result = safe_path("C:\\Users\\brian\\file.txt")
+            assert result.startswith("\\\\?\\")
+            assert "C:\\Users\\brian\\file.txt" in result
+
+    def test_windows_already_prefixed(self):
+        with patch("sift.normalize.get_source_os", return_value="windows"):
+            prefixed = "\\\\?\\C:\\Users\\brian\\file.txt"
+            assert safe_path(prefixed) == prefixed
+
+    def test_windows_unc_path_gets_unc_prefix(self):
+        with patch("sift.normalize.get_source_os", return_value="windows"):
+            result = safe_path("\\\\server\\share\\file.txt")
+            assert result.startswith("\\\\?\\UNC\\")
+            assert "server\\share\\file.txt" in result

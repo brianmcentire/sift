@@ -19,8 +19,10 @@ from sift.config import get_agent_config
 from sift.exclusions import (
     is_excluded_dir,
     is_excluded_file,
+    is_network_mount,
     is_sparse_file,
     is_volatile_active,
+    is_windows_cloud_placeholder,
 )
 from sift.hash_utils import hash_file, needs_rehash
 from sift.normalize import (
@@ -79,6 +81,9 @@ def _precount_files(
                             if not is_excluded_dir(
                                 entry.path, entry.name, source_os, allow_unraid_disks
                             ):
+                                net, _ = is_network_mount(entry.path, source_os)
+                                if net:
+                                    continue
                                 stack.append(entry.path)
                         elif entry.is_file(follow_symlinks=False):
                             ext, _ = classify_file(entry.name)
@@ -324,6 +329,21 @@ def cmd_scan(args) -> None:
     raw_root = getattr(args, "path", ".") or "."
     root = os.path.realpath(os.path.expanduser(raw_root))
 
+    # Refuse to scan UNC paths (\\server\share) — network mounts are excluded by default.
+    if root.startswith("\\\\"):
+        print("sift: scanning UNC paths (\\\\server\\share) is not supported.", file=sys.stderr)
+        sys.exit(1)
+
+    # Refuse to scan network filesystem roots (NFS, SMB/CIFS, sshfs, etc.)
+    _net, _net_fs = is_network_mount(root, source_os)
+    if _net:
+        print(
+            f"sift: scan root {root} is on a network filesystem ({_net_fs}). "
+            "Network mounts are excluded by default.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     # On Windows use safe_path for os.walk root
     walk_root = safe_path(root) if source_os == "windows" else root
     root_dev = os.stat(walk_root).st_dev if one_filesystem else None
@@ -451,6 +471,7 @@ def cmd_scan(args) -> None:
             "bytes_scanned": 0,
             "bytes_hashed": 0,
             "read_errors": 0,
+            "network_mounts_skipped": 0,
         }
 
         _error_log_path = os.path.expanduser("~/.sift-scan-errors.log")
@@ -647,9 +668,23 @@ def cmd_scan(args) -> None:
             kept = []
             for d in dirnames:
                 full = os.path.join(dirpath, d)
+                # On Windows, os.walk with followlinks=False skips symlinks but
+                # NOT junction points (reparse points). Skip them explicitly.
+                if source_os == "windows" and os.path.islink(full):
+                    if debug:
+                        _debug(f"[junction]      {full}")
+                    continue
                 if is_excluded_dir(full, d, source_os, allow_unraid_disks):
                     if debug:
                         _debug(f"[excluded dir]  {full}")
+                    continue
+                net, net_fs = is_network_mount(full, source_os)
+                if net:
+                    print(
+                        f"skipping {full} ({net_fs} network mount)",
+                        file=sys.stderr,
+                    )
+                    stats["network_mounts_skipped"] += 1
                     continue
                 if root_dev is not None:
                     try:
@@ -780,6 +815,34 @@ def cmd_scan(args) -> None:
                                 scan_start_iso=scan_start_iso,
                                 source_os=source_os,
                                 skipped_reason="macos_dataless",
+                                inode=inode_val,
+                                device=device_val,
+                            )
+                        )
+                        stats["files_skipped"] += 1
+                        continue
+
+                    # Windows: skip OneDrive Files On-Demand placeholders — no local bytes to hash
+                    if is_windows_cloud_placeholder(
+                        getattr(stat_result, "st_file_attributes", 0), source_os
+                    ):
+                        if debug:
+                            _debug(f"[win_cloud]      {raw_path}")
+                        _queue_upsert(
+                            _make_record(
+                                host=host,
+                                drive=drive,
+                                path=path_lower,
+                                path_display=path_display,
+                                filename=filename,
+                                ext=ext,
+                                file_category=category,
+                                size_bytes=stat_result.st_size,
+                                hash_val=None,
+                                mtime=mtime_val,
+                                scan_start_iso=scan_start_iso,
+                                source_os=source_os,
+                                skipped_reason="windows_cloud_placeholder",
                                 inode=inode_val,
                                 device=device_val,
                             )
@@ -1040,12 +1103,17 @@ def cmd_scan(args) -> None:
         cached_str = (
             f", {stats['files_cached']:,} cached" if stats["files_cached"] else ""
         )
+        net_str = (
+            f", {stats['network_mounts_skipped']:,} network mount(s) skipped"
+            if stats["network_mounts_skipped"]
+            else ""
+        )
         print(
             f"\nScan complete: {stats['files_scanned']:,} files scanned, "
             f"{stats['files_hashed']:,} hashed{cached_str}, "
             f"{stats['files_skipped']:,} skipped, "
             f"{_format_size(stats['bytes_scanned'])} total, "
-            f"{_format_duration(elapsed)} elapsed{err_suffix}",
+            f"{_format_duration(elapsed)} elapsed{err_suffix}{net_str}",
             file=sys.stderr,
         )
 

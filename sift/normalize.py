@@ -65,12 +65,16 @@ def normalize_path_for_storage(abs_path: str, source_os: str | None = None) -> T
 def safe_path(raw_path: str) -> str:
     """
     Return a path safe for os.stat / open on Windows (adds \\?\\ prefix for long paths).
+    UNC paths (\\\\server\\share) get the \\\\?\\UNC\\ prefix instead.
     No-op on POSIX.
     """
     if get_source_os() != "windows":
         return raw_path
     if raw_path.startswith("\\\\?\\"):
         return raw_path
+    # UNC path: \\server\share → \\?\UNC\server\share (must check before abspath)
+    if raw_path.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + raw_path[2:]
     abs_path = os.path.abspath(raw_path)
     return "\\\\?\\" + abs_path
 

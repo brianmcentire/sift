@@ -233,3 +233,38 @@ of JSON and cause a 30–60s apparent freeze before scanning begins.
 - Evaluate alternative embedded stores (e.g. Lance, SQLite + FTS5) if DuckDB proves
   fundamentally slow for the point-query / LIKE patterns sift uses at scale
 
+---
+
+## Network Filesystem Exclusion
+
+**Status**: Implemented (v0.7.2+). All network mounts are excluded by default.
+
+### Problem
+Running `sift scan /` or `sift scan /mnt` on a host with NFS/SMB mounts causes:
+stale NFS hangs, massive unintended network scans, false cross-host duplicates,
+and LAN bandwidth saturation.
+
+### What was implemented
+- Mount registry built once at scan startup (cached via `@lru_cache`)
+- Scan root on a network FS → hard error + exit
+- Network subdirectories encountered during walk → warning to stderr + skip
+- Precount mirrors the same check for consistency
+
+### Detection by platform
+- **Linux**: parse `/proc/mounts` (field[1]=mount point, field[2]=fstype)
+- **macOS**: parse `mount` command output (regex for `on <path> (<fstype>,`)
+- **Windows**: `kernel32.GetDriveTypeW()` per drive letter (value 4 = DRIVE_REMOTE)
+
+### Excluded filesystem types
+`nfs`, `nfs4`, `cifs`, `smbfs`, `afp`, `afs`, `ncpfs`, `9p`,
+`fuse.sshfs`, `fuse.rclone`, `fuse.s3fs`, `fuse.gcsfuse`, `fuse.nfs`
+
+### Local FUSE — NOT excluded
+`fuse.mergerfs`, `fuse.unionfs`, `fuse.ntfs-3g`, `zfs-fuse`, and any
+unlisted FUSE type (safe default: assume local). Critical for Unraid where
+`/mnt/user` is `fuse.mergerfs`.
+
+### Future consideration
+- `--include-network` flag if users explicitly want to scan network mounts
+- Per-mount overrides in `~/.sift.config`
+
