@@ -24,6 +24,80 @@ logging.basicConfig(
 )
 logger = logging.getLogger("sift.server")
 
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    value = os.environ.get(name, default).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+_PERF_LOG_ENABLED = _env_flag("SIFT_PERF_LOG", "0")
+
+
+def _log_perf(endpoint: str, start: float, **fields) -> None:
+    """Emit endpoint-level performance metrics when perf logging is enabled."""
+    if not _PERF_LOG_ENABLED:
+        return
+    elapsed_ms = (time.monotonic() - start) * 1000.0
+    parts = [f"{k}={v}" for k, v in fields.items()]
+    suffix = f" {' '.join(parts)}" if parts else ""
+    logger.info("perf endpoint=%s elapsed_ms=%.1f%s", endpoint, elapsed_ms, suffix)
+
+
+_query_cache_lock = threading.Lock()
+_QUERY_CACHE_TTL = int(os.environ.get("SIFT_QUERY_CACHE_TTL", "300"))
+_QUERY_CACHE_MAX = int(os.environ.get("SIFT_QUERY_CACHE_MAX", "2000"))
+_ls_cache: dict[tuple, tuple] = {}
+_directories_cache: dict[tuple, tuple] = {}
+_tree_children_cache: dict[tuple, tuple] = {}
+_tree_dup_metrics_cache: dict[tuple, tuple] = {}
+
+
+_MAINTENANCE_ENABLED = _env_flag("SIFT_MAINTENANCE_ENABLED", "0")
+_MAINTENANCE_COOLDOWN_SEC = int(os.environ.get("SIFT_MAINTENANCE_COOLDOWN_SEC", "10"))
+_MAINTENANCE_MIN_IDLE_SEC = int(os.environ.get("SIFT_MAINTENANCE_MIN_IDLE_SEC", "120"))
+_maintenance_stop_event = threading.Event()
+_maintenance_thread: threading.Thread | None = None
+_maintenance_lock = threading.Lock()
+_last_api_activity = time.monotonic()
+
+
+def _cache_get(cache: dict, key: tuple):
+    now = time.monotonic()
+    with _query_cache_lock:
+        item = cache.get(key)
+        if item is None:
+            return None
+        value, ts = item
+        if now - ts > _QUERY_CACHE_TTL:
+            cache.pop(key, None)
+            return None
+        return value
+
+
+def _cache_set(cache: dict, key: tuple, value) -> None:
+    now = time.monotonic()
+    with _query_cache_lock:
+        cache[key] = (value, now)
+        if len(cache) <= _QUERY_CACHE_MAX:
+            return
+        oldest_key = None
+        oldest_ts = now
+        for k, (_, ts) in cache.items():
+            if ts < oldest_ts:
+                oldest_ts = ts
+                oldest_key = k
+        if oldest_key is not None:
+            cache.pop(oldest_key, None)
+
+
+def _invalidate_query_caches() -> None:
+    with _query_cache_lock:
+        _ls_cache.clear()
+        _directories_cache.clear()
+        _tree_children_cache.clear()
+        _tree_dup_metrics_cache.clear()
+
+
 from server import db
 from server.models import (
     DuplicateLocation,
@@ -41,15 +115,33 @@ from server.models import (
     StatsOverview,
     TrimRequest,
     TrimResponse,
+    TreeChildrenResponse,
+    TreeDupMetric,
+    TreeDupMetricsResponse,
     UpsertResponse,
 )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _maintenance_thread
     db_path = os.environ.get("SIFT_DB_PATH") or db.get_db_path()
     db.init_db(db_path)
-    yield
+    _maintenance_stop_event.clear()
+    if _MAINTENANCE_ENABLED:
+        _maintenance_thread = threading.Thread(
+            target=_maintenance_loop,
+            daemon=True,
+            name="maintenance-worker",
+        )
+        _maintenance_thread.start()
+    try:
+        yield
+    finally:
+        _maintenance_stop_event.set()
+        if _maintenance_thread and _maintenance_thread.is_alive():
+            _maintenance_thread.join(timeout=1.0)
+        _maintenance_thread = None
 
 
 # ---------------------------------------------------------------------------
@@ -80,15 +172,118 @@ def _maybe_refresh_host_stats(host: str) -> None:
         except Exception:
             pass
 
-    threading.Thread(target=_do_refresh, daemon=True, name=f"stats-refresh-{host}").start()
+    threading.Thread(
+        target=_do_refresh, daemon=True, name=f"stats-refresh-{host}"
+    ).start()
 
 
 app = FastAPI(title="sift", version="0.1.0", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
+def _running_scan_count(exclude_host: str | None = None) -> int:
+    if exclude_host:
+        row = db.query_one(
+            "SELECT COUNT(*) FROM scan_runs WHERE status = 'running' AND host != ?",
+            [exclude_host],
+        )
+    else:
+        row = db.query_one("SELECT COUNT(*) FROM scan_runs WHERE status = 'running'")
+    return int(row[0]) if row else 0
+
+
+def _maintenance_mode() -> tuple[str, int]:
+    """Return mode + max priority allowed for current activity state."""
+    running = _running_scan_count()
+    idle_for = max(0.0, time.monotonic() - _last_api_activity)
+    if running > 0:
+        return "ACTIVE", 40
+    if idle_for < _MAINTENANCE_MIN_IDLE_SEC:
+        return "WARM", 60
+    return "IDLE", 100
+
+
+def _run_maintenance_job(job: dict) -> None:
+    job_type = job.get("job_type")
+    host = job.get("host")
+    if job_type == "refresh_hash_stats":
+        db.set_aggregate_meta("hash_stats", "building")
+        db.refresh_hash_stats()
+        db.set_aggregate_meta("hash_stats", "fresh")
+        return
+    if job_type == "refresh_directory_index":
+        db.set_aggregate_meta("directory_index", "building")
+        db.refresh_directory_index()
+        db.set_aggregate_meta("directory_index", "fresh")
+        return
+    if job_type == "refresh_host_hash_stats":
+        if not host:
+            raise ValueError("refresh_host_hash_stats requires host")
+        db.set_aggregate_meta(f"host_hash_stats:{host}", "building")
+        db.refresh_host_hash_stats(host)
+        db.set_aggregate_meta(f"host_hash_stats:{host}", "fresh")
+        return
+    if job_type == "refresh_aggregates_for_host":
+        if not host:
+            raise ValueError("refresh_aggregates_for_host requires host")
+        db.set_aggregate_meta(f"host_hash_stats:{host}", "building")
+        db.refresh_host_hash_stats(host)
+        db.set_aggregate_meta(f"host_hash_stats:{host}", "fresh")
+        db.set_aggregate_meta("hash_stats", "building")
+        db.refresh_hash_stats()
+        db.set_aggregate_meta("hash_stats", "fresh")
+        db.set_aggregate_meta("directory_index", "building")
+        db.refresh_directory_index()
+        db.set_aggregate_meta("directory_index", "fresh")
+        return
+    raise ValueError(f"unknown maintenance job type: {job_type}")
+
+
+def _run_one_maintenance_cycle(force: bool = False) -> dict:
+    mode, max_priority = _maintenance_mode()
+    if not force and mode == "ACTIVE":
+        return {"mode": mode, "ran": False, "reason": "active_scans"}
+
+    with _maintenance_lock:
+        job = db.dequeue_maintenance_job(None if force else max_priority)
+        if job is None:
+            return {"mode": mode, "ran": False, "reason": "no_job"}
+
+        try:
+            _run_maintenance_job(job)
+            db.complete_maintenance_job(job["id"])
+            return {
+                "mode": mode,
+                "ran": True,
+                "job_id": job["id"],
+                "job_type": job["job_type"],
+            }
+        except Exception as exc:
+            requeue = int(job.get("attempts", 1)) < 3
+            db.fail_maintenance_job(job["id"], str(exc), requeue=requeue)
+            return {
+                "mode": mode,
+                "ran": True,
+                "job_id": job["id"],
+                "job_type": job.get("job_type"),
+                "error": str(exc),
+                "requeue": requeue,
+            }
+
+
+def _maintenance_loop() -> None:
+    logger.info("maintenance worker started")
+    while not _maintenance_stop_event.wait(_MAINTENANCE_COOLDOWN_SEC):
+        try:
+            _run_one_maintenance_cycle(force=False)
+        except Exception as exc:
+            logger.warning("maintenance loop error: %s", exc)
+    logger.info("maintenance worker stopped")
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
+    global _last_api_activity
     start = time.monotonic()
     response = await call_next(request)
     elapsed = time.monotonic() - start
@@ -96,6 +291,8 @@ async def log_requests(request: Request, call_next):
     # Skip static asset noise
     if path.startswith("/assets/") or path == "/favicon.ico":
         return response
+    if not path.startswith("/maintenance"):
+        _last_api_activity = time.monotonic()
     if elapsed > 1.0:
         logger.warning(
             "%s %s %d — %.1fs", request.method, path, response.status_code, elapsed
@@ -169,7 +366,46 @@ def patch_scan_run(run_id: int, body: ScanRunPatch):
         with _stats_refresh_lock:
             _last_stats_refresh.pop(host, None)
         db.refresh_host_stats(host)
+        if body.status == "complete":
+            # Host-local aggregates are always refreshed immediately.
+            try:
+                db.refresh_host_hash_stats(host)
+                db.set_aggregate_meta(f"host_hash_stats:{host}", "fresh")
+            except Exception as exc:
+                logger.warning(
+                    "host aggregate refresh failed for host %s: %s", host, exc
+                )
+
+            # If other hosts are actively scanning, defer heavy global rebuilds.
+            running_other_hosts = _running_scan_count(exclude_host=host)
+
+            if running_other_hosts > 0:
+                db.set_aggregate_meta(
+                    "hash_stats",
+                    "stale",
+                    "Deferred while other hosts are actively scanning",
+                )
+                db.set_aggregate_meta(
+                    "directory_index",
+                    "stale",
+                    "Deferred while other hosts are actively scanning",
+                )
+                db.enqueue_maintenance_job("refresh_hash_stats", priority=80)
+                db.enqueue_maintenance_job("refresh_directory_index", priority=80)
+            else:
+                try:
+                    db.refresh_hash_stats()
+                    db.refresh_directory_index()
+                    db.set_aggregate_meta("hash_stats", "fresh")
+                    db.set_aggregate_meta("directory_index", "fresh")
+                except Exception as exc:
+                    logger.warning(
+                        "global aggregate refresh failed after host %s completion: %s",
+                        host,
+                        exc,
+                    )
         _invalidate_stats_cache()
+        _invalidate_query_caches()
     return {"ok": True}
 
 
@@ -198,6 +434,36 @@ def list_scan_runs(host: Optional[str] = None, limit: int = Query(50, le=500)):
         )
         for r in rows
     ]
+
+
+@app.get("/maintenance/jobs")
+def list_maintenance_jobs(limit: int = Query(50, ge=1, le=500)):
+    rows = db.list_maintenance_jobs(limit)
+    return {
+        "jobs": [
+            {
+                "id": r[0],
+                "job_type": r[1],
+                "host": r[2],
+                "status": r[3],
+                "priority": r[4],
+                "attempts": r[5],
+                "payload": r[6],
+                "created_at": r[7],
+                "updated_at": r[8],
+                "last_error": r[9],
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.post("/maintenance/run-now")
+def run_maintenance_now(force: bool = Query(False)):
+    if not _MAINTENANCE_ENABLED and not force:
+        return {"ok": False, "reason": "maintenance_disabled"}
+    result = _run_one_maintenance_cycle(force=force)
+    return {"ok": True, **result}
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +530,7 @@ def upsert_files(records: list[FileRecord]):
     if elapsed > 2.0:
         logger.warning("POST /files: %d records in %.1fs", len(records), elapsed)
     _invalidate_stats_cache()
+    _invalidate_query_caches()
     # Periodically refresh host stats mid-scan so sift status stays current.
     # Throttled to once per 10 min per host; runs in background thread.
     if records:
@@ -438,6 +705,7 @@ def trim_files(body: TrimRequest):
     if deleted > 0:
         db.refresh_host_stats(body.host)
         _invalidate_stats_cache()
+        _invalidate_query_caches()
 
     return {"matched": matched, "deleted": deleted, "preview_paths": []}
 
@@ -485,7 +753,9 @@ def get_cache_stream(host: str, root: str):
 
 
 @app.get("/files/ls/dup-hash")
-def ls_dup_hash(path: str = Query("/"), host: str = Query(""), min_size: int = Query(0, ge=0)):
+def ls_dup_hash(
+    path: str = Query("/"), host: str = Query(""), min_size: int = Query(0, ge=0)
+):
     """Return the first duplicated hash found within the given subtree for a host.
     Uses the same hard-link exclusion logic as the dupes CTE in ls_files so the
     returned hash is guaranteed to appear >= 2 times in /files?hash=X."""
@@ -532,6 +802,7 @@ def duplicates_in_subtree(
     limit: int = Query(1000, le=10000),
 ):
     """Return all files that are duplicated within a subtree, grouped by hash."""
+    req_start = time.monotonic()
     prefix = path_prefix.lower().rstrip("/")
     sql = """
     WITH hard_linked_inodes AS (
@@ -557,17 +828,39 @@ def duplicates_in_subtree(
     LIMIT ?
     """
     params = [
-        host,                       # hard_linked_inodes
-        host, prefix + "/%", prefix, min_size,  # dup_hashes
-        host, prefix + "/%", prefix,  # result rows
+        host,  # hard_linked_inodes
+        host,
+        prefix + "/%",
+        prefix,
+        min_size,  # dup_hashes
+        host,
+        prefix + "/%",
+        prefix,  # result rows
         limit,
     ]
     rows = db.query(sql, params)
+    _log_perf(
+        "/files/duplicates-in-subtree",
+        req_start,
+        host=host,
+        prefix=prefix or "/",
+        min_size=min_size,
+        limit=limit,
+        rows=len(rows),
+    )
     return [
         FileEntry(
-            host=r[0], drive=r[1], path_display=r[2], filename=r[3],
-            ext=r[4], file_category=r[5], size_bytes=r[6], hash=r[7],
-            mtime=r[8], last_seen_at=r[9], other_hosts=None,
+            host=r[0],
+            drive=r[1],
+            path_display=r[2],
+            filename=r[3],
+            ext=r[4],
+            file_category=r[5],
+            size_bytes=r[6],
+            hash=r[7],
+            mtime=r[8],
+            last_seen_at=r[9],
+            other_hosts=None,
         )
         for r in rows
     ]
@@ -581,6 +874,7 @@ def dup_ancestor_dirs(
 ):
     """Return directory paths that contain duplicate files under a subtree.
     Walks up from each leaf dir to path_prefix to fill in intermediate ancestors."""
+    req_start = time.monotonic()
     prefix = path_prefix.lower().rstrip("/")
     sql = """
     WITH hard_linked_inodes AS (
@@ -611,10 +905,19 @@ def dup_ancestor_dirs(
     all_paths = set(leaf_dirs)
     for leaf in leaf_dirs:
         d = leaf
-        while d != prefix and '/' in d:
-            d = d.rsplit('/', 1)[0]
-            if d and d != prefix and (d == prefix or d.startswith(prefix + '/')):
+        while d != prefix and "/" in d:
+            d = d.rsplit("/", 1)[0]
+            if d and d != prefix and (d == prefix or d.startswith(prefix + "/")):
                 all_paths.add(d)
+    _log_perf(
+        "/files/dup-ancestor-dirs",
+        req_start,
+        host=host,
+        prefix=prefix or "/",
+        min_size=min_size,
+        leaf_dirs=len(leaf_dirs),
+        expanded_paths=len(all_paths),
+    )
     return {"paths": sorted(all_paths)}
 
 
@@ -625,7 +928,22 @@ def ls_files(
     depth: int = Query(1, ge=1),
     min_size: int = Query(0, ge=0),
 ):
+    req_start = time.monotonic()
     prefix = path.lower().rstrip("/")
+    cache_key = (host, prefix, depth, min_size)
+    cached = _cache_get(_ls_cache, cache_key)
+    if cached is not None:
+        _log_perf(
+            "/files/ls",
+            req_start,
+            host=host,
+            path=prefix or "/",
+            depth=depth,
+            min_size=min_size,
+            rows=len(cached),
+            cache="hit",
+        )
+        return cached
     # SPLIT_PART is 1-indexed; paths start with '/' → position 1 is empty.
     # For prefix '' (root), segment is at SPLIT_PART index 2.
     # For prefix '/a/b', segment is at index 4 (2 slashes + 1 + 1 for leading empty).
@@ -695,6 +1013,16 @@ def ls_files(
     # param order: hard_linked host, dupes host, dupes min_size, scoped host, path LIKE, path =, join host
     params = [host, host, min_size, host, prefix + "/%", prefix, host]
     rows = db.query(sql, params)
+    _log_perf(
+        "/files/ls",
+        req_start,
+        host=host,
+        path=prefix or "/",
+        depth=depth,
+        min_size=min_size,
+        rows=len(rows),
+        cache="miss",
+    )
     result = []
     for r in rows:
         result.append(
@@ -717,7 +1045,333 @@ def ls_files(
                 is_hard_linked=bool(r[15]),
             )
         )
+    _cache_set(_ls_cache, cache_key, result)
     return result
+
+
+def _tree_children_rows(
+    path: str,
+    host: str,
+    depth: int = 1,
+    limit: int | None = None,
+    offset: int = 0,
+) -> tuple[list[LsEntry], bool]:
+    """Fast tree listing without duplicate aggregation."""
+    prefix = path.lower().rstrip("/")
+    split_idx = prefix.count("/") + depth + 1
+    sql = f"""
+    WITH scoped AS (
+        SELECT
+            f.path, f.path_display, f.filename, f.size_bytes,
+            f.hash, f.mtime, f.last_seen_at, f.file_category,
+            SPLIT_PART(f.path, '/', {split_idx}) AS segment,
+            SPLIT_PART(f.path_display, '/', {split_idx}) AS segment_display,
+            CASE WHEN SPLIT_PART(f.path, '/', {split_idx + 1}) = ''
+                 THEN 'file' ELSE 'dir' END AS entry_type
+        FROM files f
+        WHERE f.host = ?
+          AND (f.path LIKE ? OR f.path = ?)
+    )
+    SELECT
+        s.segment,
+        ANY_VALUE(s.entry_type) AS entry_type,
+        COUNT(*) AS file_count,
+        SUM(s.size_bytes) AS total_bytes,
+        0 AS dup_count,
+        0 AS dup_hash_count,
+        MAX(CASE WHEN s.entry_type = 'file' THEN s.filename END) AS filename,
+        MAX(CASE WHEN s.entry_type = 'file' THEN s.size_bytes END) AS leaf_size,
+        MAX(CASE WHEN s.entry_type = 'file' THEN s.hash END) AS leaf_hash,
+        MAX(CASE WHEN s.entry_type = 'file' THEN s.mtime END) AS leaf_mtime,
+        MAX(CASE WHEN s.entry_type = 'file' THEN s.last_seen_at END) AS leaf_last_seen_at,
+        MAX(CASE WHEN s.entry_type = 'file' THEN s.file_category END) AS leaf_file_category,
+        MAX(CASE WHEN s.entry_type = 'file' THEN s.path_display END) AS leaf_path_display,
+        ANY_VALUE(s.segment_display) AS segment_display,
+        NULL AS other_hosts,
+        FALSE AS is_hard_linked
+    FROM scoped s
+    WHERE s.segment IS NOT NULL AND s.segment != ''
+    GROUP BY s.segment
+    ORDER BY ANY_VALUE(s.entry_type) ASC, s.segment
+    """
+    params: list = [host, prefix + "/%", prefix]
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params.extend([limit + 1, max(0, offset)])
+
+    rows = db.query(sql, params)
+    has_more = False
+    if limit is not None and len(rows) > limit:
+        rows = rows[:limit]
+        has_more = True
+
+    return [
+        LsEntry(
+            segment=r[0],
+            entry_type=r[1],
+            file_count=r[2] or 0,
+            total_bytes=r[3],
+            dup_count=0,
+            dup_hash_count=0,
+            filename=r[6],
+            size_bytes=r[7],
+            hash=r[8],
+            mtime=r[9],
+            last_seen_at=r[10],
+            file_category=r[11],
+            path_display=r[12],
+            segment_display=r[13],
+            other_hosts=None,
+            is_hard_linked=False,
+        )
+        for r in rows
+    ], has_more
+
+
+@app.get("/tree/children", response_model=TreeChildrenResponse)
+def tree_children(
+    path: str = "/",
+    host: str = "",
+    depth: int = Query(1, ge=1),
+    limit: int = Query(200, ge=1, le=2000),
+    cursor: Optional[str] = None,
+):
+    req_start = time.monotonic()
+    prefix = path.lower().rstrip("/")
+    try:
+        offset = int(cursor) if cursor else 0
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid cursor") from exc
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="Invalid cursor")
+
+    cache_key = (host, prefix, depth, limit, offset)
+    cached = _cache_get(_tree_children_cache, cache_key)
+    if cached is not None:
+        _log_perf(
+            "/tree/children",
+            req_start,
+            host=host,
+            path=prefix or "/",
+            depth=depth,
+            limit=limit,
+            offset=offset,
+            rows=len(cached.items),
+            cache="hit",
+        )
+        return cached
+
+    items, has_more = _tree_children_rows(
+        path=path,
+        host=host,
+        depth=depth,
+        limit=limit,
+        offset=offset,
+    )
+    response = TreeChildrenResponse(
+        items=items,
+        next_cursor=str(offset + limit) if has_more else None,
+        has_more=has_more,
+        aggregated_at=None,
+        data_freshness="fresh",
+    )
+    _cache_set(_tree_children_cache, cache_key, response)
+    _log_perf(
+        "/tree/children",
+        req_start,
+        host=host,
+        path=prefix or "/",
+        depth=depth,
+        limit=limit,
+        offset=offset,
+        rows=len(items),
+        cache="miss",
+    )
+    return response
+
+
+@app.get("/tree/dup-metrics", response_model=TreeDupMetricsResponse)
+def tree_dup_metrics(
+    path: str = "/",
+    host: str = "",
+    depth: int = Query(1, ge=1),
+    min_size: int = Query(0, ge=0),
+    segments: str = Query("", description="Optional comma-separated child segments"),
+):
+    req_start = time.monotonic()
+    prefix = path.lower().rstrip("/")
+    seg_cache = (
+        ",".join(sorted([s.strip() for s in segments.split(",") if s.strip()]))
+        if segments
+        else ""
+    )
+    cache_key = (host, prefix, depth, min_size, seg_cache)
+    cached = _cache_get(_tree_dup_metrics_cache, cache_key)
+    if cached is not None:
+        _log_perf(
+            "/tree/dup-metrics",
+            req_start,
+            host=host,
+            path=prefix or "/",
+            depth=depth,
+            min_size=min_size,
+            rows=len(cached.metrics),
+            cache="hit",
+        )
+        return cached
+
+    split_idx = prefix.count("/") + depth + 1
+    agg_row = db.query_one(
+        "SELECT MAX(updated_at) FROM host_hash_stats WHERE host = ?",
+        [host],
+    )
+    agg_ts = agg_row[0] if agg_row else None
+    has_agg = agg_ts is not None
+    aggregated_at = agg_ts if has_agg else None
+    host_meta = db.query_one(
+        "SELECT status FROM aggregate_meta WHERE key = ?",
+        [f"host_hash_stats:{host}"],
+    )
+    host_freshness = host_meta[0] if host_meta else None
+
+    if has_agg:
+        seg_list = (
+            [s.strip() for s in segments.split(",") if s.strip()] if segments else []
+        )
+        seg_clause = ""
+        seg_params: list = []
+        if seg_list:
+            placeholders = ", ".join(["?" for _ in seg_list])
+            seg_clause = f" AND s.segment IN ({placeholders})"
+            seg_params = seg_list
+        sql = f"""
+        WITH hard_linked_inodes AS (
+            SELECT device, inode FROM files
+            WHERE host = ? AND inode IS NOT NULL AND device IS NOT NULL
+            GROUP BY device, inode HAVING COUNT(*) > 1
+        ),
+        scoped AS (
+            SELECT
+                f.path, f.hash, f.inode, f.device,
+                SPLIT_PART(f.path, '/', {split_idx}) AS segment,
+                CASE WHEN SPLIT_PART(f.path, '/', {split_idx + 1}) = ''
+                     THEN 'file' ELSE 'dir' END AS entry_type
+            FROM files f
+            WHERE f.host = ?
+              AND (f.path LIKE ? OR f.path = ?)
+        )
+        SELECT
+            s.segment,
+            COUNT(CASE WHEN hhs.copy_count_effective > 1 AND COALESCE(hhs.size_bytes, 0) >= ? THEN 1 END) AS dup_count,
+            COUNT(DISTINCT CASE WHEN hhs.copy_count_effective > 1 AND COALESCE(hhs.size_bytes, 0) >= ? THEN s.hash END) AS dup_hash_count,
+            STRING_AGG(DISTINCT oh.host ORDER BY oh.host) AS other_hosts,
+            BOOL_OR(
+                s.entry_type = 'file'
+                AND s.inode IS NOT NULL AND s.device IS NOT NULL
+                AND (s.device, s.inode) IN (SELECT device, inode FROM hard_linked_inodes)
+            ) AS is_hard_linked
+        FROM scoped s
+        LEFT JOIN host_hash_stats hhs ON hhs.host = ? AND hhs.hash = s.hash
+        LEFT JOIN host_hash_stats oh ON oh.hash = s.hash AND oh.host != ? AND s.entry_type = 'file'
+        WHERE s.segment IS NOT NULL AND s.segment != ''
+          {seg_clause}
+        GROUP BY s.segment
+        """
+        params = [
+            host,
+            host,
+            prefix + "/%",
+            prefix,
+            min_size,
+            min_size,
+            host,
+            host,
+            *seg_params,
+        ]
+        source = "agg"
+    else:
+        seg_list = (
+            [s.strip() for s in segments.split(",") if s.strip()] if segments else []
+        )
+        seg_clause = ""
+        seg_params = []
+        if seg_list:
+            placeholders = ", ".join(["?" for _ in seg_list])
+            seg_clause = f" AND s.segment IN ({placeholders})"
+            seg_params = seg_list
+        sql = f"""
+        WITH hard_linked_inodes AS (
+            SELECT device, inode FROM files
+            WHERE host = ? AND inode IS NOT NULL AND device IS NOT NULL
+            GROUP BY device, inode HAVING COUNT(*) > 1
+        ),
+        dupes AS (
+            SELECT hash FROM files
+            WHERE hash IS NOT NULL AND host = ?
+              AND size_bytes >= ?
+              AND NOT (inode IS NOT NULL AND device IS NOT NULL
+                       AND (device, inode) IN (SELECT device, inode FROM hard_linked_inodes))
+            GROUP BY hash HAVING COUNT(*) > 1
+        ),
+        scoped AS (
+            SELECT
+                f.path, f.hash, f.inode, f.device,
+                SPLIT_PART(f.path, '/', {split_idx}) AS segment,
+                CASE WHEN SPLIT_PART(f.path, '/', {split_idx + 1}) = ''
+                     THEN 'file' ELSE 'dir' END AS entry_type
+            FROM files f
+            WHERE f.host = ?
+              AND (f.path LIKE ? OR f.path = ?)
+        )
+        SELECT
+            s.segment,
+            COUNT(CASE WHEN s.hash IN (SELECT hash FROM dupes) THEN 1 END) AS dup_count,
+            COUNT(DISTINCT CASE WHEN s.hash IN (SELECT hash FROM dupes) THEN s.hash END) AS dup_hash_count,
+            STRING_AGG(DISTINCT f2.host ORDER BY f2.host) AS other_hosts,
+            BOOL_OR(
+                s.entry_type = 'file'
+                AND s.inode IS NOT NULL AND s.device IS NOT NULL
+                AND (s.device, s.inode) IN (SELECT device, inode FROM hard_linked_inodes)
+            ) AS is_hard_linked
+        FROM scoped s
+        LEFT JOIN files f2 ON f2.hash = s.hash AND f2.host != ? AND s.hash IS NOT NULL
+                           AND s.entry_type = 'file'
+        WHERE s.segment IS NOT NULL AND s.segment != ''
+          {seg_clause}
+        GROUP BY s.segment
+        """
+        params = [host, host, min_size, host, prefix + "/%", prefix, host, *seg_params]
+        source = "live"
+
+    rows = db.query(sql, params)
+    metrics = {
+        r[0]: TreeDupMetric(
+            dup_count=r[1] or 0,
+            dup_hash_count=r[2] or 0,
+            other_hosts=r[3],
+            is_hard_linked=bool(r[4]),
+        )
+        for r in rows
+    }
+    response = TreeDupMetricsResponse(
+        metrics=metrics,
+        aggregated_at=aggregated_at,
+        data_freshness=host_freshness or ("fresh" if has_agg else "stale"),
+    )
+    _cache_set(_tree_dup_metrics_cache, cache_key, response)
+    _log_perf(
+        "/tree/dup-metrics",
+        req_start,
+        host=host,
+        path=prefix or "/",
+        depth=depth,
+        min_size=min_size,
+        segments="yes" if segments else "no",
+        rows=len(metrics),
+        cache="miss",
+        source=source,
+    )
+    return response
 
 
 @app.get("/files", response_model=list[FileEntry])
@@ -735,6 +1389,7 @@ def list_files(
     iname: Optional[str] = None,
     limit: int = Query(100, le=1_000_000),
 ):
+    req_start = time.monotonic()
     conditions = ["1=1"]
     params: list = []
 
@@ -822,6 +1477,16 @@ def list_files(
     params.append(limit)
 
     rows = db.query(sql, params)
+    _log_perf(
+        "/files",
+        req_start,
+        host=host or "*",
+        path_prefix=path_prefix or "*",
+        hash="yes" if hash else "no",
+        iname="yes" if iname else "no",
+        limit=limit,
+        rows=len(rows),
+    )
     return [
         FileEntry(
             host=r[0],
@@ -848,9 +1513,12 @@ def list_files(
 @app.get("/init")
 def init_data(request: Request, path: str = "/", min_size: int = Query(0, ge=0)):
     """Combined startup endpoint: returns hosts + root ls in one round trip."""
+    req_start = time.monotonic()
     hosts = list_hosts()
     root_ls = {
-        h.host: ls_files(path=path, host=h.host, depth=1, min_size=min_size)
+        h.host: _tree_children_rows(
+            path=path, host=h.host, depth=1, limit=None, offset=0
+        )[0]
         for h in hosts
     }
     # Attempt reverse-DNS on the client IP so the frontend can pre-select the
@@ -866,6 +1534,15 @@ def init_data(request: Request, path: str = "/", min_size: int = Query(0, ge=0))
             client_host = name.split(".")[0]
     except Exception:
         pass
+    root_entries = sum(len(v) for v in root_ls.values())
+    _log_perf(
+        "/init",
+        req_start,
+        hosts=len(hosts),
+        root_path=path,
+        min_size=min_size,
+        root_entries=root_entries,
+    )
     return {"hosts": hosts, "root_ls": root_ls, "client_host": client_host}
 
 
@@ -933,75 +1610,187 @@ def stats_overview(
     ),
     hosts: str = Query("", description="Comma-separated host names to filter stats"),
 ):
+    req_start = time.monotonic()
     cache_key = (min_size, categories, hosts)
     cached = _stats_cache.get(cache_key)
     if cached is not None:
         result, ts = cached
         if time.monotonic() - ts < _STATS_CACHE_TTL:
+            _log_perf(
+                "/stats/overview",
+                req_start,
+                cache="hit",
+                min_size=min_size,
+                categories=categories or "*",
+                hosts=hosts or "*",
+            )
             return result
 
     host_list = [h.strip() for h in hosts.split(",") if h.strip()] if hosts else []
-    host_where = ""
-    if host_list:
-        placeholders = ", ".join(["?" for _ in host_list])
-        host_where = f"AND host IN ({placeholders})"
-
-    row = db.query_one(
-        f"""
-        WITH dup_hashes AS (
-            SELECT hash FROM files
-            WHERE hash IS NOT NULL {host_where}
-            GROUP BY hash HAVING COUNT(*) > 1
-        )
-        SELECT
-            COUNT(*) AS total_files,
-            COUNT(DISTINCT f.host) AS total_hosts,
-            COUNT(DISTINCT f.hash) FILTER (WHERE f.hash IS NOT NULL) AS unique_hashes,
-            COUNT(*) FILTER (WHERE dh.hash IS NOT NULL) AS dup_files,
-            SUM(f.size_bytes) AS total_bytes
-        FROM files f
-        LEFT JOIN dup_hashes dh ON f.hash = dh.hash
-        WHERE 1=1 {host_where}
-    """,
-        host_list + host_list,
-    )
-
-    # Dup sets / wasted bytes, optionally filtered by min_size, categories, and hosts
     category_list = (
         [c.strip() for c in categories.split(",") if c.strip()] if categories else []
     )
-    cat_clause = ""
-    dup_params = [min_size] + host_list
-    if category_list:
-        placeholders = ", ".join(["?" for _ in category_list])
-        cat_clause = f"AND file_category IN ({placeholders})"
-        dup_params += category_list
 
-    dup_row = db.query_one(
-        f"""
-        SELECT
-            COUNT(DISTINCT hash) AS dup_sets,
-            SUM(size_bytes) - SUM(min_size) AS wasted
-        FROM (
-            SELECT hash, COUNT(*) AS cnt, SUM(size_bytes) AS size_bytes,
-                   MIN(size_bytes) AS min_size
+    # Base totals from host_stats (cheap and already maintained).
+    if host_list:
+        placeholders = ", ".join(["?" for _ in host_list])
+        totals_row = db.query_one(
+            f"""
+            SELECT
+                COALESCE(SUM(total_files), 0),
+                COUNT(CASE WHEN total_files > 0 THEN 1 END),
+                COALESCE(SUM(total_bytes), 0)
+            FROM host_stats
+            WHERE host IN ({placeholders})
+            """,
+            host_list,
+        )
+    else:
+        totals_row = db.query_one(
+            """
+            SELECT
+                COALESCE(SUM(total_files), 0),
+                COUNT(CASE WHEN total_files > 0 THEN 1 END),
+                COALESCE(SUM(total_bytes), 0)
+            FROM host_stats
+            """
+        )
+
+    total_files = int(totals_row[0]) if totals_row and totals_row[0] is not None else 0
+    total_hosts = int(totals_row[1]) if totals_row and totals_row[1] is not None else 0
+    total_bytes = int(totals_row[2]) if totals_row and totals_row[2] is not None else 0
+
+    def _combine_freshness(statuses: list[str]) -> str:
+        if any(s == "building" for s in statuses):
+            return "building"
+        if any(s == "stale" for s in statuses):
+            return "stale"
+        return "fresh"
+
+    use_agg = len(category_list) == 0
+    freshness = "fresh"
+    aggregated_at = None
+    source = "live"
+
+    if use_agg:
+        if host_list:
+            key_params = [f"host_hash_stats:{h}" for h in host_list]
+            ph = ", ".join(["?" for _ in key_params])
+            meta_rows = db.query(
+                f"SELECT key, status, updated_at FROM aggregate_meta WHERE key IN ({ph})",
+                key_params,
+            )
+            if len(meta_rows) == len(key_params):
+                freshness = _combine_freshness([str(r[1]) for r in meta_rows])
+                aggregated_at = max(r[2] for r in meta_rows if r[2] is not None)
+            else:
+                use_agg = False
+        else:
+            meta_row = db.query_one(
+                "SELECT status, updated_at FROM aggregate_meta WHERE key = 'hash_stats'"
+            )
+            if meta_row is not None:
+                freshness = str(meta_row[0])
+                aggregated_at = meta_row[1]
+            else:
+                use_agg = False
+
+    if use_agg and host_list:
+        placeholders = ", ".join(["?" for _ in host_list])
+        agg_row = db.query_one(
+            f"""
+            WITH selected AS (
+                SELECT
+                    hash,
+                    SUM(copy_count_effective) AS copies,
+                    MAX(size_bytes) AS size_bytes
+                FROM host_hash_stats
+                WHERE host IN ({placeholders})
+                GROUP BY hash
+            )
+            SELECT
+                COUNT(*) AS unique_hashes,
+                COUNT(CASE WHEN copies > 1 AND COALESCE(size_bytes, 0) >= ? THEN 1 END) AS dup_sets,
+                COALESCE(SUM(CASE
+                    WHEN copies > 1 AND COALESCE(size_bytes, 0) >= ?
+                    THEN (copies - 1) * COALESCE(size_bytes, 0)
+                    ELSE 0
+                END), 0) AS wasted
+            FROM selected
+            """,
+            [*host_list, min_size, min_size],
+        )
+        unique_hashes = int(agg_row[0]) if agg_row and agg_row[0] is not None else 0
+        duplicate_sets = int(agg_row[1]) if agg_row and agg_row[1] is not None else 0
+        wasted_bytes = int(agg_row[2]) if agg_row and agg_row[2] is not None else 0
+        source = "agg_host"
+    elif use_agg and not host_list:
+        unique_row = db.query_one("SELECT COUNT(*) FROM hash_stats")
+        dup_row = db.query_one(
+            """
+            SELECT
+                COUNT(CASE WHEN copy_count > 1 AND COALESCE(size_bytes, 0) >= ? THEN 1 END) AS dup_sets,
+                COALESCE(SUM(CASE
+                    WHEN copy_count > 1 AND COALESCE(size_bytes, 0) >= ? THEN COALESCE(wasted_bytes, 0)
+                    ELSE 0
+                END), 0) AS wasted
+            FROM hash_stats
+            """,
+            [min_size, min_size],
+        )
+        unique_hashes = (
+            int(unique_row[0]) if unique_row and unique_row[0] is not None else 0
+        )
+        duplicate_sets = int(dup_row[0]) if dup_row and dup_row[0] is not None else 0
+        wasted_bytes = int(dup_row[1]) if dup_row and dup_row[1] is not None else 0
+        source = "agg_global"
+    else:
+        host_where = ""
+        if host_list:
+            placeholders = ", ".join(["?" for _ in host_list])
+            host_where = f"AND host IN ({placeholders})"
+
+        row = db.query_one(
+            f"""
+            SELECT COUNT(DISTINCT hash) FILTER (WHERE hash IS NOT NULL)
             FROM files
-            WHERE hash IS NOT NULL AND size_bytes >= ?
-              {host_where}
-              {cat_clause}
-            GROUP BY hash
-            HAVING COUNT(*) > 1
-        ) t
-    """,
-        dup_params,
-    )
+            WHERE 1=1 {host_where}
+            """,
+            host_list,
+        )
+        unique_hashes = int(row[0]) if row and row[0] is not None else 0
 
-    total_files = row[0] if row else 0
-    total_hosts = row[1] if row else 0
-    unique_hashes = row[2] if row else 0
-    total_bytes = row[4] if row else None
-    duplicate_sets = dup_row[0] if dup_row else 0
-    wasted_bytes = dup_row[1] if dup_row else None
+        cat_clause = ""
+        dup_params = [min_size] + host_list
+        if category_list:
+            placeholders = ", ".join(["?" for _ in category_list])
+            cat_clause = f"AND file_category IN ({placeholders})"
+            dup_params += category_list
+
+        dup_row = db.query_one(
+            f"""
+            SELECT
+                COUNT(DISTINCT hash) AS dup_sets,
+                SUM(size_bytes) - SUM(min_size) AS wasted
+            FROM (
+                SELECT hash, COUNT(*) AS cnt, SUM(size_bytes) AS size_bytes,
+                       MIN(size_bytes) AS min_size
+                FROM files
+                WHERE hash IS NOT NULL AND size_bytes >= ?
+                  {host_where}
+                  {cat_clause}
+                GROUP BY hash
+                HAVING COUNT(*) > 1
+            ) t
+            """,
+            dup_params,
+        )
+
+        duplicate_sets = int(dup_row[0]) if dup_row and dup_row[0] is not None else 0
+        wasted_bytes = int(dup_row[1]) if dup_row and dup_row[1] is not None else 0
+        aggregated_at = None
+        freshness = "fresh"
+        source = "live"
 
     result = StatsOverview(
         total_files=total_files,
@@ -1010,8 +1799,22 @@ def stats_overview(
         duplicate_sets=duplicate_sets,
         wasted_bytes=wasted_bytes,
         total_bytes=total_bytes,
+        aggregated_at=aggregated_at,
+        data_freshness=freshness,
     )
     _stats_cache[cache_key] = (result, time.monotonic())
+    _log_perf(
+        "/stats/overview",
+        req_start,
+        cache="miss",
+        min_size=min_size,
+        categories=categories or "*",
+        hosts=hosts or "*",
+        total_files=total_files,
+        dup_sets=duplicate_sets,
+        source=source,
+        freshness=freshness,
+    )
     return result
 
 
@@ -1068,25 +1871,51 @@ def stats_duplicates(
 
 @app.get("/directories")
 def list_directories(q: str = "", limit: int = Query(20, le=100)):
+    req_start = time.monotonic()
     q = q.strip()
     if len(q) < 2:
+        _log_perf("/directories", req_start, query_len=len(q), limit=limit, rows=0)
         return []
+    cache_key = (q.lower(), limit)
+    cached = _cache_get(_directories_cache, cache_key)
+    if cached is not None:
+        _log_perf(
+            "/directories",
+            req_start,
+            query_len=len(q),
+            limit=limit,
+            rows=len(cached),
+            cache="hit",
+        )
+        return cached
     rows = db.query(
         """
-        SELECT dir_path, dir_display FROM (
-            SELECT
-                regexp_replace(path, '/[^/]+$', '') AS dir_path,
-                ANY_VALUE(regexp_replace(path_display, '/[^/]+$', '')) AS dir_display
-            FROM files
-            GROUP BY regexp_replace(path, '/[^/]+$', '')
-            HAVING regexp_replace(path, '/[^/]+$', '') != ''
-        ) sub
-        WHERE lower(dir_path) LIKE '%' || lower(?) || '%'
+        SELECT dir_path, dir_display
+        FROM directory_index
+        WHERE dir_path != ''
+          AND lower(dir_path) LIKE '%' || lower(?) || '%'
         ORDER BY dir_path
         LIMIT ?
         """,
         [q, limit],
     )
+    if not rows:
+        rows = db.query(
+            """
+            SELECT dir_path, dir_display FROM (
+                SELECT
+                    regexp_replace(path, '/[^/]+$', '') AS dir_path,
+                    ANY_VALUE(regexp_replace(path_display, '/[^/]+$', '')) AS dir_display
+                FROM files
+                GROUP BY regexp_replace(path, '/[^/]+$', '')
+                HAVING regexp_replace(path, '/[^/]+$', '') != ''
+            ) sub
+            WHERE lower(dir_path) LIKE '%' || lower(?) || '%'
+            ORDER BY dir_path
+            LIMIT ?
+            """,
+            [q, limit],
+        )
     results = {r[0]: r[1] or r[0] for r in rows}
 
     # Also include any ancestor paths that contain the query but have no files
@@ -1108,7 +1937,19 @@ def list_directories(q: str = "", limit: int = Query(20, le=100)):
                 extra[ancestor] = ancestor  # no display path available; use raw path
 
     results.update(extra)
-    return [{"dir_path": p, "dir_display": results[p]} for p in sorted(results)[:limit]]
+    output = [
+        {"dir_path": p, "dir_display": results[p]} for p in sorted(results)[:limit]
+    ]
+    _log_perf(
+        "/directories",
+        req_start,
+        query_len=len(q),
+        limit=limit,
+        rows=len(output),
+        cache="miss",
+    )
+    _cache_set(_directories_cache, cache_key, output)
+    return output
 
 
 # ---------------------------------------------------------------------------

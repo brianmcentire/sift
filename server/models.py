@@ -122,6 +122,27 @@ class LsEntry(BaseModel):
     is_hard_linked: bool = False
 
 
+class TreeChildrenResponse(BaseModel):
+    items: list[LsEntry]
+    next_cursor: Optional[str] = None
+    has_more: bool = False
+    aggregated_at: Optional[datetime] = None
+    data_freshness: str = "fresh"
+
+
+class TreeDupMetric(BaseModel):
+    dup_count: int = 0
+    dup_hash_count: int = 0
+    other_hosts: Optional[str] = None
+    is_hard_linked: bool = False
+
+
+class TreeDupMetricsResponse(BaseModel):
+    metrics: dict[str, TreeDupMetric] = Field(default_factory=dict)
+    aggregated_at: Optional[datetime] = None
+    data_freshness: str = "fresh"
+
+
 class FileEntry(BaseModel):
     host: str
     drive: str
@@ -152,6 +173,8 @@ class StatsOverview(BaseModel):
     duplicate_sets: int
     wasted_bytes: Optional[int]
     total_bytes: Optional[int]
+    aggregated_at: Optional[datetime] = None
+    data_freshness: str = "fresh"
 
 
 class DuplicateLocation(BaseModel):

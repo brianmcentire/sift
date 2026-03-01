@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { api } from './api.js'
-import { joinPath, mergeEntries, sortEntries, hostColor, fileEntryToRow, sortFileEntries } from './utils.js'
+import { joinPath, mergeEntries, sortEntries, hostColor, fileEntryToRow, sortFileEntries, logPerf } from './utils.js'
 import Header from './components/Header.jsx'
 import StatsBar from './components/StatsBar.jsx'
 import FileTable from './components/FileTable.jsx'
@@ -47,9 +47,17 @@ export default function App() {
   const minDupSizeRef = useRef(minDupSize)
   const [dupAutoExpanded, setDupAutoExpanded] = useState(new Map())  // Map<rootPath, Set<autoExpandedPaths>>
   const onlyDupsRef = useRef(onlyDups)
+  const appStartRef = useRef(performance.now())
+  const firstTreePaintLoggedRef = useRef(false)
+  const pendingExpandRef = useRef(new Map())
+  const dupMetricSegmentsRef = useRef(new Map())
+  const dupMetricsInFlightRef = useRef(new Set())
+  const treePageStateRef = useRef(new Map())
+  const [paginationVersion, setPaginationVersion] = useState(0)
 
   // ── Stats ───────────────────────────────────────────────────────────────
   const [stats, setStats] = useState(null)
+  const [statsEnabled, setStatsEnabled] = useState(false)
 
   // ── Loading ─────────────────────────────────────────────────────────────
   const [loadingPaths, setLoadingPaths] = useState(new Set())
@@ -63,21 +71,34 @@ export default function App() {
 
   // ── Debounce dir + filename queries ─────────────────────────────────────
   useEffect(() => {
-    const t = setTimeout(() => setDebouncedDirQuery(dirQuery), 150)
+    const t = setTimeout(() => setDebouncedDirQuery(dirQuery), 350)
     return () => clearTimeout(t)
   }, [dirQuery])
 
   useEffect(() => {
-    const t = setTimeout(() => setDebouncedFilenameQuery(filenameQuery), 150)
+    const t = setTimeout(() => setDebouncedFilenameQuery(filenameQuery), 350)
     return () => clearTimeout(t)
   }, [filenameQuery])
 
   // ── Filename search (server-side) ────────────────────────────────────────
   useEffect(() => {
     if (debouncedFilenameQuery.length >= 2) {
-      api.files({ iname: `*${debouncedFilenameQuery}*`, limit: 500 })
-        .then(setFilenameResults)
-        .catch(() => setFilenameResults([]))
+      const controller = new AbortController()
+      const started = performance.now()
+      api.files({ iname: `*${debouncedFilenameQuery}*`, limit: 500 }, { signal: controller.signal })
+        .then(data => {
+          logPerf('search.filename', {
+            query_len: debouncedFilenameQuery.length,
+            ms: (performance.now() - started).toFixed(1),
+            rows: Array.isArray(data) ? data.length : 0,
+          })
+          setFilenameResults(data)
+        })
+        .catch((err) => {
+          if (err?.name === 'AbortError') return
+          setFilenameResults([])
+        })
+      return () => controller.abort()
     } else {
       setFilenameResults(null)
     }
@@ -86,45 +107,48 @@ export default function App() {
   // ── Hash search ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (hashQuery.length >= 4) {
-      api.files({ hash: hashQuery, limit: 500 })
-        .then(setHashResults)
-        .catch(() => setHashResults([]))
+      const controller = new AbortController()
+      const started = performance.now()
+      api.files({ hash: hashQuery, limit: 500 }, { signal: controller.signal })
+        .then(data => {
+          logPerf('search.hash', {
+            query_len: hashQuery.length,
+            ms: (performance.now() - started).toFixed(1),
+            rows: Array.isArray(data) ? data.length : 0,
+          })
+          setHashResults(data)
+        })
+        .catch((err) => {
+          if (err?.name === 'AbortError') return
+          setHashResults([])
+        })
+      return () => controller.abort()
     } else {
       setHashResults(null)
     }
   }, [hashQuery])
 
-  // ── Initial load — combined /init fetches hosts + root ls in one round trip
+  // Enable stats fetch after the first tree path has loaded.
   useEffect(() => {
-    api.init('/')
-      .then(({ hosts: hostList, root_ls: rootLs, client_host: clientHost }) => {
-        // Pre-populate cache before setting hosts so the hosts-change effect
-        // finds everything cached and skips the redundant fetch.
-        Object.entries(rootLs).forEach(([h, entries]) => {
-          cacheRef.current.set(`${h}:/`, Array.isArray(entries) ? entries : [])
-        })
-        setCacheVersion(v => v + 1)
-        setHosts(hostList)
-        // Pre-select the host matching the browser's machine if detectable,
-        // otherwise select all.
-        const matched = clientHost
-          ? hostList.find(h => h.host.toLowerCase() === clientHost.toLowerCase())
-          : null
-        setSelectedHosts(matched ? new Set([matched.host]) : new Set(hostList.map(h => h.host)))
+    if (statsEnabled) return
+    if (hosts.length === 0) return
+    if (loadingPaths.has(currentPath)) return
+    setStatsEnabled(true)
+  }, [statsEnabled, hosts.length, loadingPaths, currentPath])
+
+  // ── Initial load ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    api.hosts()
+      .then(data => {
+        setHosts(data)
+        setSelectedHosts(new Set(data.map(h => h.host)))
       })
-      .catch(() => {
-        // Fallback to separate /hosts call if /init isn't available
-        api.hosts()
-          .then(data => {
-            setHosts(data)
-            setSelectedHosts(new Set(data.map(h => h.host)))
-          })
-          .catch(() => {})
-      })
+      .catch(() => {})
   }, [])
 
   // ── Stats (re-fetched when minDupSize, categoryFilter, or selectedHosts changes)
   useEffect(() => {
+    if (!statsEnabled) return
     const params = { min_size: minDupSize }
     if (categoryFilter.size > 0) params.categories = [...categoryFilter].join(',')
     if (selectedHosts.size > 0 && selectedHosts.size < hosts.length) {
@@ -133,7 +157,7 @@ export default function App() {
     api.stats(params)
       .then(setStats)
       .catch(() => {})
-  }, [minDupSize, categoryFilter, selectedHosts, hosts.length])
+  }, [statsEnabled, minDupSize, categoryFilter, selectedHosts, hosts.length])
 
   // ── Sync onlyDupsRef + clear auto-expanded on toggle off ──────────────
   useEffect(() => {
@@ -155,35 +179,129 @@ export default function App() {
   useEffect(() => {
     minDupSizeRef.current = minDupSize
     cacheRef.current.clear()
+    dupMetricSegmentsRef.current.clear()
+    dupMetricsInFlightRef.current.clear()
+    treePageStateRef.current.clear()
+    setPaginationVersion(v => v + 1)
     setExpandedPaths(new Set())
     setDupAutoExpanded(new Map())
     setLsFetchKey(k => k + 1)
   }, [minDupSize])
 
   // ── Fetch ls data for a path (all hosts) ─────────────────────────────────
-  const fetchPath = useCallback(async (path, hostList) => {
-    const toFetch = hostList.filter(h => !cacheRef.current.has(`${h.host}:${path}`))
-    if (toFetch.length === 0) return
-
-    setLoadingPaths(prev => new Set([...prev, path]))
-
-    await Promise.all(toFetch.map(async h => {
+  const fetchPath = useCallback(async (path, hostList, opts = {}) => {
+    const loadMore = Boolean(opts.loadMore)
+    const toFetch = hostList.filter(h => {
       const key = `${h.host}:${path}`
-      try {
-        const data = await api.ls(path, h.host, minDupSizeRef.current)
-        cacheRef.current.set(key, Array.isArray(data) ? data : [])
-      } catch {
-        cacheRef.current.set(key, [])
-      }
-    }))
-
-    setLoadingPaths(prev => {
-      const next = new Set(prev)
-      next.delete(path)
-      return next
+      if (!loadMore) return !cacheRef.current.has(key)
+      const pageState = treePageStateRef.current.get(key)
+      return Boolean(pageState?.hasMore)
     })
-    setCacheVersion(v => v + 1)
+    if (toFetch.length > 0) {
+      setLoadingPaths(prev => new Set([...prev, path]))
+
+      await Promise.all(toFetch.map(async h => {
+        const key = `${h.host}:${path}`
+        const pageState = treePageStateRef.current.get(key)
+        try {
+          const data = await api.treeChildren(
+            path,
+            h.host,
+            loadMore ? { cursor: pageState?.nextCursor } : {},
+          )
+          const items = Array.isArray(data?.items) ? data.items : []
+          if (loadMore) {
+            const existing = cacheRef.current.get(key) || []
+            const seen = new Set(existing.map(e => e.segment))
+            const merged = [...existing]
+            items.forEach(item => {
+              if (!seen.has(item.segment)) merged.push(item)
+            })
+            cacheRef.current.set(key, merged)
+          } else {
+            cacheRef.current.set(key, items)
+          }
+          treePageStateRef.current.set(key, {
+            hasMore: Boolean(data?.has_more),
+            nextCursor: data?.next_cursor || null,
+          })
+        } catch {
+          cacheRef.current.set(key, [])
+          treePageStateRef.current.set(key, { hasMore: false, nextCursor: null })
+        }
+      }))
+
+      setLoadingPaths(prev => {
+        const next = new Set(prev)
+        next.delete(path)
+        return next
+      })
+      setCacheVersion(v => v + 1)
+      setPaginationVersion(v => v + 1)
+    }
+
+    const minAtRequest = minDupSizeRef.current
+    const metricsTargets = hostList
+      .map(h => {
+        const key = `${h.host}:${path}`
+        const metricKey = `${h.host}:${path}:${minAtRequest}`
+        const entries = cacheRef.current.get(key) || []
+        if (!entries.length) return null
+        if (dupMetricsInFlightRef.current.has(metricKey)) return null
+        const loaded = dupMetricSegmentsRef.current.get(metricKey) || new Set()
+        const missing = entries
+          .map(e => e.segment)
+          .filter(seg => seg && !loaded.has(seg))
+        if (missing.length === 0) return null
+        return { host: h.host, key, metricKey, missing }
+      })
+      .filter(Boolean)
+
+    if (metricsTargets.length === 0) return
+
+    metricsTargets.forEach(target => {
+      const { host, key, metricKey, missing } = target
+      dupMetricsInFlightRef.current.add(metricKey)
+      api.treeDupMetrics(path, host, minAtRequest, missing)
+        .then(data => {
+          if (minDupSizeRef.current !== minAtRequest) return
+          const metrics = data?.metrics || {}
+          const existing = cacheRef.current.get(key) || []
+          const merged = existing.map(entry => {
+            const m = metrics[entry.segment]
+            if (!m) return entry
+            return {
+              ...entry,
+              dup_count: m.dup_count ?? 0,
+              dup_hash_count: m.dup_hash_count ?? 0,
+              other_hosts: m.other_hosts ?? null,
+              is_hard_linked: Boolean(m.is_hard_linked),
+            }
+          })
+          cacheRef.current.set(key, merged)
+          const loaded = dupMetricSegmentsRef.current.get(metricKey) || new Set()
+          missing.forEach(seg => loaded.add(seg))
+          dupMetricSegmentsRef.current.set(metricKey, loaded)
+          setCacheVersion(v => v + 1)
+        })
+        .catch(() => {})
+        .finally(() => {
+          dupMetricsInFlightRef.current.delete(metricKey)
+        })
+    })
   }, [])
+
+  const hasMoreForPath = useCallback((path) => {
+    for (const host of selectedHosts) {
+      const pageState = treePageStateRef.current.get(`${host}:${path}`)
+      if (pageState?.hasMore) return true
+    }
+    return false
+  }, [selectedHosts])
+
+  const handleLoadMore = useCallback((path) => {
+    fetchPath(path, hosts, { loadMore: true })
+  }, [fetchPath, hosts])
 
   // ── Fetch dup ancestor dirs for auto-expand ─────────────────────────────
   const fetchDupAncestors = useCallback(async (rootPath) => {
@@ -210,8 +328,15 @@ export default function App() {
       setMatchedDirPaths(new Set())
       return
     }
-    api.directories(debouncedDirQuery)
+    const controller = new AbortController()
+    const started = performance.now()
+    api.directories(debouncedDirQuery, 10, { signal: controller.signal })
       .then(dirs => {
+        logPerf('search.directory', {
+          query_len: debouncedDirQuery.length,
+          ms: (performance.now() - started).toFixed(1),
+          rows: Array.isArray(dirs) ? dirs.length : 0,
+        })
         if (!dirs || dirs.length === 0) {
           setMatchedDirPaths(new Set())
           return
@@ -241,7 +366,11 @@ export default function App() {
           }
         })
       })
-      .catch(() => setMatchedDirPaths(new Set()))
+      .catch((err) => {
+        if (err?.name === 'AbortError') return
+        setMatchedDirPaths(new Set())
+      })
+    return () => controller.abort()
   }, [debouncedDirQuery, hosts, fetchPath])
 
   // Fetch currentPath whenever it, hosts, or lsFetchKey changes
@@ -310,6 +439,7 @@ export default function App() {
       })
     } else {
       // Normal expand
+      pendingExpandRef.current.set(fullPath, performance.now())
       setExpandedPaths(prev => new Set([...prev, fullPath]))
       fetchPath(fullPath, hosts)
       // Auto-expand if onlyDups is active
@@ -598,13 +728,99 @@ export default function App() {
         }
       })
       // Show ancestors+matches, plus children of any expanded matched dir
-      return treeRows.filter(row =>
+      const filtered = treeRows.filter(row =>
         visiblePaths.has(row.fullPath) || matchedDirPaths.has(row.parentPath)
       )
+      const withMore = []
+      for (let i = 0; i < filtered.length; i++) {
+        const row = filtered[i]
+        withMore.push(row)
+        if (row.entry?.entry_type === 'dir' && effectiveExpanded.has(row.fullPath) && hasMoreForPath(row.fullPath)) {
+          const next = filtered[i + 1]
+          const endOfSubtree = !next || next.depth <= row.depth
+          if (endOfSubtree) {
+            withMore.push({
+              isLoadMore: true,
+              path: row.fullPath,
+              fullPath: `${row.fullPath}::__more__`,
+              depth: row.depth + 1,
+            })
+          }
+        }
+      }
+      if (hasMoreForPath(currentPath)) {
+        withMore.push({
+          isLoadMore: true,
+          path: currentPath,
+          fullPath: `${currentPath}::__more_root__`,
+          depth: 0,
+        })
+      }
+      return withMore
     }
 
-    return treeRows
-  }, [isSearchMode, searchRows, treeRows, matchedDirPaths, debouncedDirQuery])
+    const withMore = []
+    for (let i = 0; i < treeRows.length; i++) {
+      const row = treeRows[i]
+      withMore.push(row)
+      if (row.entry?.entry_type === 'dir' && effectiveExpanded.has(row.fullPath) && hasMoreForPath(row.fullPath)) {
+        const next = treeRows[i + 1]
+        const endOfSubtree = !next || next.depth <= row.depth
+        if (endOfSubtree) {
+          withMore.push({
+            isLoadMore: true,
+            path: row.fullPath,
+            fullPath: `${row.fullPath}::__more__`,
+            depth: row.depth + 1,
+          })
+        }
+      }
+    }
+    if (hasMoreForPath(currentPath)) {
+      withMore.push({
+        isLoadMore: true,
+        path: currentPath,
+        fullPath: `${currentPath}::__more_root__`,
+        depth: 0,
+      })
+    }
+
+    return withMore
+  }, [
+    isSearchMode,
+    searchRows,
+    treeRows,
+    matchedDirPaths,
+    debouncedDirQuery,
+    effectiveExpanded,
+    hasMoreForPath,
+    currentPath,
+    paginationVersion,
+  ])
+
+  useEffect(() => {
+    if (!firstTreePaintLoggedRef.current && hosts.length > 0 && rows.length > 0 && !isLoading && !isSearchMode) {
+      firstTreePaintLoggedRef.current = true
+      logPerf('ui.first_tree_paint', {
+        ms: (performance.now() - appStartRef.current).toFixed(1),
+        rows: rows.length,
+        hosts: hosts.length,
+      })
+    }
+  }, [hosts.length, rows.length, isLoading, isSearchMode])
+
+  useEffect(() => {
+    if (pendingExpandRef.current.size === 0) return
+    for (const [path, started] of pendingExpandRef.current.entries()) {
+      if (!loadingPaths.has(path)) {
+        logPerf('ui.expand_path', {
+          path,
+          ms: (performance.now() - started).toFixed(1),
+        })
+        pendingExpandRef.current.delete(path)
+      }
+    }
+  }, [loadingPaths])
 
   // ── Available categories — from unfiltered source so multi-select works ──
   const availableCategories = useMemo(() => {
@@ -701,6 +917,7 @@ export default function App() {
           onTypeClick={handleTypeClick}
           onDupHashClick={handleDupHashClick}
           onDupSubtreeClick={handleDupSubtreeClick}
+          onLoadMore={handleLoadMore}
           highlightedPaths={highlightedPaths}
           matchedDirPaths={matchedDirPaths}
           expandedPaths={effectiveExpanded}

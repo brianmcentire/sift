@@ -1,5 +1,27 @@
 // ─── Formatting ─────────────────────────────────────────────────────────────
 
+let PERF_ENABLED_CACHE = null
+
+export function isPerfEnabled() {
+  if (PERF_ENABLED_CACHE !== null) return PERF_ENABLED_CACHE
+  try {
+    const flag = window.localStorage?.getItem('sift:perf')
+    PERF_ENABLED_CACHE = window.__SIFT_PERF === true || flag === '1'
+  } catch {
+    PERF_ENABLED_CACHE = false
+  }
+  return PERF_ENABLED_CACHE
+}
+
+export function logPerf(event, fields = {}) {
+  if (!isPerfEnabled()) return
+  const payload = Object.entries(fields)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(' ')
+  // eslint-disable-next-line no-console
+  console.info(`[perf] ${event}${payload ? ` ${payload}` : ''}`)
+}
+
 export function formatBytes(bytes) {
   if (bytes == null) return '—'
   if (bytes === 0) return '0 B'
