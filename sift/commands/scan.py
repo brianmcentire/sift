@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import signal
 import sys
 import threading
 import time
@@ -194,7 +195,10 @@ def _print_progress(
         if prev >= 2:
             sys.stderr.write(f"\x1b[1A\r\x1b[2K{line1}\n\r\x1b[2K{line2}")
         else:
-            sys.stderr.write(f"\r\x1b[2K{line1}\n\r\x1b[2K{line2}")
+            # Pre-scroll: \n\x1b[1A ensures line2's row exists below line1
+            # without risking line1 scrolling into the scrollback buffer if
+            # the cursor happens to be on the terminal's bottom row.
+            sys.stderr.write(f"\n\x1b[1A\r\x1b[2K{line1}\n\r\x1b[2K{line2}")
         display["lines"] = 2
     else:
         # Single-line mode (non-TTY, no file currently hashing, or final)
@@ -247,11 +251,16 @@ _FLUSH_INTERVAL = 10       # flush upsert records every 10 seconds
 _SEEN_FLUSH_INTERVAL = 10  # flush seen-path records every 10 seconds
 
 
-def _post_with_retry(fn, label: str, retry_timeout: int = _RETRY_TIMEOUT) -> None:
+def _post_with_retry(
+    fn, label: str, retry_timeout: int = _RETRY_TIMEOUT, on_warn=None
+) -> None:
     """Call fn(), retrying with exponential backoff up to retry_timeout seconds.
 
     Prints a single warning on first failure, then retries silently.
     Raises _ServerDown if the server remains unreachable for the full timeout.
+
+    on_warn: optional callable(msg) invoked instead of the default stderr print.
+    Used by callers that own a render lock to avoid corrupting the progress display.
     """
     deadline = time.time() + retry_timeout
     delay = 2
@@ -267,10 +276,14 @@ def _post_with_retry(fn, label: str, retry_timeout: int = _RETRY_TIMEOUT) -> Non
                     f"server unreachable for {retry_timeout}s ({label}): {e}"
                 ) from e
             if first:
-                print(
-                    f"\nsift: server unreachable ({label}), retrying for up to {retry_timeout}s…",
-                    file=sys.stderr,
+                msg = (
+                    f"sift: server unreachable ({label}),"
+                    f" retrying for up to {retry_timeout}s…"
                 )
+                if on_warn is not None:
+                    on_warn(msg)
+                else:
+                    print(f"\n{msg}", file=sys.stderr)
                 first = False
             wait = min(delay, remaining)
             time.sleep(wait)
@@ -495,6 +508,28 @@ def cmd_scan(args) -> None:
         _flush_in_progress = threading.Lock()  # prevents concurrent upsert flush attempts
         _seen_flush_in_progress = threading.Lock()  # prevents concurrent seen flush attempts
         _render_lock = threading.Lock()
+
+        def _render_warn(msg: str) -> None:
+            """Print a warning to stderr without corrupting the two-line progress display.
+
+            Acquires _render_lock, moves off the current progress line, prints the
+            message, then resets display["lines"] so the next render starts fresh.
+            Called by _post_with_retry via on_warn when the server is temporarily down.
+            """
+            with _render_lock:
+                if display.get("lines", 0) >= 1:
+                    sys.stderr.write("\n")
+                    sys.stderr.flush()
+                print(msg, file=sys.stderr)
+                display["lines"] = 0
+
+        # B: Reset cursor tracking on terminal resize so the next render
+        # starts fresh from wherever the terminal puts the cursor.
+        if hasattr(signal, "SIGWINCH"):
+            signal.signal(
+                signal.SIGWINCH,
+                lambda sig, frame: display.update({"lines": 0}),
+            )
         _seen_stats = {"queued": 0, "heartbeat_sent": 0, "finalize_sent": 0, "max_depth": 0}
 
         def _queue_upsert(record: dict) -> None:
@@ -550,6 +585,7 @@ def cmd_scan(args) -> None:
                         host,
                         scan_start_iso,
                         retry_timeout=retry_timeout,
+                        on_warn=_render_warn,
                     )
                     sent += len(chunk)
             except _ServerDown:
@@ -604,7 +640,7 @@ def cmd_scan(args) -> None:
             sent = 0
             try:
                 for chunk in _chunks(pending, seen_batch_size):
-                    _flush_seen(chunk, host, scan_start_iso)
+                    _flush_seen(chunk, host, scan_start_iso, on_warn=_render_warn)
                     sent += len(chunk)
             except _ServerDown:
                 unsent = pending[sent:]
@@ -1244,13 +1280,16 @@ def _flush_upsert(
     host: str,
     scan_start_iso: str,
     retry_timeout: int = _RETRY_TIMEOUT,
+    on_warn=None,
 ) -> None:
     if not records:
         return
-    _post_with_retry(lambda: client.post("/files", records), "upsert", retry_timeout)
+    _post_with_retry(
+        lambda: client.post("/files", records), "upsert", retry_timeout, on_warn=on_warn
+    )
 
 
-def _flush_seen(paths: list[dict], host: str, scan_start_iso: str) -> None:
+def _flush_seen(paths: list[dict], host: str, scan_start_iso: str, on_warn=None) -> None:
     if not paths:
         return
     _post_with_retry(
@@ -1263,4 +1302,5 @@ def _flush_seen(paths: list[dict], host: str, scan_start_iso: str) -> None:
             },
         ),
         "seen",
+        on_warn=on_warn,
     )
