@@ -29,19 +29,9 @@ def fresh_db():
     db_module._conn = None
     db_module.init_db(":memory:")
     # Clear any module-level caches that survive across tests
-    from server.main import (
-        _directories_cache,
-        _ls_cache,
-        _stats_cache,
-        _tree_children_cache,
-        _tree_dup_metrics_cache,
-    )
+    from server.main import _invalidate_query_caches
 
-    _stats_cache.clear()
-    _ls_cache.clear()
-    _directories_cache.clear()
-    _tree_children_cache.clear()
-    _tree_dup_metrics_cache.clear()
+    _invalidate_query_caches()
     yield
     if db_module._conn:
         db_module._conn.close()

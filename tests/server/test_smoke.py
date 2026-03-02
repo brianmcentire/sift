@@ -14,6 +14,12 @@ class TestSmokeEndpoints:
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 
+    def test_client_host_endpoint_shape(self, client):
+        resp = client.get("/client-host")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "client_host" in data
+
     def test_stats_overview_shape_includes_freshness_fields(self, client):
         insert_files(
             [

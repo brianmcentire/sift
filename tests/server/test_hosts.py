@@ -44,7 +44,7 @@ class TestListHosts:
         ])
         resp = client.get("/hosts")
         mac = next(h for h in resp.json() if h["host"] == "mac")
-        assert mac["total_files"] == 2
+        assert mac["total_files"] == 1   # skipped files excluded from stats
         assert mac["total_hashed"] == 1
 
     def test_no_files_no_scan_runs_returns_empty(self, client):

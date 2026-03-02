@@ -1,5 +1,8 @@
 """Tests for fast tree endpoints used by the frontend."""
 
+import server.db as db_module
+import server.main as main_module
+
 from tests.server.conftest import HASH_A, HASH_B, client, insert_files, make_file
 
 
@@ -152,3 +155,98 @@ class TestTreeDupMetrics:
         assert resp.status_code == 200
         metrics = resp.json()["metrics"]
         assert set(metrics.keys()) == {"a.jpg", "c.jpg"}
+
+    def test_large_host_without_aggregates_skips_live_fallback(self, client):
+        # Simulate a large host where live fallback would be expensive.
+        db_module.execute(
+            "INSERT INTO host_stats (host, total_files, total_bytes, total_hashed, updated_at) VALUES (?, ?, ?, ?, now())",
+            ["mac", 500000, 0, 0],
+        )
+        # Ensure there are no host_hash_stats rows to force has_agg=False path.
+        db_module.execute("DELETE FROM host_hash_stats WHERE host = ?", ["mac"])
+
+        previous = main_module._MAINTENANCE_ENABLED
+        main_module._MAINTENANCE_ENABLED = True
+
+        try:
+            resp = client.get(
+                "/tree/dup-metrics",
+                params={"path": "/users/brian", "host": "mac", "segments": "a.jpg"},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["metrics"] == {}
+            assert data["data_freshness"] == "stale"
+
+            job_row = db_module.query_one(
+                "SELECT COUNT(*) FROM maintenance_jobs WHERE job_type = 'refresh_host_hash_stats' AND host = ?",
+                ["mac"],
+            )
+            assert job_row is not None and job_row[0] >= 1
+        finally:
+            main_module._MAINTENANCE_ENABLED = previous
+
+    def test_large_host_without_aggregates_uses_lite_fallback_when_maintenance_disabled(
+        self, client
+    ):
+        db_module.execute(
+            "INSERT INTO host_stats (host, total_files, total_bytes, total_hashed, updated_at) VALUES (?, ?, ?, ?, now())",
+            ["mac", 500000, 0, 0],
+        )
+        db_module.execute("DELETE FROM host_hash_stats WHERE host = ?", ["mac"])
+        db_module.execute(
+            "INSERT INTO files (host, drive, path, path_display, filename, ext, file_category, size_bytes, hash, mtime, last_checked, source_os, skipped_reason, last_seen_at, inode, device) VALUES (?, '', ?, ?, ?, 'jpg', 'image', 10, ?, 0, now(), 'darwin', NULL, now(), NULL, NULL)",
+            ["mac", "/users/brian/a.jpg", "/users/brian/a.jpg", "a.jpg", HASH_A],
+        )
+        db_module.execute(
+            "INSERT INTO files (host, drive, path, path_display, filename, ext, file_category, size_bytes, hash, mtime, last_checked, source_os, skipped_reason, last_seen_at, inode, device) VALUES (?, '', ?, ?, ?, 'jpg', 'image', 10, ?, 0, now(), 'darwin', NULL, now(), NULL, NULL)",
+            ["mac", "/users/brian/b.jpg", "/users/brian/b.jpg", "b.jpg", HASH_A],
+        )
+
+        previous = main_module._MAINTENANCE_ENABLED
+        main_module._MAINTENANCE_ENABLED = False
+        try:
+            resp = client.get(
+                "/tree/dup-metrics",
+                params={
+                    "path": "/users/brian",
+                    "host": "mac",
+                    "segments": "a.jpg,b.jpg",
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["data_freshness"] == "stale"
+            assert data["metrics"]["a.jpg"]["dup_count"] == 1
+            assert data["metrics"]["b.jpg"]["dup_count"] == 1
+        finally:
+            main_module._MAINTENANCE_ENABLED = previous
+
+    def test_lite_fallback_counts_directory_segment_duplicates(self, client):
+        db_module.execute(
+            "INSERT INTO host_stats (host, total_files, total_bytes, total_hashed, updated_at) VALUES (?, ?, ?, ?, now())",
+            ["mac", 500000, 0, 0],
+        )
+        db_module.execute("DELETE FROM host_hash_stats WHERE host = ?", ["mac"])
+        db_module.execute(
+            "INSERT INTO files (host, drive, path, path_display, filename, ext, file_category, size_bytes, hash, mtime, last_checked, source_os, skipped_reason, last_seen_at, inode, device) VALUES (?, '', ?, ?, ?, 'jpg', 'image', 10, ?, 0, now(), 'darwin', NULL, now(), NULL, NULL)",
+            ["mac", "/users/brian/a.jpg", "/users/brian/a.jpg", "a.jpg", HASH_A],
+        )
+        db_module.execute(
+            "INSERT INTO files (host, drive, path, path_display, filename, ext, file_category, size_bytes, hash, mtime, last_checked, source_os, skipped_reason, last_seen_at, inode, device) VALUES (?, '', ?, ?, ?, 'jpg', 'image', 10, ?, 0, now(), 'darwin', NULL, now(), NULL, NULL)",
+            ["mac", "/users/brian/b.jpg", "/users/brian/b.jpg", "b.jpg", HASH_A],
+        )
+
+        previous = main_module._MAINTENANCE_ENABLED
+        main_module._MAINTENANCE_ENABLED = False
+        try:
+            resp = client.get(
+                "/tree/dup-metrics",
+                params={"path": "/", "host": "mac", "segments": "users"},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["metrics"]["users"]["dup_count"] >= 1
+            assert data["metrics"]["users"]["dup_hash_count"] >= 1
+        finally:
+            main_module._MAINTENANCE_ENABLED = previous

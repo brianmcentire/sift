@@ -126,6 +126,7 @@ export function mergeEntries(hostDataMap, selectedHosts) {
           file_category: null,
           path_display: null,
           other_hosts: null,
+          is_hard_linked: false,
         })
       }
 
@@ -146,6 +147,7 @@ export function mergeEntries(hostDataMap, selectedHosts) {
       if (entry.file_category) m.file_category = entry.file_category
       if (entry.path_display) m.path_display = entry.path_display
       if (entry.other_hosts) m.other_hosts = entry.other_hosts
+      if (entry.is_hard_linked) m.is_hard_linked = true
     }
   }
 

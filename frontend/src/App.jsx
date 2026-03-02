@@ -42,7 +42,8 @@ export default function App() {
 
   // ── Data cache ──────────────────────────────────────────────────────────
   const cacheRef = useRef(new Map())
-  const [cacheVersion, setCacheVersion] = useState(0)
+  const [structureVersion, setStructureVersion] = useState(0)   // new children loaded
+  const [metadataVersion, setMetadataVersion] = useState(0)    // dup metrics merged
   const [lsFetchKey, setLsFetchKey] = useState(0)
   const minDupSizeRef = useRef(minDupSize)
   const [dupAutoExpanded, setDupAutoExpanded] = useState(new Map())  // Map<rootPath, Set<autoExpandedPaths>>
@@ -53,6 +54,8 @@ export default function App() {
   const dupMetricSegmentsRef = useRef(new Map())
   const dupMetricsInFlightRef = useRef(new Set())
   const treePageStateRef = useRef(new Map())
+  const emptyPathByHostRef = useRef(new Map())
+  const onlyDupsPrevRef = useRef(false)
   const [paginationVersion, setPaginationVersion] = useState(0)
 
   // ── Stats ───────────────────────────────────────────────────────────────
@@ -68,6 +71,11 @@ export default function App() {
     hosts.forEach((h, i) => m.set(h.host, hostColor(i)))
     return m
   }, [hosts])
+
+  const activeHosts = useMemo(
+    () => hosts.filter(h => selectedHosts.has(h.host)),
+    [hosts, selectedHosts],
+  )
 
   // ── Debounce dir + filename queries ─────────────────────────────────────
   useEffect(() => {
@@ -85,7 +93,7 @@ export default function App() {
     if (debouncedFilenameQuery.length >= 2) {
       const controller = new AbortController()
       const started = performance.now()
-      api.files({ iname: `*${debouncedFilenameQuery}*`, limit: 500 }, { signal: controller.signal })
+      api.files({ iname: `*${debouncedFilenameQuery}*`, limit: 500, lite: 1 }, { signal: controller.signal })
         .then(data => {
           logPerf('search.filename', {
             query_len: debouncedFilenameQuery.length,
@@ -109,7 +117,7 @@ export default function App() {
     if (hashQuery.length >= 4) {
       const controller = new AbortController()
       const started = performance.now()
-      api.files({ hash: hashQuery, limit: 500 }, { signal: controller.signal })
+      api.files({ hash: hashQuery, limit: 500, lite: 1 }, { signal: controller.signal })
         .then(data => {
           logPerf('search.hash', {
             query_len: hashQuery.length,
@@ -138,10 +146,21 @@ export default function App() {
 
   // ── Initial load ─────────────────────────────────────────────────────────
   useEffect(() => {
-    api.hosts()
-      .then(data => {
+    Promise.all([
+      api.hosts(),
+      api.clientHost().catch(() => ({ client_host: null })),
+    ])
+      .then(([data, client]) => {
         setHosts(data)
-        setSelectedHosts(new Set(data.map(h => h.host)))
+        const clientHost = (client?.client_host || '').toLowerCase()
+        const matched = clientHost
+          ? data.find(h => h.host.toLowerCase() === clientHost)
+          : null
+        setSelectedHosts(
+          matched
+            ? new Set([matched.host])
+            : new Set(data.map(h => h.host)),
+        )
       })
       .catch(() => {})
   }, [])
@@ -191,9 +210,23 @@ export default function App() {
   // ── Fetch ls data for a path (all hosts) ─────────────────────────────────
   const fetchPath = useCallback(async (path, hostList, opts = {}) => {
     const loadMore = Boolean(opts.loadMore)
+    const enrichDupMetrics = Boolean(opts.enrichDupMetrics)
+
+    const hasEmptyAncestor = (host, fullPath) => {
+      const empties = emptyPathByHostRef.current.get(host)
+      if (!empties || empties.size === 0) return false
+      if (fullPath === '/') return false
+      const parts = fullPath.split('/').filter(Boolean)
+      for (let i = 1; i <= parts.length; i++) {
+        const p = '/' + parts.slice(0, i).join('/')
+        if (empties.has(p)) return true
+      }
+      return false
+    }
+
     const toFetch = hostList.filter(h => {
       const key = `${h.host}:${path}`
-      if (!loadMore) return !cacheRef.current.has(key)
+      if (!loadMore) return !cacheRef.current.has(key) && !hasEmptyAncestor(h.host, path)
       const pageState = treePageStateRef.current.get(key)
       return Boolean(pageState?.hasMore)
     })
@@ -221,6 +254,11 @@ export default function App() {
           } else {
             cacheRef.current.set(key, items)
           }
+          if (!loadMore && items.length === 0 && !Boolean(data?.has_more)) {
+            const empties = emptyPathByHostRef.current.get(h.host) || new Set()
+            empties.add(path)
+            emptyPathByHostRef.current.set(h.host, empties)
+          }
           treePageStateRef.current.set(key, {
             hasMore: Boolean(data?.has_more),
             nextCursor: data?.next_cursor || null,
@@ -236,9 +274,11 @@ export default function App() {
         next.delete(path)
         return next
       })
-      setCacheVersion(v => v + 1)
+      setStructureVersion(v => v + 1)
       setPaginationVersion(v => v + 1)
     }
+
+    if (!enrichDupMetrics) return
 
     const minAtRequest = minDupSizeRef.current
     const metricsTargets = hostList
@@ -282,7 +322,7 @@ export default function App() {
           const loaded = dupMetricSegmentsRef.current.get(metricKey) || new Set()
           missing.forEach(seg => loaded.add(seg))
           dupMetricSegmentsRef.current.set(metricKey, loaded)
-          setCacheVersion(v => v + 1)
+          setMetadataVersion(v => v + 1)
         })
         .catch(() => {})
         .finally(() => {
@@ -290,6 +330,19 @@ export default function App() {
         })
     })
   }, [])
+
+  // When dup-only mode is enabled, ensure dup metrics are loaded for the
+  // currently visible paths so filtering has data to work with.
+  useEffect(() => {
+    if (!onlyDups) {
+      onlyDupsPrevRef.current = false
+      return
+    }
+    if (onlyDupsPrevRef.current) return
+    onlyDupsPrevRef.current = true
+    if (activeHosts.length === 0) return
+    fetchPath(currentPath, activeHosts, { enrichDupMetrics: true })
+  }, [onlyDups, currentPath, activeHosts, fetchPath])
 
   const hasMoreForPath = useCallback((path) => {
     for (const host of selectedHosts) {
@@ -300,16 +353,21 @@ export default function App() {
   }, [selectedHosts])
 
   const handleLoadMore = useCallback((path) => {
-    fetchPath(path, hosts, { loadMore: true })
-  }, [fetchPath, hosts])
+    fetchPath(path, activeHosts, {
+      loadMore: true,
+      enrichDupMetrics: true,
+    })
+  }, [fetchPath, activeHosts])
 
   // ── Fetch dup ancestor dirs for auto-expand ─────────────────────────────
   const fetchDupAncestors = useCallback(async (rootPath) => {
-    const results = await Promise.allSettled(
-      [...selectedHosts].map(host =>
-        api.dupDirAncestors(host, rootPath, minDupSizeRef.current)
-      )
-    )
+    if (activeHosts.length === 0) return
+    // Keep dup-only interaction responsive by using a single anchor host for
+    // auto-expansion paths instead of fan-out across all selected hosts.
+    const anchorHost = activeHosts[0].host
+    const results = await Promise.allSettled([
+      api.dupDirAncestors(anchorHost, rootPath, minDupSizeRef.current, 500),
+    ])
     const allPaths = new Set()
     for (const r of results) {
       if (r.status === 'fulfilled' && Array.isArray(r.value?.paths)) {
@@ -317,9 +375,16 @@ export default function App() {
       }
     }
     if (allPaths.size === 0) return
-    setDupAutoExpanded(prev => { const next = new Map(prev); next.set(rootPath, allPaths); return next })
-    for (const p of allPaths) fetchPath(p, hosts)
-  }, [selectedHosts, hosts, fetchPath])
+    const capped = [...allPaths]
+      .sort((a, b) => a.split('/').length - b.split('/').length)
+      .slice(0, 300)
+    setDupAutoExpanded(prev => {
+      const next = new Map(prev)
+      next.set(rootPath, new Set(capped))
+      return next
+    })
+    // Avoid prefetching all auto-expanded descendants; load on interaction.
+  }, [activeHosts])
 
   // ── Directory search → expand tree to matching dirs ─────────────────────
   // NOTE: must be after `fetchPath` useCallback to avoid TDZ
@@ -361,8 +426,8 @@ export default function App() {
           return next
         })
         toExpand.forEach(p => {
-          if (!matched.has(p) && hosts.some(h => !cacheRef.current.has(`${h.host}:${p}`))) {
-            fetchPath(p, hosts)
+          if (!matched.has(p) && activeHosts.some(h => !cacheRef.current.has(`${h.host}:${p}`))) {
+            fetchPath(p, activeHosts, { enrichDupMetrics: false })
           }
         })
       })
@@ -371,14 +436,16 @@ export default function App() {
         setMatchedDirPaths(new Set())
       })
     return () => controller.abort()
-  }, [debouncedDirQuery, hosts, fetchPath])
+  }, [debouncedDirQuery, activeHosts, fetchPath])
 
-  // Fetch currentPath whenever it, hosts, or lsFetchKey changes
+  // Fetch currentPath whenever it, hosts, or lsFetchKey changes.
+  // Always enrich dup metrics — with aggregate tables the call is fast,
+  // and having dup data pre-loaded makes dup-only toggle instant.
   useEffect(() => {
     if (hosts.length > 0) {
-      fetchPath(currentPath, hosts)
+      fetchPath(currentPath, activeHosts, { enrichDupMetrics: true })
     }
-  }, [currentPath, hosts, fetchPath, lsFetchKey])
+  }, [currentPath, hosts, activeHosts, fetchPath, lsFetchKey])
 
   // ── Navigate to a path ───────────────────────────────────────────────────
   const navigate = useCallback((path) => {
@@ -441,11 +508,11 @@ export default function App() {
       // Normal expand
       pendingExpandRef.current.set(fullPath, performance.now())
       setExpandedPaths(prev => new Set([...prev, fullPath]))
-      fetchPath(fullPath, hosts)
+      fetchPath(fullPath, activeHosts, { enrichDupMetrics: true })
       // Auto-expand if onlyDups is active
       if (onlyDupsRef.current) fetchDupAncestors(fullPath)
     }
-  }, [effectiveExpanded, hosts, fetchPath, fetchDupAncestors])
+  }, [effectiveExpanded, activeHosts, fetchPath, fetchDupAncestors])
 
   // ── Handle sort column click (fixed: no nested setState) ─────────────────
   const handleSort = useCallback((col) => {
@@ -464,7 +531,7 @@ export default function App() {
       setHighlightedPaths(new Set([srcPath]))
       setPinnedSourcePath(srcPath)
       try {
-        const data = await api.files({ hash: entry.hash, limit: 500 })
+        const data = await api.files({ hash: entry.hash, limit: 500, lite: 1 })
         setPinnedResults(data)
       } catch {
         setPinnedResults([{
@@ -486,16 +553,21 @@ export default function App() {
 
   // ── Handle dir copy-path button → copy path to clipboard ─────────────────
   const handleCopyPath = useCallback((displayPath) => {
+    // Wrap in single quotes if path contains shell metacharacters
+    const needsQuoting = /[\s"'\\$`!#&|;(){}[\]*?<>~]/.test(displayPath)
+    const quoted = needsQuoting
+      ? "'" + displayPath.replace(/'/g, "'\\''") + "'"
+      : displayPath
     const success = () => {
       setClipboardToast(true)
       setTimeout(() => setClipboardToast(false), 2000)
     }
     if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(displayPath).then(success).catch(() => {})
+      navigator.clipboard.writeText(quoted).then(success).catch(() => {})
     } else {
       // Fallback for HTTP (non-secure context)
       const ta = document.createElement('textarea')
-      ta.value = displayPath
+      ta.value = quoted
       ta.style.position = 'fixed'
       ta.style.opacity = '0'
       document.body.appendChild(ta)
@@ -514,7 +586,7 @@ export default function App() {
       const result = await api.dupHash(fullPath, host, minDupSizeRef.current)
       if (result?.hash) {
         // Find the specific files in this subtree with that hash so we can highlight them
-        const inDir = await api.files({ hash: result.hash, path_prefix: fullPath, host, limit: 50 })
+        const inDir = await api.files({ hash: result.hash, path_prefix: fullPath, host, limit: 50, lite: 1 })
         setHighlightedPaths(new Set(inDir.map(f => (f.path_display || '').toLowerCase())))
         setHashQuery(result.hash)
       }
@@ -568,7 +640,7 @@ export default function App() {
 
     return rows
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hosts, selectedHosts, sortBy, sortDir, effectiveExpanded, cacheVersion])
+  }, [hosts, selectedHosts, sortBy, sortDir, effectiveExpanded, structureVersion, metadataVersion])
 
   // ── Active results: pinned > filename > hash ──────────────────────────────
   const activeResults = pinnedResults ?? filenameResults ?? hashResults
@@ -652,8 +724,12 @@ export default function App() {
   }, [activeResults, subtreeDupPath, pinnedSourcePath, categoryFilter, minDupSize, onlyDups, sortBy, sortDir])
 
   // ── Unfiltered tree rows — used for available categories so the type picker
-  //    doesn't collapse while multi-selecting ───────────────────────────────
-  const allTreeRows = useMemo(() => buildRows(currentPath, 0), [buildRows, currentPath])
+  //    doesn't collapse while multi-selecting.  Skip in search mode since
+  //    categories come from activeResults instead.
+  const allTreeRows = useMemo(
+    () => isSearchMode ? [] : buildRows(currentPath, 0),
+    [buildRows, currentPath, isSearchMode],
+  )
 
   // ── Tree rows ─────────────────────────────────────────────────────────────
   const treeRows = useMemo(() => {
@@ -798,6 +874,8 @@ export default function App() {
     paginationVersion,
   ])
 
+  const isLoading = hosts.length === 0 || loadingPaths.has(currentPath)
+
   useEffect(() => {
     if (!firstTreePaintLoggedRef.current && hosts.length > 0 && rows.length > 0 && !isLoading && !isSearchMode) {
       firstTreePaintLoggedRef.current = true
@@ -857,8 +935,6 @@ export default function App() {
     }
     return null
   }, [pinnedResults, subtreeDupPath, filenameResults, filenameQuery, hashResults, hashQuery])
-
-  const isLoading = hosts.length === 0 || loadingPaths.has(currentPath)
 
   return (
     <div className="min-h-screen bg-slate-50">

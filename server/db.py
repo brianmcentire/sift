@@ -87,6 +87,13 @@ CREATE TABLE IF NOT EXISTS aggregate_meta (
     note            TEXT
 );
 
+CREATE TABLE IF NOT EXISTS host_hard_linked_inodes (
+    host            TEXT NOT NULL,
+    device          BIGINT NOT NULL,
+    inode           BIGINT NOT NULL,
+    PRIMARY KEY (host, device, inode)
+);
+
 CREATE TABLE IF NOT EXISTS maintenance_jobs (
     id              BIGINT PRIMARY KEY DEFAULT nextval('maintenance_job_id_seq'),
     job_type        TEXT NOT NULL,
@@ -160,7 +167,7 @@ def _run_migrations(conn: duckdb.DuckDBPyConnection) -> None:
             INSERT INTO host_stats (host, total_files, total_bytes, total_hashed, updated_at)
             SELECT host, COUNT(*), COALESCE(SUM(size_bytes), 0),
                    COUNT(CASE WHEN hash IS NOT NULL THEN 1 END), now()
-            FROM files GROUP BY host
+            FROM files WHERE skipped_reason IS NULL GROUP BY host
         """)
 
     dir_row = conn.execute("SELECT COUNT(*) FROM directory_index").fetchone()
@@ -262,7 +269,7 @@ def refresh_host_stats(host: str) -> None:
         row = conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0), "
             "COUNT(CASE WHEN hash IS NOT NULL THEN 1 END) "
-            "FROM files WHERE host = ?",
+            "FROM files WHERE host = ? AND skipped_reason IS NULL",
             [host],
         ).fetchone()
         if row is None:
@@ -280,17 +287,33 @@ def refresh_host_stats(host: str) -> None:
         )
 
 
+def refresh_host_hard_linked_inodes(host: str) -> None:
+    """Recompute pre-computed hard-linked inode pairs for a host."""
+    with _lock:
+        conn = get_connection()
+        conn.execute("DELETE FROM host_hard_linked_inodes WHERE host = ?", [host])
+        conn.execute(
+            """
+            INSERT INTO host_hard_linked_inodes (host, device, inode)
+            SELECT ?, device, inode FROM files
+            WHERE host = ? AND inode IS NOT NULL AND device IS NOT NULL
+            GROUP BY device, inode HAVING COUNT(*) > 1
+            """,
+            [host, host],
+        )
+
+
 def refresh_host_hash_stats(host: str) -> None:
     """Recompute per-host hash aggregates for eventual-consistent reads."""
+    refresh_host_hard_linked_inodes(host)
     with _lock:
         conn = get_connection()
         conn.execute("DELETE FROM host_hash_stats WHERE host = ?", [host])
         conn.execute(
             """
             WITH hard_linked_inodes AS (
-                SELECT device, inode FROM files
-                WHERE host = ? AND inode IS NOT NULL AND device IS NOT NULL
-                GROUP BY device, inode HAVING COUNT(*) > 1
+                SELECT device, inode FROM host_hard_linked_inodes
+                WHERE host = ?
             )
             INSERT INTO host_hash_stats (host, hash, copy_count, copy_count_effective, size_bytes, updated_at)
             SELECT
@@ -343,10 +366,10 @@ def refresh_directory_index() -> None:
             INSERT INTO directory_index (dir_path, dir_display, updated_at)
             SELECT
                 regexp_replace(path, '/[^/]+$', '') AS dir_path,
-                regexp_replace(path_display, '/[^/]+$', '') AS dir_display,
+                ANY_VALUE(regexp_replace(path_display, '/[^/]+$', '')) AS dir_display,
                 now()
             FROM files
-            GROUP BY dir_path, dir_display
+            GROUP BY regexp_replace(path, '/[^/]+$', '')
             """
         )
 

@@ -564,6 +564,16 @@ Additional validation after aggregate-backed `/stats/overview`:
   - `/stats/overview` with `hosts=host-a,host-b`: p50 `0.8ms`, p95 `13.5ms`
   - `/stats/overview` with `categories=video` (live fallback): p50 `0.7ms`, p95 `18.6ms`
 
+Additional Phase 4 progress (session 2):
+
+- Added `host_hard_linked_inodes` pre-computed table — eliminates per-request full-host scan for hard-link detection.
+- Restructured all 3 dup-metrics query paths to aggregate-first — 144s → 888ms on 3.2M-file host.
+- Fixed cross-host fan-out bug inflating dup counts.
+- Added automatic aggregate bootstrap on server startup.
+- Excluded skipped files from `host_stats` totals.
+- Added `/debug/query` endpoint for operator diagnostics.
+- Verified dup count correctness against production data (2.57M dup files confirmed via direct SQL).
+
 Remaining for full Phase 4:
 
 - Expand aggregate-backed reads to more filtered paths (`categories`) where semantics align.
@@ -888,6 +898,81 @@ Use this section to record execution progress as implementation begins.
   - `pytest tests/server -q` -> `118 passed`
   - `make test-fast` -> `292 passed`
   - `make smoke-local` -> `3 passed`
+- Fixed frontend startup runtime crash (blank screen) caused by TDZ ordering in `App.jsx`.
+- Reduced initial interactive latency by deferring duplicate-enrichment requests unless needed
+  (enabled for dup-focused views/filters and expanded directories).
+- Optimized `/tree/dup-metrics` segment-scoped query path to filter scoped rows earlier.
+- Reworked `/tree/children` query shape to avoid expensive subtree rollup aggregation in interactive listing.
+  - Returns immediate children quickly; heavy duplicate/rollup details continue to load via async enrichment paths.
+- Added aggregate-metadata fallback logic for `/stats/overview` so existing aggregate tables are used
+  even when freshness metadata is not yet initialized.
+- Added large-host guard in `/tree/dup-metrics` to skip catastrophic live fallback scans when host aggregates are missing,
+  and queue a host aggregate refresh instead.
+- Further reduced interactive search cost by adding `lite` mode in `/files` and using it from frontend search flows.
+- Fixed dup-only refresh behavior by explicitly backfilling dup metrics when dup-only mode is enabled.
+- Added dup-only/tree interaction throttles to prevent UI request storms:
+  - avoid eager dup-metrics fetch across every expanded path on each render change,
+  - cap auto-expanded dup-ancestor path set,
+  - avoid prefetching all auto-expanded descendants,
+  - prune cross-host path fetches using host/path empty-ancestor short-circuiting.
+- Restored default host-selection behavior on page load via new `GET /client-host`
+  and frontend client-host matching logic.
+- Reduced dup-only expansion fan-out:
+  - auto-ancestor discovery now uses one anchor host,
+  - `/files/dup-ancestor-dirs` now supports `max_paths` capping server-side.
+- Fixed `Only dups` empty-state regression when maintenance is disabled on large hosts:
+  - `/tree/dup-metrics` now uses a bounded lightweight live fallback (scoped hashes) instead of returning empty metrics,
+    while still avoiding catastrophic full live scans.
+- Validation after startup/perf fix:
+  - `npm run build` (frontend) -> success
+  - `pytest tests/server/test_tree_endpoints.py -q` -> `6 passed`
+  - `pytest tests/server/test_stats.py -q` -> `15 passed`
+  - `pytest tests/server -q` -> `120 passed`
+  - `make smoke-local` -> `3 passed`
+  - `pytest tests/server/test_files.py tests/server/test_tree_endpoints.py -q` -> `23 passed`
+  - `pytest tests/server -q` -> `122 passed`
+
+### 2026-03-01 (session 2) — Code review, bug fixes, and production-scale perf tuning
+
+- Performed full code review of Phases 0-5 implementation against 8M+ row production database.
+- Identified and fixed 6 bugs:
+  1. `refresh_directory_index()` GROUP BY bug — changed `GROUP BY dir_path, dir_display` to
+     `GROUP BY regexp_replace(...)` with `ANY_VALUE(dir_display)` to prevent duplicate PK errors.
+  2. `mergeEntries` missing `is_hard_linked` field — added initialization and merge logic in `utils.js`.
+  3. Lite fallback in `/tree/dup-metrics` missing hard-link exclusion — added `hard_linked_inodes` CTE.
+  4. `fetchDupAncestors` stale `fetchPath` in dependency array — removed unused dep.
+  5. Unified `_stats_cache` with query cache helpers (`_cache_get`/`_cache_set`) — eliminated separate cache dict.
+  6. Split `cacheVersion` into `structureVersion` + `metadataVersion` to avoid unnecessary `buildRows` re-renders.
+- Added `host_hard_linked_inodes` pre-computed table to eliminate per-request full-host GROUP BY scan.
+  - `refresh_host_hard_linked_inodes(host)` called during `refresh_host_hash_stats`.
+  - All dup-metrics query paths now read from pre-computed table instead of scanning `files`.
+- Added `_bootstrap_aggregates()` — auto-populates aggregate tables on server startup when empty.
+  - Runs in background thread so server startup isn't blocked.
+  - Solves "No files found" in dup-only mode when `SIFT_MAINTENANCE_ENABLED=0`.
+- **Critical perf fix:** Restructured all 3 dup-metrics query paths (aggregate, live, lite) to
+  "aggregate-first" approach — GROUP BY (segment, hash) first to collapse files into unique hashes
+  per segment before joining to `host_hash_stats`.
+  - Production result: `/tree/dup-metrics` for Unraid root dropped from **144.5s → 888ms**.
+- Fixed fan-out bug in cross-host duplicate counting — `LEFT JOIN host_hash_stats` for other hosts
+  multiplied rows, inflating `SUM(file_count)`. Fixed by pre-aggregating cross-host info per segment
+  in a `cross_hosts` CTE joined 1:1 on segment.
+- Verified dup counts are correct via direct SQL validation:
+  - `SELECT COUNT(*) ... WHERE copy_count_effective > 1` = 2,570,034, matching API response exactly.
+- Excluded skipped files (`skipped_reason IS NOT NULL`) from `host_stats` totals.
+  - Two OrbStack sparse files (8,193 GB virtual size) were inflating MacBook stats from 605 GB to 8.6 TB.
+  - Added `_startup_refresh()` to re-run `refresh_host_stats` on every server start.
+- Added `GET /debug/query` endpoint for ad-hoc read-only SQL queries against the live database.
+  - Only SELECT/WITH statements allowed; errors return 400 with message instead of 500 stacktrace.
+  - Documented in new `tips.md` with example queries.
+- Frontend fixes:
+  - Skip `allTreeRows` computation in search mode.
+  - Always enrich dup metrics (removed conditional gating that skipped requests).
+  - Copy-to-clipboard now single-quotes paths containing spaces or shell metacharacters.
+  - Removed debug `console.warn` statements from `App.jsx`.
+- Added duplicate sets vs extra copies explanation with example to `README.md`.
+- Validation:
+  - `pytest tests/server -q` -> `123 passed`
+  - `npm run build` (frontend) -> success
 
 ---
 
