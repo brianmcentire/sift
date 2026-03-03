@@ -810,10 +810,11 @@ def get_cache(host: str, root: str, drive: str = Query("")):
     # Returns a compact array-of-arrays [path, mtime, size_bytes] to minimize
     # JSON payload size and avoid per-row Pydantic model instantiation overhead.
     root_lower = root.lower()
+    like_pattern = "/%" if root_lower == "/" else root_lower + "/%"
     rows = db.query(
         "SELECT path, mtime, size_bytes FROM files "
         "WHERE host = ? AND drive = ? AND (path LIKE ? OR path = ?)",
-        [host, drive, root_lower + "/%", root_lower],
+        [host, drive, like_pattern, root_lower],
     )
     return {"files": [[r[0], r[1], r[2]] for r in rows]}
 
@@ -824,10 +825,11 @@ def get_cache_stream(host: str, root: str, drive: str = Query("")):
     Rows are fetched under the lock then streamed from memory, so the
     lock is held only for the DB query, not the entire HTTP transfer."""
     root_lower = root.lower()
+    like_pattern = "/%" if root_lower == "/" else root_lower + "/%"
     rows = db.query(
         "SELECT path, mtime, size_bytes FROM files "
         "WHERE host = ? AND drive = ? AND (path LIKE ? OR path = ?)",
-        [host, drive, root_lower + "/%", root_lower],
+        [host, drive, like_pattern, root_lower],
     )
 
     def generate():
