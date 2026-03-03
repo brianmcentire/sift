@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { api } from './api.js'
-import { joinPath, mergeEntries, sortEntries, hostColor, fileEntryToRow, sortFileEntries, logPerf } from './utils.js'
+import { joinPath, mergeEntries, sortEntries, hostColor, fileEntryToRow, sortFileEntries, logPerf, formatClipboardPath } from './utils.js'
 import Header from './components/Header.jsx'
 import StatsBar from './components/StatsBar.jsx'
 import FileTable from './components/FileTable.jsx'
@@ -599,16 +599,8 @@ export default function App() {
 
   // ── Handle dir copy-path button → copy path to clipboard ─────────────────
   const handleCopyPath = useCallback((displayPath, driveCtx) => {
-    // Prepend drive letter for Windows paths
-    const drive = driveCtx || activeDrive
-    if (drive && !displayPath.startsWith(`${drive}:`)) {
-      displayPath = `${drive}:${displayPath}`
-    }
-    // Wrap in single quotes if path contains shell metacharacters
-    const needsQuoting = /[\s"'\\$`!#&|;(){}[\]*?<>~]/.test(displayPath)
-    const quoted = needsQuoting
-      ? "'" + displayPath.replace(/'/g, "'\\''") + "'"
-      : displayPath
+    const drive = driveCtx || ''
+    const quoted = formatClipboardPath(displayPath, drive)
     const success = () => {
       setClipboardToast(true)
       setTimeout(() => setClipboardToast(false), 2000)
@@ -624,10 +616,12 @@ export default function App() {
       document.body.appendChild(ta)
       ta.focus()
       ta.select()
-      try { document.execCommand('copy'); success() } catch (_) {}
+      try {
+        if (document.execCommand('copy')) success()
+      } catch (_) {}
       document.body.removeChild(ta)
     }
-  }, [activeDrive])
+  }, [])
 
   // ── Handle "1 extra copy" click → find dup hash and open hash overlay ──────
   const handleDupHashClick = useCallback(async (fullPath, entry) => {

@@ -60,6 +60,26 @@ export function pathSegments(path) {
   return path.split('/').filter(Boolean)
 }
 
+export function formatClipboardPath(displayPath, drive = '') {
+  let path = displayPath || ''
+  if (drive && !path.startsWith(`${drive}:`)) {
+    path = `${drive}:${path}`
+  }
+
+  if (drive) {
+    const winPath = path.replace(/\//g, '\\')
+    const needsQuoting = /[\s"&|;(){}[\]<>]/.test(winPath)
+    return needsQuoting
+      ? `"${winPath.replace(/"/g, '\\"')}"`
+      : winPath
+  }
+
+  const needsQuoting = /[\s"'\\$`!#&|;(){}[\]*?<>~]/.test(path)
+  return needsQuoting
+    ? "'" + path.replace(/'/g, "'\\''") + "'"
+    : path
+}
+
 // ─── Host color palette ──────────────────────────────────────────────────────
 
 const PALETTE = [

@@ -1,4 +1,5 @@
 """Unit tests for sift.commands.scan helpers."""
+
 import io
 import sys
 from datetime import datetime, timezone
@@ -6,12 +7,13 @@ from unittest.mock import patch
 
 import pytest
 
-from sift.commands.scan import _is_macos_dataless, _print_progress
+from sift.commands.scan import _display_scan_path, _is_macos_dataless, _print_progress
 
 
 # ---------------------------------------------------------------------------
 # _is_macos_dataless — APFS cloud-evicted stubs (st_blocks == 0 on darwin)
 # ---------------------------------------------------------------------------
+
 
 class TestIsMacosDataless:
     """st_blocks == 0 detection, gated on darwin."""
@@ -36,8 +38,15 @@ class TestIsMacosDataless:
 # _print_progress — regression test: total=None must not crash
 # ---------------------------------------------------------------------------
 
-def _make_stats(files_scanned=0, files_skipped=0, bytes_scanned=0, bytes_hashed=0,
-                files_hashed=0, files_cached=0):
+
+def _make_stats(
+    files_scanned=0,
+    files_skipped=0,
+    bytes_scanned=0,
+    bytes_hashed=0,
+    files_hashed=0,
+    files_cached=0,
+):
     return {
         "files_scanned": files_scanned,
         "files_skipped": files_skipped,
@@ -92,3 +101,23 @@ class TestPrintProgress:
         self._call(_make_stats(files_scanned=100), display)
         assert display["total"] == 500
         assert display["total_is_estimate"] is True
+
+
+class TestDisplayScanPath:
+    """Status-line path formatting should stay display-only and safe."""
+
+    def test_non_windows_path_unchanged(self):
+        raw = "/Users/brian/Documents/file.txt"
+        assert _display_scan_path(raw, "darwin") == raw
+
+    def test_windows_non_namespaced_path_unchanged(self):
+        raw = r"D:\Users\Brian\file.txt"
+        assert _display_scan_path(raw, "windows") == raw
+
+    def test_windows_namespaced_drive_path_strips_prefix_for_display(self):
+        raw = r"\\?\D:\Users\Brian\file.txt"
+        assert _display_scan_path(raw, "windows") == "D:/Users/Brian/file.txt"
+
+    def test_windows_namespaced_unc_path_kept_raw(self):
+        raw = r"\\?\UNC\server\share\file.txt"
+        assert _display_scan_path(raw, "windows") == raw
