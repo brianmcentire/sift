@@ -94,6 +94,7 @@ export default function FileRow({
   fullPath,
   fullDisplayPath,
   depth,
+  driveContext,
   isExpanded,
   onToggleDir,
   onFileClick,
@@ -147,7 +148,7 @@ export default function FileRow({
 
   function handleRowClick() {
     if (isDir) {
-      onToggleDir(fullPath)
+      onToggleDir(fullPath, { driveContext, isDriveNode: entry.isDriveNode, driveLabel: entry.driveLabel })
     } else {
       onFileClick?.(entry)
     }
@@ -188,7 +189,7 @@ export default function FileRow({
             </div>
             {onCopyPath && (
               <button
-                onClick={e => { e.stopPropagation(); onCopyPath(copyTargetPath) }}
+                onClick={e => { e.stopPropagation(); onCopyPath(copyTargetPath, driveContext) }}
                 className="opacity-0 group-hover:opacity-100 shrink-0 ml-1 text-slate-500 hover:text-slate-800 transition-opacity leading-none"
                 title={isDir ? 'Copy path to clipboard' : 'Copy file path to clipboard'}
               >

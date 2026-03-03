@@ -400,34 +400,35 @@ async def log_requests(request: Request, call_next):
 
 @app.post("/scan-runs", response_model=ScanRunCreatedResponse)
 def create_scan_run(body: ScanRunCreate):
-    # Abandon any prior 'running' scans for same host + root_path
+    # Abandon any prior 'running' scans for same host + drive + root_path
     stale = db.query(
-        "SELECT id FROM scan_runs WHERE host = ? AND root_path = ? AND status = 'running'",
-        [body.host, body.root_path],
+        "SELECT id FROM scan_runs WHERE host = ? AND drive = ? AND root_path = ? AND status = 'running'",
+        [body.host, body.drive, body.root_path],
     )
     if stale:
         db.execute(
             "UPDATE scan_runs SET status = 'failed' "
-            "WHERE host = ? AND root_path = ? AND status = 'running'",
-            [body.host, body.root_path],
+            "WHERE host = ? AND drive = ? AND root_path = ? AND status = 'running'",
+            [body.host, body.drive, body.root_path],
         )
         # Crashed/stale scan — refresh stats so they reflect reality
         db.refresh_host_stats(body.host)
         _invalidate_query_caches()
     db.execute(
-        "INSERT INTO scan_runs (host, root_path, root_path_display, started_at, status) "
-        "VALUES (?, ?, ?, ?, 'running')",
+        "INSERT INTO scan_runs (host, drive, root_path, root_path_display, started_at, status) "
+        "VALUES (?, ?, ?, ?, ?, 'running')",
         [
             body.host,
+            body.drive,
             body.root_path,
             body.root_path_display,
             body.started_at.isoformat(),
         ],
     )
     row = db.query_one(
-        "SELECT id FROM scan_runs WHERE host = ? AND root_path = ? AND status = 'running' "
+        "SELECT id FROM scan_runs WHERE host = ? AND drive = ? AND root_path = ? AND status = 'running' "
         "ORDER BY id DESC LIMIT 1",
-        [body.host, body.root_path],
+        [body.host, body.drive, body.root_path],
     )
     if row is None:
         raise HTTPException(500, "failed to create scan run")
@@ -498,13 +499,13 @@ def patch_scan_run(run_id: int, body: ScanRunPatch):
 def list_scan_runs(host: Optional[str] = None, limit: int = Query(50, le=500)):
     if host:
         rows = db.query(
-            "SELECT id, host, root_path, root_path_display, started_at, status FROM scan_runs "
+            "SELECT id, host, drive, root_path, root_path_display, started_at, status FROM scan_runs "
             "WHERE host = ? ORDER BY id DESC LIMIT ?",
             [host, limit],
         )
     else:
         rows = db.query(
-            "SELECT id, host, root_path, root_path_display, started_at, status FROM scan_runs "
+            "SELECT id, host, drive, root_path, root_path_display, started_at, status FROM scan_runs "
             "ORDER BY id DESC LIMIT ?",
             [limit],
         )
@@ -512,10 +513,11 @@ def list_scan_runs(host: Optional[str] = None, limit: int = Query(50, le=500)):
         ScanRunResponse(
             id=r[0],
             host=r[1],
-            root_path=r[2],
-            root_path_display=r[3],
-            started_at=r[4],
-            status=r[5],
+            drive=r[2],
+            root_path=r[3],
+            root_path_display=r[4],
+            started_at=r[5],
+            status=r[6],
         )
         for r in rows
     ]
@@ -716,6 +718,7 @@ def _trim_candidates_cte(body: TrimRequest) -> tuple[str, list]:
             FROM files f
             JOIN scan_runs sr
               ON sr.host = f.host
+             AND sr.drive = f.drive
              AND sr.status = 'complete'
              AND (f.path = sr.root_path OR f.path LIKE sr.root_path || '/%')
             WHERE {base_where}
@@ -799,28 +802,28 @@ def trim_files(body: TrimRequest):
 
 
 @app.get("/files/cache")
-def get_cache(host: str, root: str):
+def get_cache(host: str, root: str, drive: str = Query("")):
     # Returns a compact array-of-arrays [path, mtime, size_bytes] to minimize
     # JSON payload size and avoid per-row Pydantic model instantiation overhead.
     root_lower = root.lower()
     rows = db.query(
         "SELECT path, mtime, size_bytes FROM files "
-        "WHERE host = ? AND (path LIKE ? OR path = ?)",
-        [host, root_lower + "/%", root_lower],
+        "WHERE host = ? AND drive = ? AND (path LIKE ? OR path = ?)",
+        [host, drive, root_lower + "/%", root_lower],
     )
     return {"files": [[r[0], r[1], r[2]] for r in rows]}
 
 
 @app.get("/files/cache/stream")
-def get_cache_stream(host: str, root: str):
+def get_cache_stream(host: str, root: str, drive: str = Query("")):
     """Stream cache entries as NDJSON — one JSON array per line.
     Rows are fetched under the lock then streamed from memory, so the
     lock is held only for the DB query, not the entire HTTP transfer."""
     root_lower = root.lower()
     rows = db.query(
         "SELECT path, mtime, size_bytes FROM files "
-        "WHERE host = ? AND (path LIKE ? OR path = ?)",
-        [host, root_lower + "/%", root_lower],
+        "WHERE host = ? AND drive = ? AND (path LIKE ? OR path = ?)",
+        [host, drive, root_lower + "/%", root_lower],
     )
 
     def generate():
@@ -837,7 +840,7 @@ def get_cache_stream(host: str, root: str):
 
 @app.get("/files/ls/dup-hash")
 def ls_dup_hash(
-    path: str = Query("/"), host: str = Query(""), min_size: int = Query(0, ge=0)
+    path: str = Query("/"), host: str = Query(""), drive: str = Query(""), min_size: int = Query(0, ge=0)
 ):
     """Return the first duplicated hash found within the given subtree for a host.
     Uses the same hard-link exclusion logic as the dupes CTE in ls_files so the
@@ -853,6 +856,7 @@ def ls_dup_hash(
         SELECT f.hash
         FROM files f
         WHERE f.host = ?
+          AND f.drive = ?
           AND f.hash IS NOT NULL
           AND (f.path LIKE ? OR f.path = ?)
           AND f.size_bytes >= ?
@@ -868,7 +872,7 @@ def ls_dup_hash(
           )
         LIMIT 1
     """,
-        [host, host, prefix + "/%", prefix, min_size, host, min_size],
+        [host, host, drive, prefix + "/%", prefix, min_size, host, min_size],
     )
     if row is None:
         raise HTTPException(
@@ -880,6 +884,7 @@ def ls_dup_hash(
 @app.get("/files/duplicates-in-subtree", response_model=list[FileEntry])
 def duplicates_in_subtree(
     host: str = Query(...),
+    drive: str = Query(""),
     path_prefix: str = Query(...),
     min_size: int = Query(0, ge=0),
     limit: int = Query(1000, le=10000),
@@ -895,7 +900,7 @@ def duplicates_in_subtree(
     ),
     dup_hashes AS (
         SELECT hash FROM files
-        WHERE host = ? AND hash IS NOT NULL
+        WHERE host = ? AND drive = ? AND hash IS NOT NULL
           AND (path LIKE ? OR path = ?)
           AND size_bytes >= ?
           AND NOT (inode IS NOT NULL AND device IS NOT NULL
@@ -905,7 +910,7 @@ def duplicates_in_subtree(
     SELECT f.host, f.drive, f.path_display, f.filename, f.ext, f.file_category,
            f.size_bytes, f.hash, f.mtime, f.last_seen_at
     FROM files f
-    WHERE f.host = ? AND f.hash IN (SELECT hash FROM dup_hashes)
+    WHERE f.host = ? AND f.drive = ? AND f.hash IN (SELECT hash FROM dup_hashes)
       AND (f.path LIKE ? OR f.path = ?)
     ORDER BY f.hash, f.path_display
     LIMIT ?
@@ -913,10 +918,12 @@ def duplicates_in_subtree(
     params = [
         host,  # hard_linked_inodes
         host,
+        drive,
         prefix + "/%",
         prefix,
         min_size,  # dup_hashes
         host,
+        drive,
         prefix + "/%",
         prefix,  # result rows
         limit,
@@ -952,6 +959,7 @@ def duplicates_in_subtree(
 @app.get("/files/dup-ancestor-dirs")
 def dup_ancestor_dirs(
     host: str = Query(...),
+    drive: str = Query(""),
     path_prefix: str = Query(...),
     min_size: int = Query(0, ge=0),
     max_paths: int = Query(500, ge=1, le=5000),
@@ -977,12 +985,13 @@ def dup_ancestor_dirs(
     SELECT DISTINCT regexp_replace(f.path, '/[^/]+$', '') AS dir_path
     FROM files f
     WHERE f.host = ?
+      AND f.drive = ?
       AND f.hash IS NOT NULL
       AND f.hash IN (SELECT hash FROM dupes)
       AND (f.path LIKE ? OR f.path = ?)
     ORDER BY dir_path
     """
-    params = [host, host, min_size, host, prefix + "/%", prefix]
+    params = [host, host, min_size, host, drive, prefix + "/%", prefix]
     rows = db.query(sql, params)
 
     leaf_dirs = {r[0] for r in rows if r[0]}
@@ -1014,12 +1023,13 @@ def dup_ancestor_dirs(
 def ls_files(
     path: str = "/",
     host: str = "",
+    drive: str = Query(""),
     depth: int = Query(1, ge=1),
     min_size: int = Query(0, ge=0),
 ):
     req_start = time.monotonic()
     prefix = path.lower().rstrip("/")
-    cache_key = (host, prefix, depth, min_size)
+    cache_key = (host, drive, prefix, depth, min_size)
     cached = _cache_get(_ls_cache, cache_key)
     if cached is not None:
         _log_perf(
@@ -1068,6 +1078,7 @@ def ls_files(
                  THEN 'file' ELSE 'dir' END AS entry_type
         FROM files f
         WHERE f.host = ?
+          AND f.drive = ?
           AND (f.path LIKE ? OR f.path = ?)
     )
     SELECT
@@ -1099,8 +1110,8 @@ def ls_files(
     ORDER BY ANY_VALUE(s.entry_type) ASC, s.segment
     """
 
-    # param order: hard_linked host, dupes host, dupes min_size, scoped host, path LIKE, path =, join host
-    params = [host, host, min_size, host, prefix + "/%", prefix, host]
+    # param order: hard_linked host, dupes host, dupes min_size, scoped host+drive, path LIKE, path =, join host
+    params = [host, host, min_size, host, drive, prefix + "/%", prefix, host]
     rows = db.query(sql, params)
     _log_perf(
         "/files/ls",
@@ -1144,6 +1155,7 @@ def _tree_children_rows(
     depth: int = 1,
     limit: int | None = None,
     offset: int = 0,
+    drive: str = "",
 ) -> tuple[list[LsEntry], bool]:
     """Fast tree listing without subtree aggregate rollups."""
     prefix = path.lower().rstrip("/")
@@ -1161,6 +1173,7 @@ def _tree_children_rows(
                  THEN 'file' ELSE 'dir' END AS entry_type
         FROM files f
         WHERE f.host = ?
+          AND f.drive = ?
           AND ((f.path >= ? AND f.path < ?) OR f.path = ?)
           AND SPLIT_PART(f.path, '/', {split_idx}) != ''
     ),
@@ -1227,7 +1240,7 @@ def _tree_children_rows(
     ) t
     ORDER BY t.entry_type ASC, t.segment ASC
     """
-    params: list = [host, lower_bound, upper_bound, prefix]
+    params: list = [host, drive, lower_bound, upper_bound, prefix]
     if limit is not None:
         sql += " LIMIT ? OFFSET ?"
         params.extend([limit + 1, max(0, offset)])
@@ -1265,6 +1278,7 @@ def _tree_children_rows(
 def tree_children(
     path: str = "/",
     host: str = "",
+    drive: str = Query(""),
     depth: int = Query(1, ge=1),
     limit: int = Query(200, ge=1, le=2000),
     cursor: Optional[str] = None,
@@ -1278,7 +1292,7 @@ def tree_children(
     if offset < 0:
         raise HTTPException(status_code=400, detail="Invalid cursor")
 
-    cache_key = (host, prefix, depth, limit, offset)
+    cache_key = (host, drive, prefix, depth, limit, offset)
     cached = _cache_get(_tree_children_cache, cache_key)
     if cached is not None:
         _log_perf(
@@ -1300,6 +1314,7 @@ def tree_children(
         depth=depth,
         limit=limit,
         offset=offset,
+        drive=drive,
     )
     response = TreeChildrenResponse(
         items=items,
@@ -1327,6 +1342,7 @@ def tree_children(
 def tree_dup_metrics(
     path: str = "/",
     host: str = "",
+    drive: str = Query(""),
     depth: int = Query(1, ge=1),
     min_size: int = Query(0, ge=0),
     segments: str = Query("", description="Optional comma-separated child segments"),
@@ -1340,7 +1356,7 @@ def tree_dup_metrics(
         if segments
         else ""
     )
-    cache_key = (host, prefix, depth, min_size, seg_cache)
+    cache_key = (host, drive, prefix, depth, min_size, seg_cache)
     cached = _cache_get(_tree_dup_metrics_cache, cache_key)
     if cached is not None:
         _log_perf(
@@ -1449,6 +1465,7 @@ def tree_dup_metrics(
                     ) AS has_hard_link
                 FROM files f
                 WHERE f.host = ?
+                  AND f.drive = ?
                   AND ((f.path >= ? AND f.path < ?) OR f.path = ?)
                   AND f.hash IS NOT NULL
                   {scoped_seg_clause}
@@ -1484,6 +1501,7 @@ def tree_dup_metrics(
             params = [
                 host,
                 host,
+                drive,
                 lower_bound,
                 upper_bound,
                 prefix,
@@ -1555,6 +1573,7 @@ def tree_dup_metrics(
                 ) AS has_hard_link
             FROM files f
             WHERE f.host = ?
+              AND f.drive = ?
               AND ((f.path >= ? AND f.path < ?) OR f.path = ?)
               AND f.hash IS NOT NULL
               {scoped_seg_clause}
@@ -1586,6 +1605,7 @@ def tree_dup_metrics(
         params = [
             host,
             host,
+            drive,
             lower_bound,
             upper_bound,
             prefix,
@@ -1639,6 +1659,7 @@ def tree_dup_metrics(
                 ) AS has_hard_link
             FROM files f
             WHERE f.host = ?
+              AND f.drive = ?
               AND ((f.path >= ? AND f.path < ?) OR f.path = ?)
               AND f.hash IS NOT NULL
               {scoped_seg_clause}
@@ -1669,6 +1690,7 @@ def tree_dup_metrics(
             host,
             min_size,
             host,
+            drive,
             lower_bound,
             upper_bound,
             prefix,
@@ -1917,6 +1939,13 @@ def list_hosts():
         LEFT JOIN latest_complete lc ON lc.host = ah.host
         ORDER BY ah.host
     """)
+    # Collect distinct non-empty drives per host from files table
+    drive_rows = db.query(
+        "SELECT host, drive FROM files WHERE drive != '' GROUP BY host, drive ORDER BY host, drive"
+    )
+    drives_by_host: dict[str, list[str]] = {}
+    for dr in drive_rows:
+        drives_by_host.setdefault(dr[0], []).append(dr[1])
     return [
         HostEntry(
             host=r[0],
@@ -1925,6 +1954,7 @@ def list_hosts():
             total_files=r[3],
             total_bytes=r[4],
             total_hashed=r[5],
+            drives=drives_by_host.get(r[0], []),
         )
         for r in rows
     ]

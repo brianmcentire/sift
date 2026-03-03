@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE TABLE IF NOT EXISTS scan_runs (
     id                BIGINT      PRIMARY KEY DEFAULT nextval('scan_run_id_seq'),
     host              TEXT        NOT NULL,
+    drive             TEXT        NOT NULL DEFAULT '',
     root_path         TEXT        NOT NULL,
     root_path_display TEXT,
     started_at        TIMESTAMPTZ NOT NULL,
@@ -158,6 +159,12 @@ def _run_migrations(conn: duckdb.DuckDBPyConnection) -> None:
     }
     if "root_path_display" not in sr_cols:
         conn.execute("ALTER TABLE scan_runs ADD COLUMN root_path_display TEXT")
+    if "drive" not in sr_cols:
+        # DuckDB does not support ADD COLUMN with constraints in one statement.
+        # Add nullable/default first, backfill, then enforce NOT NULL.
+        conn.execute("ALTER TABLE scan_runs ADD COLUMN drive TEXT DEFAULT ''")
+        conn.execute("UPDATE scan_runs SET drive = '' WHERE drive IS NULL")
+        conn.execute("ALTER TABLE scan_runs ALTER COLUMN drive SET NOT NULL")
 
     # Backfill host_stats if empty (one-time on upgrade)
     hs_row = conn.execute("SELECT COUNT(*) FROM host_stats").fetchone()

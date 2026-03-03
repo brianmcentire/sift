@@ -1,6 +1,6 @@
 import { pathSegments } from '../utils.js'
 
-export default function Breadcrumb({ currentPath, onNavigate }) {
+export default function Breadcrumb({ currentPath, onNavigate, activeDrive }) {
   const segments = pathSegments(currentPath)
 
   function buildPath(index) {
@@ -9,6 +9,12 @@ export default function Breadcrumb({ currentPath, onNavigate }) {
 
   return (
     <nav className="flex items-center gap-1 py-2 text-[12px] text-slate-500 select-none">
+      {activeDrive && (
+        <>
+          <span className="text-slate-600 font-medium">{activeDrive}:</span>
+          <span className="text-slate-300">›</span>
+        </>
+      )}
       <button
         onClick={() => onNavigate('/')}
         className={`

@@ -195,7 +195,11 @@ export function sortEntries(entries, sortBy, sortDir) {
  * Convert a FileEntry (from /files API) into a FileTable row object.
  */
 export function fileEntryToRow(fe) {
-  const parts = (fe.path_display || '').split('/')
+  // Prepend drive letter for Windows files in display
+  const displayPath = fe.drive
+    ? `${fe.drive}:${fe.path_display || ''}`
+    : (fe.path_display || '')
+  const parts = displayPath.split('/')
   const parentPath = parts.length > 1 ? parts.slice(0, -1).join('/') || '/' : '/'
   const entry = {
     segment: fe.filename,
@@ -212,10 +216,10 @@ export function fileEntryToRow(fe) {
     mtime: fe.mtime,
     last_seen_at: fe.last_seen_at,
     file_category: fe.file_category,
-    path_display: fe.path_display,
+    path_display: displayPath,
     other_hosts: fe.other_hosts || null,
   }
-  return { entry, parentPath, fullPath: fe.path_display, depth: 0 }
+  return { entry, parentPath, fullPath: displayPath, depth: 0, driveContext: fe.drive || '' }
 }
 
 /**

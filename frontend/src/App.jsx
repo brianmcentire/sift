@@ -13,6 +13,7 @@ export default function App() {
   // ── Navigation state ────────────────────────────────────────────────────
   const [currentPath, setCurrentPath] = useState('/')
   const [expandedPaths, setExpandedPaths] = useState(new Set())
+  const [activeDrive, setActiveDrive] = useState('')  // '' for Mac/Linux, 'C' or 'D' for Windows
 
   // ── Search / filter state ───────────────────────────────────────────────
   const [dirQuery, setDirQuery] = useState('')
@@ -75,6 +76,24 @@ export default function App() {
   const activeHosts = useMemo(
     () => hosts.filter(h => selectedHosts.has(h.host)),
     [hosts, selectedHosts],
+  )
+
+  // ── Drive helpers ───────────────────────────────────────────────────────
+  // For a host, determine the effective drive letter to use in API calls.
+  // - No drives (Mac/Linux): ''
+  // - Single drive: that drive letter (transparent, no drive node in tree)
+  // - Multi-drive: activeDrive (set when user expands a drive node)
+  const hostDrive = useCallback((host) => {
+    const h = hosts.find(x => x.host === host)
+    if (!h || !h.drives || h.drives.length === 0) return ''
+    if (h.drives.length === 1) return h.drives[0]
+    return activeDrive
+  }, [hosts, activeDrive])
+
+  // True if any selected host has multiple drives
+  const hasMultiDriveHost = useMemo(() =>
+    activeHosts.some(h => h.drives && h.drives.length > 1),
+    [activeHosts],
   )
 
   // ── Debounce dir + filename queries ─────────────────────────────────────
@@ -211,9 +230,10 @@ export default function App() {
   const fetchPath = useCallback(async (path, hostList, opts = {}) => {
     const loadMore = Boolean(opts.loadMore)
     const enrichDupMetrics = Boolean(opts.enrichDupMetrics)
+    const forceDrive = opts.drive  // optional explicit drive override
 
-    const hasEmptyAncestor = (host, fullPath) => {
-      const empties = emptyPathByHostRef.current.get(host)
+    const hasEmptyAncestor = (host, drive, fullPath) => {
+      const empties = emptyPathByHostRef.current.get(`${host}:${drive}`)
       if (!empties || empties.size === 0) return false
       if (fullPath === '/') return false
       const parts = fullPath.split('/').filter(Boolean)
@@ -225,8 +245,9 @@ export default function App() {
     }
 
     const toFetch = hostList.filter(h => {
-      const key = `${h.host}:${path}`
-      if (!loadMore) return !cacheRef.current.has(key) && !hasEmptyAncestor(h.host, path)
+      const drive = forceDrive !== undefined ? forceDrive : hostDrive(h.host)
+      const key = `${h.host}:${drive}:${path}`
+      if (!loadMore) return !cacheRef.current.has(key) && !hasEmptyAncestor(h.host, drive, path)
       const pageState = treePageStateRef.current.get(key)
       return Boolean(pageState?.hasMore)
     })
@@ -234,13 +255,15 @@ export default function App() {
       setLoadingPaths(prev => new Set([...prev, path]))
 
       await Promise.all(toFetch.map(async h => {
-        const key = `${h.host}:${path}`
+        const drive = forceDrive !== undefined ? forceDrive : hostDrive(h.host)
+        const key = `${h.host}:${drive}:${path}`
         const pageState = treePageStateRef.current.get(key)
         try {
           const data = await api.treeChildren(
             path,
             h.host,
             loadMore ? { cursor: pageState?.nextCursor } : {},
+            drive,
           )
           const items = Array.isArray(data?.items) ? data.items : []
           if (loadMore) {
@@ -255,9 +278,10 @@ export default function App() {
             cacheRef.current.set(key, items)
           }
           if (!loadMore && items.length === 0 && !Boolean(data?.has_more)) {
-            const empties = emptyPathByHostRef.current.get(h.host) || new Set()
+            const emptyKey = `${h.host}:${drive}`
+            const empties = emptyPathByHostRef.current.get(emptyKey) || new Set()
             empties.add(path)
-            emptyPathByHostRef.current.set(h.host, empties)
+            emptyPathByHostRef.current.set(emptyKey, empties)
           }
           treePageStateRef.current.set(key, {
             hasMore: Boolean(data?.has_more),
@@ -283,8 +307,9 @@ export default function App() {
     const minAtRequest = minDupSizeRef.current
     const metricsTargets = hostList
       .map(h => {
-        const key = `${h.host}:${path}`
-        const metricKey = `${h.host}:${path}:${minAtRequest}`
+        const drive = forceDrive !== undefined ? forceDrive : hostDrive(h.host)
+        const key = `${h.host}:${drive}:${path}`
+        const metricKey = `${h.host}:${drive}:${path}:${minAtRequest}`
         const entries = cacheRef.current.get(key) || []
         if (!entries.length) return null
         if (dupMetricsInFlightRef.current.has(metricKey)) return null
@@ -293,16 +318,16 @@ export default function App() {
           .map(e => e.segment)
           .filter(seg => seg && !loaded.has(seg))
         if (missing.length === 0) return null
-        return { host: h.host, key, metricKey, missing }
+        return { host: h.host, drive, key, metricKey, missing }
       })
       .filter(Boolean)
 
     if (metricsTargets.length === 0) return
 
     metricsTargets.forEach(target => {
-      const { host, key, metricKey, missing } = target
+      const { host, drive, key, metricKey, missing } = target
       dupMetricsInFlightRef.current.add(metricKey)
-      api.treeDupMetrics(path, host, minAtRequest, missing)
+      api.treeDupMetrics(path, host, minAtRequest, missing, drive)
         .then(data => {
           if (minDupSizeRef.current !== minAtRequest) return
           const metrics = data?.metrics || {}
@@ -329,7 +354,7 @@ export default function App() {
           dupMetricsInFlightRef.current.delete(metricKey)
         })
     })
-  }, [])
+  }, [hostDrive])
 
   // When dup-only mode is enabled, ensure dup metrics are loaded for the
   // currently visible paths so filtering has data to work with.
@@ -346,11 +371,12 @@ export default function App() {
 
   const hasMoreForPath = useCallback((path) => {
     for (const host of selectedHosts) {
-      const pageState = treePageStateRef.current.get(`${host}:${path}`)
+      const drive = hostDrive(host)
+      const pageState = treePageStateRef.current.get(`${host}:${drive}:${path}`)
       if (pageState?.hasMore) return true
     }
     return false
-  }, [selectedHosts])
+  }, [selectedHosts, hostDrive])
 
   const handleLoadMore = useCallback((path) => {
     fetchPath(path, activeHosts, {
@@ -365,8 +391,9 @@ export default function App() {
     // Keep dup-only interaction responsive by using a single anchor host for
     // auto-expansion paths instead of fan-out across all selected hosts.
     const anchorHost = activeHosts[0].host
+    const drive = hostDrive(anchorHost)
     const results = await Promise.allSettled([
-      api.dupDirAncestors(anchorHost, rootPath, minDupSizeRef.current, 500),
+      api.dupDirAncestors(anchorHost, rootPath, minDupSizeRef.current, 500, drive),
     ])
     const allPaths = new Set()
     for (const r of results) {
@@ -384,7 +411,7 @@ export default function App() {
       return next
     })
     // Avoid prefetching all auto-expanded descendants; load on interaction.
-  }, [activeHosts])
+  }, [activeHosts, hostDrive])
 
   // ── Directory search → expand tree to matching dirs ─────────────────────
   // NOTE: must be after `fetchPath` useCallback to avoid TDZ
@@ -426,7 +453,7 @@ export default function App() {
           return next
         })
         toExpand.forEach(p => {
-          if (!matched.has(p) && activeHosts.some(h => !cacheRef.current.has(`${h.host}:${p}`))) {
+          if (!matched.has(p) && activeHosts.some(h => !cacheRef.current.has(`${h.host}:${hostDrive(h.host)}:${p}`))) {
             fetchPath(p, activeHosts, { enrichDupMetrics: false })
           }
         })
@@ -436,7 +463,7 @@ export default function App() {
         setMatchedDirPaths(new Set())
       })
     return () => controller.abort()
-  }, [debouncedDirQuery, activeHosts, fetchPath])
+  }, [debouncedDirQuery, activeHosts, fetchPath, hostDrive])
 
   // Fetch currentPath whenever it, hosts, or lsFetchKey changes.
   // Always enrich dup metrics — with aggregate tables the call is fast,
@@ -448,8 +475,9 @@ export default function App() {
   }, [currentPath, hosts, activeHosts, fetchPath, lsFetchKey])
 
   // ── Navigate to a path ───────────────────────────────────────────────────
-  const navigate = useCallback((path) => {
+  const navigate = useCallback((path, drive) => {
     setCurrentPath(path)
+    if (drive !== undefined) setActiveDrive(drive)
     setExpandedPaths(new Set())
     setDupAutoExpanded(new Map())
     setFilenameQuery('')
@@ -474,10 +502,11 @@ export default function App() {
     setSelectedHosts(new Set(hosts.map(h => h.host)))
     setExpandedPaths(new Set())
     setDupAutoExpanded(new Map())
+    setActiveDrive('')
   }, [hosts])
 
   // ── Toggle dir expansion ─────────────────────────────────────────────────
-  const toggleDir = useCallback((fullPath) => {
+  const toggleDir = useCallback((fullPath, entry) => {
     const isCurrentlyExpanded = effectiveExpanded.has(fullPath)
     if (isCurrentlyExpanded) {
       // Collapse manual expandedPaths
@@ -485,6 +514,10 @@ export default function App() {
         const next = new Set(prev)
         for (const p of next) {
           if (p === fullPath || p.startsWith(fullPath + '/')) next.delete(p)
+        }
+        // Also handle drive node collapse
+        if (fullPath.startsWith('__drive__:')) {
+          next.delete(fullPath)
         }
         return next
       })
@@ -505,10 +538,23 @@ export default function App() {
         return next
       })
     } else {
+      // Drive node expansion
+      if (fullPath.startsWith('__drive__:')) {
+        const driveLabel = fullPath.split(':')[1]
+        setActiveDrive(driveLabel)
+        pendingExpandRef.current.set(fullPath, performance.now())
+        setExpandedPaths(prev => new Set([...prev, fullPath]))
+        // Fetch root path for this drive
+        const driveHosts = activeHosts.filter(h => h.drives && h.drives.includes(driveLabel))
+        fetchPath('/', driveHosts, { enrichDupMetrics: true, drive: driveLabel })
+        return
+      }
       // Normal expand
       pendingExpandRef.current.set(fullPath, performance.now())
       setExpandedPaths(prev => new Set([...prev, fullPath]))
-      fetchPath(fullPath, activeHosts, { enrichDupMetrics: true })
+      // Determine drive context from entry if available
+      const driveCtx = entry?.driveContext || (entry?.isDriveNode ? entry.driveLabel : undefined)
+      fetchPath(fullPath, activeHosts, { enrichDupMetrics: true, drive: driveCtx })
       // Auto-expand if onlyDups is active
       if (onlyDupsRef.current) fetchDupAncestors(fullPath)
     }
@@ -552,7 +598,12 @@ export default function App() {
   }, [])
 
   // ── Handle dir copy-path button → copy path to clipboard ─────────────────
-  const handleCopyPath = useCallback((displayPath) => {
+  const handleCopyPath = useCallback((displayPath, driveCtx) => {
+    // Prepend drive letter for Windows paths
+    const drive = driveCtx || activeDrive
+    if (drive && !displayPath.startsWith(`${drive}:`)) {
+      displayPath = `${drive}:${displayPath}`
+    }
     // Wrap in single quotes if path contains shell metacharacters
     const needsQuoting = /[\s"'\\$`!#&|;(){}[\]*?<>~]/.test(displayPath)
     const quoted = needsQuoting
@@ -576,14 +627,15 @@ export default function App() {
       try { document.execCommand('copy'); success() } catch (_) {}
       document.body.removeChild(ta)
     }
-  }, [])
+  }, [activeDrive])
 
   // ── Handle "1 extra copy" click → find dup hash and open hash overlay ──────
   const handleDupHashClick = useCallback(async (fullPath, entry) => {
     const host = entry.presentHosts?.[0]
     if (!host) return
+    const drive = hostDrive(host)
     try {
-      const result = await api.dupHash(fullPath, host, minDupSizeRef.current)
+      const result = await api.dupHash(fullPath, host, minDupSizeRef.current, drive)
       if (result?.hash) {
         // Find the specific files in this subtree with that hash so we can highlight them
         const inDir = await api.files({ hash: result.hash, path_prefix: fullPath, host, limit: 50, lite: 1 })
@@ -591,19 +643,20 @@ export default function App() {
         setHashQuery(result.hash)
       }
     } catch (_) {}
-  }, [])
+  }, [hostDrive])
 
   // ── Handle subtree dup arrow → show all dups in subtree grouped by hash ──
   const handleDupSubtreeClick = useCallback(async (fullPath, entry) => {
     const host = entry.presentHosts?.[0]
     if (!host) return
+    const drive = hostDrive(host)
     try {
-      const data = await api.subtreeDups(host, fullPath, minDupSizeRef.current)
+      const data = await api.subtreeDups(host, fullPath, minDupSizeRef.current, 1000, drive)
       setHighlightedPaths(new Set())
       setSubtreeDupPath(fullPath)
       setPinnedResults(data)
     } catch (_) {}
-  }, [])
+  }, [hostDrive])
 
   // ── Handle type badge click → toggle category filter ─────────────────────
   const handleTypeClick = useCallback((category) => {
@@ -617,9 +670,85 @@ export default function App() {
 
   // ── Build flat row list from cache (tree mode) ────────────────────────────
   const buildRows = useCallback((parentPath, depth, parentDisplayPath = parentPath) => {
+    // At root path for multi-drive hosts, inject synthetic drive entries
+    if (parentPath === '/' && depth === 0 && hasMultiDriveHost) {
+      const rows = []
+      // Collect drives from all active hosts
+      const allDrives = new Set()
+      activeHosts.forEach(h => {
+        if (h.drives && h.drives.length > 1) {
+          h.drives.forEach(d => allDrives.add(d))
+        }
+      })
+
+      // For hosts without drives (Mac/Linux), show their normal tree
+      const noDriveHosts = activeHosts.filter(h => !h.drives || h.drives.length <= 1)
+      if (noDriveHosts.length > 0) {
+        const hostDataMap = new Map()
+        noDriveHosts.forEach(h => {
+          const drive = h.drives && h.drives.length === 1 ? h.drives[0] : ''
+          const key = `${h.host}:${drive}:${parentPath}`
+          if (cacheRef.current.has(key)) {
+            hostDataMap.set(h.host, cacheRef.current.get(key))
+          }
+        })
+        const entries = mergeEntries(hostDataMap, selectedHosts)
+        const sorted = sortEntries(entries, sortBy, sortDir)
+        for (const entry of sorted) {
+          const fullPath = joinPath(parentPath, entry.segment)
+          const fullDisplayPath = joinPath(parentDisplayPath, entry.segment_display || entry.segment)
+          rows.push({ entry, parentPath, fullPath, fullDisplayPath, depth })
+          if (entry.entry_type === 'dir' && effectiveExpanded.has(fullPath)) {
+            rows.push(...buildRows(fullPath, depth + 1, fullDisplayPath))
+          }
+        }
+      }
+
+      // Add synthetic drive entries for multi-drive hosts
+      for (const d of [...allDrives].sort()) {
+        const drivePath = `__drive__:${d}`
+        const driveEntry = {
+          segment: `${d}:`,
+          segment_display: `${d}:`,
+          entry_type: 'dir',
+          file_count: 0,
+          total_bytes: null,
+          dup_count: 0,
+          dup_hash_count: 0,
+          isDriveNode: true,
+          driveLabel: d,
+        }
+        rows.push({ entry: driveEntry, parentPath: '/', fullPath: drivePath, fullDisplayPath: `${d}:`, depth: 0 })
+        if (effectiveExpanded.has(drivePath)) {
+          // When a drive is expanded, show its root children
+          const hostDataMap = new Map()
+          activeHosts.forEach(h => {
+            if (h.drives && h.drives.includes(d)) {
+              const key = `${h.host}:${d}:/`
+              if (cacheRef.current.has(key)) {
+                hostDataMap.set(h.host, cacheRef.current.get(key))
+              }
+            }
+          })
+          const entries = mergeEntries(hostDataMap, selectedHosts)
+          const sorted = sortEntries(entries, sortBy, sortDir)
+          for (const entry of sorted) {
+            const fullPath = joinPath('/', entry.segment)
+            const fullDisplayPath = joinPath(`${d}:`, entry.segment_display || entry.segment)
+            rows.push({ entry, parentPath: drivePath, fullPath, fullDisplayPath, depth: 1, driveContext: d })
+            if (entry.entry_type === 'dir' && effectiveExpanded.has(fullPath)) {
+              rows.push(...buildRowsForDrive(fullPath, 2, fullDisplayPath, d))
+            }
+          }
+        }
+      }
+      return rows
+    }
+
     const hostDataMap = new Map()
     hosts.forEach(h => {
-      const key = `${h.host}:${parentPath}`
+      const drive = hostDrive(h.host)
+      const key = `${h.host}:${drive}:${parentPath}`
       if (cacheRef.current.has(key)) {
         hostDataMap.set(h.host, cacheRef.current.get(key))
       }
@@ -640,7 +769,36 @@ export default function App() {
 
     return rows
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hosts, selectedHosts, sortBy, sortDir, effectiveExpanded, structureVersion, metadataVersion])
+  }, [hosts, selectedHosts, activeHosts, sortBy, sortDir, effectiveExpanded, structureVersion, metadataVersion, hasMultiDriveHost, hostDrive])
+
+  // Helper for building rows within a specific drive context
+  const buildRowsForDrive = useCallback((parentPath, depth, parentDisplayPath, drive) => {
+    const hostDataMap = new Map()
+    activeHosts.forEach(h => {
+      if (h.drives && h.drives.includes(drive)) {
+        const key = `${h.host}:${drive}:${parentPath}`
+        if (cacheRef.current.has(key)) {
+          hostDataMap.set(h.host, cacheRef.current.get(key))
+        }
+      }
+    })
+
+    const entries = mergeEntries(hostDataMap, selectedHosts)
+    const sorted = sortEntries(entries, sortBy, sortDir)
+    const rows = []
+
+    for (const entry of sorted) {
+      const fullPath = joinPath(parentPath, entry.segment)
+      const fullDisplayPath = joinPath(parentDisplayPath, entry.segment_display || entry.segment)
+      rows.push({ entry, parentPath, fullPath, fullDisplayPath, depth, driveContext: drive })
+      if (entry.entry_type === 'dir' && effectiveExpanded.has(fullPath)) {
+        rows.push(...buildRowsForDrive(fullPath, depth + 1, fullDisplayPath, drive))
+      }
+    }
+
+    return rows
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeHosts, selectedHosts, sortBy, sortDir, effectiveExpanded, structureVersion, metadataVersion])
 
   // ── Active results: pinned > filename > hash ──────────────────────────────
   const activeResults = pinnedResults ?? filenameResults ?? hashResults

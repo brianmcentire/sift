@@ -189,6 +189,7 @@ export default function FileTable({
                   fullPath={row.fullPath}
                   fullDisplayPath={row.fullDisplayPath}
                   depth={row.depth}
+                  driveContext={row.driveContext}
                   isExpanded={expandedPaths.has(row.fullPath)}
                   onToggleDir={onToggleDir}
                   onFileClick={onFileClick}

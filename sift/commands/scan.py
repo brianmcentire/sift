@@ -362,7 +362,10 @@ def cmd_scan(args) -> None:
     root_dev = os.stat(walk_root).st_dev if one_filesystem else None
 
     # Normalize root path for storage
-    root_path, root_path_display, _ = normalize_path_for_storage(root, source_os)
+    root_path, root_path_display, drive = normalize_path_for_storage(root, source_os)
+    # Show drive prefix in display string when scanning a Windows drive
+    if drive:
+        root_path_display = f"{drive}:{root_path_display}"
 
     if getattr(args, "ask", False):
         from sift.config import get_server_url
@@ -404,6 +407,7 @@ def cmd_scan(args) -> None:
             "/scan-runs",
             {
                 "host": host,
+                "drive": drive,
                 "root_path": root_path,
                 "root_path_display": root_path_display,
                 "started_at": scan_start_iso,
@@ -450,7 +454,7 @@ def cmd_scan(args) -> None:
         try:
             cache: dict[str, dict] = {}
             with client.get_stream(
-                "/files/cache/stream", params={"host": host, "root": root_path}
+                "/files/cache/stream", params={"host": host, "root": root_path, "drive": drive}
             ) as resp:
                 for line in resp.iter_lines():
                     if line:

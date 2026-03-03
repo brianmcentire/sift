@@ -50,6 +50,7 @@ class SeenRequest(BaseModel):
 
 class ScanRunCreate(BaseModel):
     host: str
+    drive: str = ""
     root_path: str
     root_path_display: Optional[str] = None
     started_at: datetime
@@ -62,6 +63,7 @@ class ScanRunPatch(BaseModel):
 class ScanRunResponse(BaseModel):
     id: int
     host: str
+    drive: str = ""
     root_path: str
     root_path_display: Optional[str] = None
     started_at: datetime
@@ -164,6 +166,7 @@ class HostEntry(BaseModel):
     total_files: int
     total_bytes: Optional[int]
     total_hashed: int
+    drives: list[str] = []
 
 
 class StatsOverview(BaseModel):
