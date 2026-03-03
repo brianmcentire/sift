@@ -769,9 +769,12 @@ def cmd_scan(args) -> None:
 
                     # Inode tracking for hard link detection.
                     # Windows returns st_ino=0 for most files — treat as unknown.
+                    # NTFS can also return unsigned 64-bit inodes that overflow
+                    # DuckDB BIGINT (signed 64-bit); treat those as unknown too.
+                    _I64_MAX = (1 << 63) - 1
                     raw_ino = stat_result.st_ino
                     raw_dev = stat_result.st_dev
-                    if raw_ino == 0:
+                    if raw_ino == 0 or raw_ino > _I64_MAX or raw_dev > _I64_MAX:
                         inode_val = None
                         device_val = None
                         inode_key = None
