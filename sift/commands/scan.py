@@ -412,7 +412,7 @@ def cmd_scan(args) -> None:
     # 1. Register scan run
     # -----------------------------------------------------------------------
     if not quiet:
-        print(f"Registering scan run for {host}:{root_path}...", file=sys.stderr)
+        print(f"Registering scan run for {host}:{root_path_display}...", file=sys.stderr)
 
     stop_event = threading.Event()
     _progress_stop = threading.Event()
