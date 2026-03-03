@@ -477,10 +477,10 @@ def cmd_scan(args) -> None:
                         entry = json.loads(line)
                         cache[entry[0]] = {"mtime": entry[1], "size_bytes": entry[2]}
                         if not quiet and len(cache) % 10_000 == 0:
-                            sys.stderr.write(f"\rFetching file cache: {len(cache):,}")
+                            sys.stderr.write(f"\r\x1b[2KFetching file cache: {len(cache):,}")
                             sys.stderr.flush()
             if not quiet:
-                sys.stderr.write(f"\rFetching file cache: {len(cache):,} entries.\n")
+                sys.stderr.write(f"\r\x1b[2KFetching file cache: {len(cache):,} entries.\n")
                 sys.stderr.flush()
         except Exception as e:
             if not quiet:
@@ -1106,12 +1106,18 @@ def cmd_scan(args) -> None:
         # -------------------------------------------------------------------
         # 4. Flush remaining batches (with progress)
         # -------------------------------------------------------------------
+        # Track transient lines written during finalize so we can erase them
+        # before printing the clean summary.
+        is_tty = sys.stderr.isatty()
+        finalize_lines = 0  # lines written below the progress bar
+
         # Upsert: remaining records with new hash data
         with _upsert_lock:
             n_pending_upserts = len(upsert_records)
         if n_pending_upserts and not quiet:
             sys.stderr.write(f"\nSaving {n_pending_upserts:,} file records...")
             sys.stderr.flush()
+            finalize_lines += 1
         _flush_queued_upserts(force=True)
         if n_pending_upserts and not quiet:
             sys.stderr.write(" done.\n")
@@ -1130,16 +1136,17 @@ def cmd_scan(args) -> None:
                     f" ({n_batches} batch{'es' if n_batches != 1 else ''})..."
                 )
                 sys.stderr.flush()
+                finalize_lines += 1
             for chunk in _chunks(remaining_seen, seen_batch_size):
                 _flush_seen(chunk, host, scan_start_iso)
                 sent_seen += len(chunk)
                 if not quiet:
                     n_batches = math.ceil(len(remaining_seen) / seen_batch_size)
                     done = math.ceil(sent_seen / seen_batch_size)
-                    sys.stderr.write(f"\r  seen-path updates: {done}/{n_batches}")
+                    sys.stderr.write(f"\r\x1b[2K  seen-path updates: {done}/{n_batches}")
                     sys.stderr.flush()
             if not quiet:
-                sys.stderr.write("\r  seen-path updates: done.              \n")
+                sys.stderr.write("\r\x1b[2K  seen-path updates: done.\n")
                 sys.stderr.flush()
         if debug:
             _seen_stats["finalize_sent"] += sent_seen
@@ -1160,7 +1167,18 @@ def cmd_scan(args) -> None:
                 f"\nsift: warning — failed to mark scan complete: {e}", file=sys.stderr
             )
 
-        if not quiet:
+        # Erase transient finalize lines + progress bar, leaving cursor on
+        # the progress bar's line so the summary prints cleanly after the
+        # "Fetching file cache" line.
+        if not quiet and is_tty:
+            # Move up over finalize lines + the 1-line progress bar, then
+            # erase from cursor to end of screen.
+            up = finalize_lines + display.get("lines", 0)
+            if up > 0:
+                sys.stderr.write(f"\x1b[{up}A\r\x1b[J")
+                sys.stderr.flush()
+                display["lines"] = 0
+        elif not quiet:
             _print_progress(stats, scan_start, display, final=True)
         if debug:
             _dump_api_log("final")
@@ -1228,9 +1246,9 @@ def cmd_scan(args) -> None:
                         retry_timeout=_INTERRUPT_RETRY_TIMEOUT,
                     )
                     flushed += len(chunk)
-                    sys.stderr.write(f"\r  {flushed:,} / {total:,}")
+                    sys.stderr.write(f"\r\x1b[2K  {flushed:,} / {total:,}")
                     sys.stderr.flush()
-                sys.stderr.write(f"\r  {total:,} / {total:,}  done.\n")
+                sys.stderr.write(f"\r\x1b[2K  {total:,} / {total:,}  done.\n")
                 sys.stderr.flush()
             except KeyboardInterrupt:
                 sys.stderr.write(

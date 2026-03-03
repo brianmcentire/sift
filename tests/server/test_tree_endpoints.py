@@ -30,7 +30,11 @@ class TestTreeChildren:
         assert "docs" in entries
         assert "notes.txt" in entries
         assert entries["docs"]["entry_type"] == "dir"
+        assert entries["docs"]["file_count"] is None  # null until dup-metrics enrichment
+        assert entries["docs"]["total_bytes"] is None
         assert entries["notes.txt"]["entry_type"] == "file"
+        assert entries["notes.txt"]["file_count"] == 1
+        assert entries["notes.txt"]["total_bytes"] == 1000
 
     def test_cursor_pagination(self, client):
         insert_files(
@@ -102,6 +106,10 @@ class TestTreeDupMetrics:
         assert metrics["a.jpg"]["dup_count"] == 1
         assert metrics["b.jpg"]["dup_count"] == 1
         assert metrics["c.jpg"]["dup_count"] == 0
+        # file_count and total_bytes populated from dup-metrics
+        assert metrics["a.jpg"]["file_count"] == 1
+        assert metrics["a.jpg"]["total_bytes"] == 1000
+        assert metrics["c.jpg"]["file_count"] == 1
 
     def test_cross_host_info_populates_other_hosts(self, client):
         insert_files(
@@ -219,6 +227,11 @@ class TestTreeDupMetrics:
             assert data["data_freshness"] == "stale"
             assert data["metrics"]["a.jpg"]["dup_count"] == 1
             assert data["metrics"]["b.jpg"]["dup_count"] == 1
+            # file_count and total_bytes present in lite fallback
+            assert data["metrics"]["a.jpg"]["file_count"] == 1
+            assert data["metrics"]["a.jpg"]["total_bytes"] == 10
+            assert data["metrics"]["b.jpg"]["file_count"] == 1
+            assert data["metrics"]["b.jpg"]["total_bytes"] == 10
         finally:
             main_module._MAINTENANCE_ENABLED = previous
 
@@ -248,5 +261,8 @@ class TestTreeDupMetrics:
             data = resp.json()
             assert data["metrics"]["users"]["dup_count"] >= 1
             assert data["metrics"]["users"]["dup_hash_count"] >= 1
+            # directory segment should aggregate file_count and total_bytes
+            assert data["metrics"]["users"]["file_count"] == 2
+            assert data["metrics"]["users"]["total_bytes"] == 20  # 2 files × 10 bytes
         finally:
             main_module._MAINTENANCE_ENABLED = previous

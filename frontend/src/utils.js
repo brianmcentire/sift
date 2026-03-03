@@ -132,8 +132,8 @@ export function mergeEntries(hostDataMap, selectedHosts) {
           segment: entry.segment,
           segment_display: entry.segment_display || entry.segment,
           entry_type: entry.entry_type,
-          file_count: 0,
-          total_bytes: 0,
+          file_count: null,
+          total_bytes: null,
           dup_count: 0,
           presentHosts: [],
           dup_hash_count: 0,
@@ -152,8 +152,9 @@ export function mergeEntries(hostDataMap, selectedHosts) {
 
       const m = bySegment.get(entry.segment)
       m.presentHosts.push(host)
-      m.file_count += entry.file_count || 0
-      m.total_bytes = (m.total_bytes || 0) + (entry.total_bytes || 0)
+      // Preserve null for dirs until dup-metrics enrichment provides real values
+      if (entry.file_count != null) m.file_count = (m.file_count || 0) + entry.file_count
+      if (entry.total_bytes != null) m.total_bytes = (m.total_bytes || 0) + entry.total_bytes
       m.dup_count += entry.dup_count || 0
       m.dup_hash_count += entry.dup_hash_count || 0
 

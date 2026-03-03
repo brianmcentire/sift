@@ -188,11 +188,29 @@ def _bootstrap_aggregates() -> None:
         logger.exception("Aggregate bootstrap failed")
 
 
+def _cleanup_stale_scan_runs():
+    """Mark any scan_runs left in 'running' state as 'interrupted'.
+
+    Called once at startup before accepting requests so that
+    _running_scan_count() returns correct values from the first request.
+    """
+    stale = db.query("SELECT id, host FROM scan_runs WHERE status = 'running'")
+    if stale:
+        db.execute("UPDATE scan_runs SET status = 'interrupted' WHERE status = 'running'")
+        hosts = {r[1] for r in stale}
+        logger.info(
+            "Marked %d stale running scan_run(s) as interrupted (hosts: %s)",
+            len(stale),
+            ", ".join(sorted(hosts)),
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _maintenance_thread
     db_path = os.environ.get("SIFT_DB_PATH") or db.get_db_path()
     db.init_db(db_path)
+    _cleanup_stale_scan_runs()
     _maintenance_stop_event.clear()
     if _MAINTENANCE_ENABLED:
         _maintenance_thread = threading.Thread(
@@ -463,34 +481,20 @@ def patch_scan_run(run_id: int, body: ScanRunPatch):
                     "host aggregate refresh failed for host %s: %s", host, exc
                 )
 
-            # If other hosts are actively scanning, defer heavy global rebuilds.
-            running_other_hosts = _running_scan_count(exclude_host=host)
-
-            if running_other_hosts > 0:
-                db.set_aggregate_meta(
-                    "hash_stats",
-                    "stale",
-                    "Deferred while other hosts are actively scanning",
-                )
-                db.set_aggregate_meta(
-                    "directory_index",
-                    "stale",
-                    "Deferred while other hosts are actively scanning",
-                )
-                db.enqueue_maintenance_job("refresh_hash_stats", priority=80)
-                db.enqueue_maintenance_job("refresh_directory_index", priority=80)
-            else:
-                try:
-                    db.refresh_hash_stats()
-                    db.refresh_directory_index()
-                    db.set_aggregate_meta("hash_stats", "fresh")
-                    db.set_aggregate_meta("directory_index", "fresh")
-                except Exception as exc:
-                    logger.warning(
-                        "global aggregate refresh failed after host %s completion: %s",
-                        host,
-                        exc,
-                    )
+            # Global aggregate rebuilds can be slow — always defer to
+            # maintenance queue so the PATCH returns immediately.
+            db.set_aggregate_meta(
+                "hash_stats",
+                "stale",
+                "Queued for refresh after scan completion",
+            )
+            db.set_aggregate_meta(
+                "directory_index",
+                "stale",
+                "Queued for refresh after scan completion",
+            )
+            db.enqueue_maintenance_job("refresh_hash_stats", priority=80)
+            db.enqueue_maintenance_job("refresh_directory_index", priority=80)
         _invalidate_query_caches()
     return {"ok": True}
 
@@ -1203,7 +1207,7 @@ def _tree_children_rows(
         SELECT
             d.segment,
             'dir' AS entry_type,
-            0 AS file_count,
+            NULL::INT AS file_count,
             NULL::BIGINT AS total_bytes,
             0 AS dup_count,
             0 AS dup_hash_count,
@@ -1255,7 +1259,7 @@ def _tree_children_rows(
         LsEntry(
             segment=r[0],
             entry_type=r[1],
-            file_count=r[2] or 0,
+            file_count=r[2],
             total_bytes=r[3],
             dup_count=0,
             dup_hash_count=0,
@@ -1458,6 +1462,7 @@ def tree_dup_metrics(
                     SPLIT_PART(f.path, '/', {split_idx}) AS segment,
                     f.hash,
                     COUNT(*) AS file_count,
+                    SUM(COALESCE(f.size_bytes, 0)) AS total_bytes,
                     BOOL_OR(
                         SPLIT_PART(f.path, '/', {split_idx + 1}) = ''
                         AND f.inode IS NOT NULL AND f.device IS NOT NULL
@@ -1491,7 +1496,9 @@ def tree_dup_metrics(
                 COUNT(DISTINCT CASE WHEN sh.hash IN (SELECT hash FROM dupes)
                                     THEN sh.hash END) AS dup_hash_count,
                 ch.other_hosts,
-                BOOL_OR(sh.has_hard_link) AS is_hard_linked
+                BOOL_OR(sh.has_hard_link) AS is_hard_linked,
+                SUM(sh.file_count) AS file_count,
+                SUM(sh.total_bytes) AS total_bytes
             FROM seg_hashes sh
             LEFT JOIN cross_hosts ch ON ch.segment = sh.segment
             WHERE sh.segment IS NOT NULL AND sh.segment != ''
@@ -1517,6 +1524,8 @@ def tree_dup_metrics(
                     dup_hash_count=r[2] or 0,
                     other_hosts=r[3],
                     is_hard_linked=bool(r[4]),
+                    file_count=r[5],
+                    total_bytes=r[6],
                 )
                 for r in rows
             }
@@ -1564,6 +1573,7 @@ def tree_dup_metrics(
                 SPLIT_PART(f.path, '/', {split_idx}) AS segment,
                 f.hash,
                 COUNT(*) AS file_count,
+                SUM(COALESCE(f.size_bytes, 0)) AS total_bytes,
                 BOOL_OR(
                     SPLIT_PART(f.path, '/', {split_idx + 1}) = ''
                     AND f.inode IS NOT NULL AND f.device IS NOT NULL
@@ -1594,7 +1604,9 @@ def tree_dup_metrics(
                                  AND COALESCE(hhs.size_bytes, 0) >= ?
                                 THEN sh.hash END) AS dup_hash_count,
             ch.other_hosts,
-            BOOL_OR(sh.has_hard_link) AS is_hard_linked
+            BOOL_OR(sh.has_hard_link) AS is_hard_linked,
+            SUM(sh.file_count) AS file_count,
+            SUM(sh.total_bytes) AS total_bytes
         FROM seg_hashes sh
         LEFT JOIN host_hash_stats hhs ON hhs.host = ? AND hhs.hash = sh.hash
         LEFT JOIN cross_hosts ch ON ch.segment = sh.segment
@@ -1652,6 +1664,7 @@ def tree_dup_metrics(
                 SPLIT_PART(f.path, '/', {split_idx}) AS segment,
                 f.hash,
                 COUNT(*) AS file_count,
+                SUM(COALESCE(f.size_bytes, 0)) AS total_bytes,
                 BOOL_OR(
                     SPLIT_PART(f.path, '/', {split_idx + 1}) = ''
                     AND f.inode IS NOT NULL AND f.device IS NOT NULL
@@ -1678,7 +1691,9 @@ def tree_dup_metrics(
             COUNT(DISTINCT CASE WHEN sh.hash IN (SELECT hash FROM dupes)
                                 THEN sh.hash END) AS dup_hash_count,
             ch.other_hosts,
-            BOOL_OR(sh.has_hard_link) AS is_hard_linked
+            BOOL_OR(sh.has_hard_link) AS is_hard_linked,
+            SUM(sh.file_count) AS file_count,
+            SUM(sh.total_bytes) AS total_bytes
         FROM seg_hashes sh
         LEFT JOIN cross_hosts ch ON ch.segment = sh.segment
         WHERE sh.segment IS NOT NULL AND sh.segment != ''
@@ -1707,6 +1722,8 @@ def tree_dup_metrics(
             dup_hash_count=r[2] or 0,
             other_hosts=r[3],
             is_hard_linked=bool(r[4]),
+            file_count=r[5],
+            total_bytes=r[6],
         )
         for r in rows
     }
@@ -1946,6 +1963,11 @@ def list_hosts():
     drives_by_host: dict[str, list[str]] = {}
     for dr in drive_rows:
         drives_by_host.setdefault(dr[0], []).append(dr[1])
+    # Check which hosts have active scans
+    scanning_rows = db.query(
+        "SELECT DISTINCT host FROM scan_runs WHERE status = 'running'"
+    )
+    scanning_hosts = {r[0] for r in scanning_rows}
     return [
         HostEntry(
             host=r[0],
@@ -1955,6 +1977,7 @@ def list_hosts():
             total_bytes=r[4],
             total_hashed=r[5],
             drives=drives_by_host.get(r[0], []),
+            is_scanning=r[0] in scanning_hosts,
         )
         for r in rows
     ]

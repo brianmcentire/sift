@@ -108,8 +108,8 @@ class TrimResponse(BaseModel):
 class LsEntry(BaseModel):
     segment: str
     entry_type: str  # 'file' | 'dir'
-    file_count: int
-    total_bytes: Optional[int]
+    file_count: Optional[int] = None
+    total_bytes: Optional[int] = None
     dup_count: int
     dup_hash_count: int = 0
     filename: Optional[str] = None
@@ -137,6 +137,8 @@ class TreeDupMetric(BaseModel):
     dup_hash_count: int = 0
     other_hosts: Optional[str] = None
     is_hard_linked: bool = False
+    file_count: Optional[int] = None
+    total_bytes: Optional[int] = None
 
 
 class TreeDupMetricsResponse(BaseModel):
@@ -167,6 +169,7 @@ class HostEntry(BaseModel):
     total_bytes: Optional[int]
     total_hashed: int
     drives: list[str] = []
+    is_scanning: bool = False
 
 
 class StatsOverview(BaseModel):

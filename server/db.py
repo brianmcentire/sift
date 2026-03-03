@@ -298,6 +298,7 @@ def refresh_host_hard_linked_inodes(host: str) -> None:
     """Recompute pre-computed hard-linked inode pairs for a host."""
     with _lock:
         conn = get_connection()
+        conn.execute("BEGIN TRANSACTION")
         conn.execute("DELETE FROM host_hard_linked_inodes WHERE host = ?", [host])
         conn.execute(
             """
@@ -308,6 +309,7 @@ def refresh_host_hard_linked_inodes(host: str) -> None:
             """,
             [host, host],
         )
+        conn.execute("COMMIT")
 
 
 def refresh_host_hash_stats(host: str) -> None:
@@ -315,6 +317,7 @@ def refresh_host_hash_stats(host: str) -> None:
     refresh_host_hard_linked_inodes(host)
     with _lock:
         conn = get_connection()
+        conn.execute("BEGIN TRANSACTION")
         conn.execute("DELETE FROM host_hash_stats WHERE host = ?", [host])
         conn.execute(
             """
@@ -339,12 +342,14 @@ def refresh_host_hash_stats(host: str) -> None:
             """,
             [host, host, host],
         )
+        conn.execute("COMMIT")
 
 
 def refresh_hash_stats() -> None:
     """Recompute global hash aggregates from current files table."""
     with _lock:
         conn = get_connection()
+        conn.execute("BEGIN TRANSACTION")
         conn.execute("DELETE FROM hash_stats")
         conn.execute(
             """
@@ -361,12 +366,14 @@ def refresh_hash_stats() -> None:
             GROUP BY hash
             """
         )
+        conn.execute("COMMIT")
 
 
 def refresh_directory_index() -> None:
     """Recompute directory search index from files table."""
     with _lock:
         conn = get_connection()
+        conn.execute("BEGIN TRANSACTION")
         conn.execute("DELETE FROM directory_index")
         conn.execute(
             """
@@ -379,6 +386,7 @@ def refresh_directory_index() -> None:
             GROUP BY regexp_replace(path, '/[^/]+$', '')
             """
         )
+        conn.execute("COMMIT")
 
 
 def refresh_aggregates_for_host(host: str) -> None:

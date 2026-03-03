@@ -184,6 +184,14 @@ export default function App() {
       .catch(() => {})
   }, [])
 
+  // ── Periodic host refresh (scanning state, stats) ───────────────────────
+  useEffect(() => {
+    const id = setInterval(() => {
+      api.hosts().then(data => setHosts(data)).catch(() => {})
+    }, 60000)
+    return () => clearInterval(id)
+  }, [])
+
   // ── Stats (re-fetched when minDupSize, categoryFilter, or selectedHosts changes)
   useEffect(() => {
     if (!statsEnabled) return
@@ -341,6 +349,8 @@ export default function App() {
               dup_hash_count: m.dup_hash_count ?? 0,
               other_hosts: m.other_hosts ?? null,
               is_hard_linked: Boolean(m.is_hard_linked),
+              ...(m.file_count != null ? { file_count: m.file_count } : {}),
+              ...(m.total_bytes != null ? { total_bytes: m.total_bytes } : {}),
             }
           })
           cacheRef.current.set(key, merged)

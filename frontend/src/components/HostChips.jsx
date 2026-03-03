@@ -41,6 +41,10 @@ export default function HostChips({ hosts, selectedHosts, setSelectedHosts, host
               ${isActive ? colors.active : colors.inactive}
             `}
           >
+            {h.is_scanning && <span className="relative inline-flex items-center mr-1 group/dot">
+              <span className="inline-block w-2 h-2 rounded-full bg-current animate-[scanning-pulse_2s_ease-in-out_infinite]" />
+              <span className="invisible group-hover/dot:visible absolute left-0 bottom-full mb-1.5 px-2 py-0.5 text-[10px] font-normal normal-case tracking-normal text-white bg-slate-800 rounded whitespace-nowrap">Scan in progress</span>
+            </span>}
             {h.host}
           </button>
         )

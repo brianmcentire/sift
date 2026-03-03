@@ -71,7 +71,10 @@ def get_config() -> dict[str, Any]:
 
 
 def get_server_url() -> str:
-    return get_config()["server"]["url"]
+    url = get_config()["server"]["url"]
+    if url and "://" not in url:
+        url = "http://" + url
+    return url
 
 
 def get_agent_config() -> dict[str, Any]:
