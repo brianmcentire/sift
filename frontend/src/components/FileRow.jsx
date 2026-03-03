@@ -144,13 +144,15 @@ export default function FileRow({
     : null
   const copyTargetPath = isDir
     ? (fullDisplayPath || fullPath)
-    : (entry.path_display || fullDisplayPath || fullPath)
+    : filterActive
+      ? (entry.path_display || fullDisplayPath || fullPath)
+      : (fullDisplayPath || entry.path_display || fullPath)
 
   function handleRowClick() {
     if (isDir) {
       onToggleDir(fullPath, { driveContext, isDriveNode: entry.isDriveNode, driveLabel: entry.driveLabel })
     } else {
-      onFileClick?.(entry)
+      onFileClick?.(entry, fullDisplayPath)
     }
   }
 

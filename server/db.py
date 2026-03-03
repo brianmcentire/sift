@@ -229,7 +229,8 @@ def execute(sql: str, params: list[Any] | None = None) -> None:
             conn.execute(sql)
         elapsed = time.monotonic() - start
         if elapsed > 1.0:
-            logger.warning("slow execute (%.1fs): %s", elapsed, sql[:120])
+            param_str = f" params={params!r}" if params else ""
+            logger.warning("slow execute (%.1fs): %s%s", elapsed, sql[:120], param_str)
 
 
 def query(sql: str, params: list[Any] | None = None) -> list[tuple]:
@@ -244,8 +245,9 @@ def query(sql: str, params: list[Any] | None = None) -> list[tuple]:
         rows = result.fetchall()
         elapsed = time.monotonic() - start
         if elapsed > 1.0:
+            param_str = f" params={params!r}" if params else ""
             logger.warning(
-                "slow query (%.1fs, %d rows): %s", elapsed, len(rows), sql[:120]
+                "slow query (%.1fs, %d rows): %s%s", elapsed, len(rows), sql[:120], param_str
             )
         return rows
 

@@ -7,6 +7,7 @@ import os
 import socket
 import threading
 import time
+from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -388,6 +389,7 @@ def _detect_client_host(request: Request) -> str | None:
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     global _last_api_activity
+    received = datetime.now().strftime("%H:%M:%S")
     start = time.monotonic()
     response = await call_next(request)
     elapsed = time.monotonic() - start
@@ -398,10 +400,16 @@ async def log_requests(request: Request, call_next):
     if not path.startswith("/maintenance"):
         _last_api_activity = time.monotonic()
     if elapsed > 1.0:
+        qs = str(request.url.query)
+        full = f"{path}?{qs}" if qs else path
         logger.warning(
-            "%s %s %d — %.1fs", request.method, path, response.status_code, elapsed
+            "(recv %s) %s %s %d — %.1fs", received, request.method, full, response.status_code, elapsed
         )
     elif request.method in ("POST", "PATCH"):
+        logger.info(
+            "%s %s %d — %.3fs", request.method, path, response.status_code, elapsed
+        )
+    else:
         logger.info(
             "%s %s %d — %.3fs", request.method, path, response.status_code, elapsed
         )
@@ -1351,17 +1359,14 @@ def tree_dup_metrics(
     drive: str = Query(""),
     depth: int = Query(1, ge=1),
     min_size: int = Query(0, ge=0),
-    segments: str = Query("", description="Optional comma-separated child segments"),
+    segments: list[str] = Query([], description="Child segments to enrich"),
 ):
     req_start = time.monotonic()
     prefix = path.lower().rstrip("/")
     lower_bound = prefix + "/"
     upper_bound = prefix + "0"
-    seg_cache = (
-        ",".join(sorted([s.strip() for s in segments.split(",") if s.strip()]))
-        if segments
-        else ""
-    )
+    seg_list = [s.strip() for s in segments if s.strip()]
+    seg_cache = "\0".join(sorted(seg_list)) if seg_list else ""
     cache_key = (host, drive, prefix, depth, min_size, seg_cache)
     cached = _cache_get(_tree_dup_metrics_cache, cache_key)
     if cached is not None:
@@ -1435,11 +1440,6 @@ def tree_dup_metrics(
             # Maintenance is disabled; run a bounded lightweight fallback that
             # scopes host-wide duplicate counting to hashes visible under this
             # path/segment set so "Only dups" can still function.
-            seg_list = (
-                [s.strip() for s in segments.split(",") if s.strip()]
-                if segments
-                else []
-            )
             seg_clause = ""
             scoped_seg_clause = ""
             seg_params: list = []
@@ -1552,9 +1552,6 @@ def tree_dup_metrics(
             return response
 
     if has_agg:
-        seg_list = (
-            [s.strip() for s in segments.split(",") if s.strip()] if segments else []
-        )
         seg_clause = ""
         scoped_seg_clause = ""
         seg_params: list = []
@@ -1632,9 +1629,6 @@ def tree_dup_metrics(
         ]
         source = "agg"
     else:
-        seg_list = (
-            [s.strip() for s in segments.split(",") if s.strip()] if segments else []
-        )
         seg_clause = ""
         scoped_seg_clause = ""
         seg_params = []

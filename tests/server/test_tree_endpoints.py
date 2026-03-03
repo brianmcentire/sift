@@ -157,7 +157,7 @@ class TestTreeDupMetrics:
             params={
                 "path": "/users/brian/photos",
                 "host": "mac",
-                "segments": "a.jpg,c.jpg",
+                "segments": ["a.jpg", "c.jpg"],
             },
         )
         assert resp.status_code == 200
@@ -179,7 +179,7 @@ class TestTreeDupMetrics:
         try:
             resp = client.get(
                 "/tree/dup-metrics",
-                params={"path": "/users/brian", "host": "mac", "segments": "a.jpg"},
+                params={"path": "/users/brian", "host": "mac", "segments": ["a.jpg"]},
             )
             assert resp.status_code == 200
             data = resp.json()
@@ -219,7 +219,7 @@ class TestTreeDupMetrics:
                 params={
                     "path": "/users/brian",
                     "host": "mac",
-                    "segments": "a.jpg,b.jpg",
+                    "segments": ["a.jpg", "b.jpg"],
                 },
             )
             assert resp.status_code == 200
@@ -255,7 +255,7 @@ class TestTreeDupMetrics:
         try:
             resp = client.get(
                 "/tree/dup-metrics",
-                params={"path": "/", "host": "mac", "segments": "users"},
+                params={"path": "/", "host": "mac", "segments": ["users"]},
             )
             assert resp.status_code == 200
             data = resp.json()

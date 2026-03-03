@@ -7,7 +7,11 @@ async function get(path, params = {}, options = {}) {
   const url = new URL(BASE + path, window.location.origin)
   Object.entries(params).forEach(([k, v]) => {
     if (v !== undefined && v !== null && v !== '') {
-      url.searchParams.set(k, String(v))
+      if (Array.isArray(v)) {
+        v.forEach(item => url.searchParams.append(k, String(item)))
+      } else {
+        url.searchParams.set(k, String(v))
+      }
     }
   })
   const res = await fetch(url.toString(), { signal: options.signal })
@@ -46,7 +50,7 @@ export const api = {
     drive,
     depth: 1,
     min_size: minSize,
-    segments: Array.isArray(segments) && segments.length > 0 ? segments.join(',') : '',
+    segments: Array.isArray(segments) && segments.length > 0 ? segments : undefined,
   }, options),
   dupHash: (path, host, minSize = 0, drive = '', options = {}) => get('/files/ls/dup-hash', { path, host, drive, min_size: minSize }, options),
   subtreeDups: (host, pathPrefix, minSize = 0, limit = 1000, drive = '') =>

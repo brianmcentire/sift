@@ -484,6 +484,22 @@ export default function App() {
     }
   }, [currentPath, hosts, activeHosts, fetchPath, lsFetchKey])
 
+  // Pre-fetch drive roots so synthetic drive nodes show aggregated subtotals
+  useEffect(() => {
+    if (!hasMultiDriveHost || currentPath !== '/') return
+    const seen = new Set()
+    activeHosts.forEach(h => {
+      if (h.drives && h.drives.length > 1) {
+        h.drives.forEach(d => {
+          if (seen.has(d)) return
+          seen.add(d)
+          const driveHosts = activeHosts.filter(x => x.drives && x.drives.includes(d))
+          fetchPath('/', driveHosts, { enrichDupMetrics: true, drive: d })
+        })
+      }
+    })
+  }, [hasMultiDriveHost, currentPath, activeHosts, fetchPath, lsFetchKey])
+
   // ── Navigate to a path ───────────────────────────────────────────────────
   const navigate = useCallback((path, drive) => {
     setCurrentPath(path)
@@ -581,9 +597,10 @@ export default function App() {
   }, [sortBy])
 
   // ── Handle file click → zoom to all copies ────────────────────────────────
-  const handleFileClick = useCallback(async (entry) => {
+  const handleFileClick = useCallback(async (entry, treeDisplayPath) => {
     if (entry.hash) {
-      const srcPath = (entry.path_display || '').toLowerCase()
+      const displayPath = treeDisplayPath || entry.path_display || ''
+      const srcPath = displayPath.toLowerCase()
       setHighlightedPaths(new Set([srcPath]))
       setPinnedSourcePath(srcPath)
       try {
@@ -593,7 +610,7 @@ export default function App() {
         setPinnedResults([{
           host: entry.presentHosts?.[0] || '',
           drive: '',
-          path_display: entry.path_display || '',
+          path_display: displayPath,
           filename: entry.filename || entry.segment_display || entry.segment,
           ext: '',
           file_category: entry.file_category || '',
@@ -722,6 +739,24 @@ export default function App() {
           isDriveNode: true,
           driveLabel: d,
         }
+        // Aggregate totals from cached children for this drive
+        activeHosts.forEach(h => {
+          if (h.drives && h.drives.includes(d)) {
+            const key = `${h.host}:${d}:/`
+            const entries = cacheRef.current.get(key)
+            if (entries) {
+              for (const e of entries) {
+                if (e.total_bytes != null) driveEntry.total_bytes = (driveEntry.total_bytes || 0) + e.total_bytes
+                if (e.file_count != null) driveEntry.file_count = (driveEntry.file_count || 0) + e.file_count
+                driveEntry.dup_count += e.dup_count || 0
+                driveEntry.dup_hash_count += e.dup_hash_count || 0
+              }
+            }
+          }
+        })
+        driveEntry.presentHosts = activeHosts
+          .filter(h => h.drives && h.drives.includes(d))
+          .map(h => h.host)
         rows.push({ entry: driveEntry, parentPath: '/', fullPath: drivePath, fullDisplayPath: `${d}:`, depth: 0 })
         if (effectiveExpanded.has(drivePath)) {
           // When a drive is expanded, show its root children
