@@ -104,6 +104,39 @@ No further server changes needed for stats.
 
 ---
 
+## Preserve Tree State on Filter/Host Changes
+
+**Context:** Changing `minDupSize` currently collapses the tree (expanded directories reset), which interrupts navigation and forces users back to top-level. Host selection changes can similarly feel disruptive when the user is deep in the tree.
+
+**Desired UX semantics:**
+- `minDupSize` change: preserve expanded tree state; recompute dup metrics/highlighting in place.
+- Host shift-click add/remove: preserve expanded tree state; recompute dup-related values (`dup_count`, `other_hosts`, extra copies).
+- Plain host click (single-host select):
+  - If clicked host was already part of the previous selection: preserve expansion.
+  - If clicked host was not previously selected: reset expansion (intentional context switch).
+
+**Implementation outline (frontend):**
+1. In `frontend/src/App.jsx`, stop clearing `expandedPaths`/`dupAutoExpanded` on `minDupSize` change.
+2. Replace hard cache bust + collapse with targeted refresh for currently visible/open paths (current path + expanded paths), requesting dup metrics for new threshold.
+3. Add host-selection transition logic using previous selection ref:
+   - Detect whether plain-click selected a host already in prior selection.
+   - Apply preserve-vs-reset behavior per UX semantics above.
+4. Keep explicit resets for explicit reset/navigation actions (`Reset`, path root/navigation changes).
+5. Add safety cap/batching when many directories are expanded to avoid request bursts.
+
+**Risks / considerations:**
+- Larger expanded trees can trigger many refresh requests; cap path fanout and batch.
+- Ensure no stale dup metrics race by honoring current threshold/selection refs before applying async responses.
+
+**Validation checklist:**
+- Deep tree remains open when changing `minDupSize`.
+- Shift add/remove host updates duplicate counts/highlighting without collapsing.
+- Plain click to previously unselected host resets expansion.
+- Plain click to already-selected host keeps expansion.
+- `onlyDups`, pinned views, and subtree dup views remain consistent.
+
+---
+
 ## APFS Dataless / Cloud-Stub File Handling
 
 **Context / Why this matters:**
@@ -267,4 +300,3 @@ unlisted FUSE type (safe default: assume local). Critical for Unraid where
 ### Future consideration
 - `--include-network` flag if users explicitly want to scan network mounts
 - Per-mount overrides in `~/.sift.config`
-

@@ -27,6 +27,25 @@ Returns `true` if any host in the comma-separated `otherHosts` string is in the 
 - **searchRows memo**: onlyDups filter, minDupSize filter
 - **FileRow**: `otherHostList` filtered to only include selected hosts, which flows into `isDup` highlight and `allHostsSet` badge display
 
+## Min Dup Size and Dup Highlighting
+
+### Semantic contract
+
+`minDupSize` means "ignore duplicates smaller than this threshold." This applies in two ways:
+
+1. **Filtering**: dups below the threshold are hidden when "Only dups" is active, and in pinned/search views where all results are inherently dups.
+2. **Visual highlight**: files below the threshold should NOT get amber/orange dup highlighting in the tree view, even in "All files" mode. If the user says "I don't care about dups below 1K," those files should look like normal (non-dup) files.
+
+### Pinned file copies view
+
+When the user clicks a file to see its copies (`/files?hash=X`), every result shares the same hash — they are all dups by definition. However, `fileEntryToRow` sets `dup_count: 0` on each row (it doesn't know the count). The minDupSize filter's `if (!isDup) return true` short-circuit was incorrectly keeping all rows visible.
+
+Fix: in pinned/search mode, recognize that all results are inherently dups and apply the size filter unconditionally (no `isDup` gate needed).
+
+### FileRow amber highlight
+
+`FileRow` computes `isDup` from `dup_count` and `otherHostList` but has no awareness of `minDupSize`. Fix: pass `minDupSize` through and suppress `isDup` when the file is below the threshold.
+
 ### What stays unchanged
 
 - Server endpoints (no API changes)
