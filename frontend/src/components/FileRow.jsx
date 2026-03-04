@@ -63,7 +63,7 @@ const CELL_RENDERERS = {
                 ? e => { e.stopPropagation(); onDupHashClick(fullPath, entry) }
                 : undefined}
             >
-              {dirDupCount} uniq dup hash{dirDupCount !== 1 ? 'es' : ''}
+              {dirDupCount} uniq dup set{dirDupCount !== 1 ? 's' : ''}
             </span>
             {onDupSubtreeClick && (
               <span

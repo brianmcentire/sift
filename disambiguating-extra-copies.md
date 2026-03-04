@@ -20,10 +20,10 @@ We separate the purpose of directories (navigation) from files (redundancy).
 A directory is visible if it contains **at least one file that is a member of a duplicate set** (under current host/size filters).
 
 - **Rule:** `(dup_count > 0) OR (cross_host_match AND selected_hosts_match)`
-- **Key change:** Do NOT use `extraCopies` (intra-subtree redundancy) for visibility. A directory with `1 unique dup hash` but `0 extra copies` (e.g. PMS folder with one file duplicated elsewhere) MUST be visible.
+- **Key change:** Do NOT use `extraCopies` (intra-subtree redundancy) for visibility. A directory with `1 unique dup set` but `0 extra copies` (e.g. PMS folder with one file duplicated elsewhere) MUST be visible.
 
 ### Label (Hash Column)
-- **Display:** `X uniq dup hashes`
+- **Display:** `X uniq dup sets`
 - **Source:** `dup_hash_count` (already returned by `/tree/dup-metrics`)
 - **Meaning:** "This subtree contains files belonging to X distinct duplicate sets."
 - **Why:** Stable indicator of duplicate content presence, regardless of whether the redundancy is internal to this folder or external.
@@ -49,7 +49,7 @@ A file is visible if it is a member of a duplicate set.
 ### Frontend (`frontend/src/components/FileRow.jsx`)
 - Change directory hash cell renderer:
   - **Old:** `extraCopies` (derived) + label "extra copies"
-  - **New:** `entry.dup_hash_count` + label "uniq dup hashes"
+  - **New:** `entry.dup_hash_count` + label "uniq dup sets"
 - Keep file hash cell renderer as-is ("extra copies").
 
 ### Frontend (`frontend/src/App.jsx`)
@@ -66,4 +66,4 @@ A file is visible if it is a member of a duplicate set.
 *Reason:* Too heavy to compute on the fly; adds backend complexity for marginal UX gain. The distinction between "uniq dup hashes" (dirs) and "extra copies" (files) solves the user confusion without new DB queries.
 
 ### [Dismissed] "Extra Copies" on Directories
-*Reason:* Confusing. Users interpreted "0 extra copies" as "no duplicates here," hiding valid navigation paths like the PMS example. Replaced by "uniq dup hashes."
+*Reason:* Confusing. Users interpreted "0 extra copies" as "no duplicates here," hiding valid navigation paths like the PMS example. Replaced by "uniq dup sets."
