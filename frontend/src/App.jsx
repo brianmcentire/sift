@@ -852,6 +852,20 @@ export default function App() {
   const searchRows = useMemo(() => {
     if (!activeResults) return null
     const converted = activeResults.map(fe => fileEntryToRow(fe))
+    const isPinnedCopiesMode = pinnedResults !== null && !subtreeDupPath && !!pinnedSourcePath
+
+    if (isPinnedCopiesMode) {
+      const sourceRow = converted.find(r => (r.entry.path_display || '').toLowerCase() === pinnedSourcePath)
+      const sourceBelowMinDupSize =
+        sourceRow && minDupSize > 0 && (sourceRow.entry.size_bytes || 0) < minDupSize
+
+      // If the clicked file is below min dup size, keep only that file in the copies view.
+      if (sourceBelowMinDupSize) return sourceRow ? [sourceRow] : []
+
+      // In pinned copies view above threshold, all rows share the same hash and are duplicates.
+      converted.forEach(r => { r.entry.dup_count = 1 })
+    }
+
     // In subtree dup mode, mark all rows as dups so "only dups" filter doesn't hide them
     if (subtreeDupPath) {
       converted.forEach(r => { r.entry.dup_count = 1 })
@@ -1181,6 +1195,7 @@ export default function App() {
           rows={rows}
           hostColorMap={hostColorMap}
           selectedHosts={selectedHosts}
+          minDupSize={minDupSize}
           visibleColumns={visibleColumns}
           columnOrder={columnOrder}
           sortBy={sortBy}

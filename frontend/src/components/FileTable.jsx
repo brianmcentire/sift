@@ -23,6 +23,7 @@ export default function FileTable({
   rows,
   hostColorMap,
   selectedHosts,
+  minDupSize,
   visibleColumns,
   columnOrder,
   sortBy,
@@ -202,6 +203,7 @@ export default function FileTable({
                   matchedDirPaths={matchedDirPaths}
                   hostColorMap={hostColorMap}
                   selectedHosts={selectedHosts}
+                  minDupSize={minDupSize}
                   orderedCols={orderedCols}
                   filterActive={filterActive}
                 />
