@@ -8,6 +8,7 @@ of data content.  A failing invariant means there is a bug in the server.
 Run with:
     SIFT_TEST_SERVER=http://your-sift-server:8765 pytest -m integration -v
 """
+
 import pytest
 from tests.integration.conftest import live_client, get
 
@@ -15,9 +16,70 @@ from tests.integration.conftest import live_client, get
 pytestmark = pytest.mark.integration
 
 
+def _tree_ls_like_entries(live_client, path, host, drive="", depth=1):
+    """Build ls-like entries using tree v2 endpoints."""
+    items = []
+    cursor = None
+    limit = 500
+    while True:
+        resp = get(
+            live_client,
+            "/tree/children",
+            path=path,
+            host=host,
+            drive=drive,
+            depth=depth,
+            limit=limit,
+            cursor=cursor,
+        )
+        page = resp.get("items", [])
+        items.extend(page)
+        if not resp.get("has_more"):
+            break
+        cursor = resp.get("next_cursor")
+        if cursor is None:
+            break
+
+    if not items:
+        return []
+
+    segments = [e["segment"] for e in items if e.get("segment")]
+    metrics = {}
+    chunk = 200
+    for i in range(0, len(segments), chunk):
+        m = get(
+            live_client,
+            "/tree/dup-metrics",
+            path=path,
+            host=host,
+            drive=drive,
+            depth=depth,
+            segments=segments[i : i + chunk],
+        )
+        metrics.update(m.get("metrics", {}))
+
+    merged = []
+    for entry in items:
+        seg = entry.get("segment")
+        metric = metrics.get(seg, {})
+        merged.append(
+            {
+                **entry,
+                "dup_count": metric.get("dup_count", 0),
+                "dup_hash_count": metric.get("dup_hash_count", 0),
+                "other_hosts": metric.get("other_hosts"),
+                "is_hard_linked": metric.get("is_hard_linked", False),
+                "file_count": metric.get("file_count", entry.get("file_count") or 0),
+                "total_bytes": metric.get("total_bytes", entry.get("total_bytes") or 0),
+            }
+        )
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # /hosts
 # ---------------------------------------------------------------------------
+
 
 class TestLiveHosts:
     def test_returns_at_least_one_host(self, live_client):
@@ -39,18 +101,27 @@ class TestLiveHosts:
     def test_total_bytes_non_negative(self, live_client):
         for h in get(live_client, "/hosts"):
             if h["total_bytes"] is not None:
-                assert h["total_bytes"] >= 0, f"Host {h['host']} has negative total_bytes"
+                assert h["total_bytes"] >= 0, (
+                    f"Host {h['host']} has negative total_bytes"
+                )
 
 
 # ---------------------------------------------------------------------------
 # /stats/overview
 # ---------------------------------------------------------------------------
 
+
 class TestLiveStats:
     def test_overview_returns_expected_fields(self, live_client):
         stats = get(live_client, "/stats/overview")
-        for field in ("total_files", "total_hosts", "unique_hashes",
-                      "duplicate_sets", "wasted_bytes", "total_bytes"):
+        for field in (
+            "total_files",
+            "total_hosts",
+            "unique_hashes",
+            "duplicate_sets",
+            "wasted_bytes",
+            "total_bytes",
+        ):
             assert field in stats, f"Missing field: {field}"
 
     def test_total_files_positive(self, live_client):
@@ -77,20 +148,21 @@ class TestLiveStats:
 
 
 # ---------------------------------------------------------------------------
-# /files/ls — per-host, starting from root
+# tree v2 listing (children + dup-metrics) — per-host, starting from root
 # ---------------------------------------------------------------------------
+
 
 class TestLiveLs:
     def test_root_ls_returns_entries_for_each_host(self, live_client):
         hosts = get(live_client, "/hosts")
         for h in hosts:
-            entries = get(live_client, "/files/ls", path="/", host=h["host"])
+            entries = _tree_ls_like_entries(live_client, "/", h["host"])
             assert len(entries) > 0, f"Root ls for host {h['host']} returned nothing"
 
     def test_entry_types_are_valid(self, live_client):
         hosts = get(live_client, "/hosts")
         for h in hosts[:2]:  # limit to first 2 hosts to keep runtime short
-            entries = get(live_client, "/files/ls", path="/", host=h["host"])
+            entries = _tree_ls_like_entries(live_client, "/", h["host"])
             for e in entries:
                 assert e["entry_type"] in ("file", "dir"), (
                     f"Unknown entry_type '{e['entry_type']}' for host {h['host']}"
@@ -103,7 +175,7 @@ class TestLiveLs:
         """
         hosts = get(live_client, "/hosts")
         for h in hosts[:2]:
-            entries = get(live_client, "/files/ls", path="/", host=h["host"])
+            entries = _tree_ls_like_entries(live_client, "/", h["host"])
             for e in entries:
                 assert e["dup_count"] <= e["file_count"], (
                     f"Host {h['host']} segment '{e['segment']}': "
@@ -117,7 +189,7 @@ class TestLiveLs:
         """
         hosts = get(live_client, "/hosts")
         for h in hosts[:2]:
-            entries = get(live_client, "/files/ls", path="/", host=h["host"])
+            entries = _tree_ls_like_entries(live_client, "/", h["host"])
             for e in entries:
                 assert e["dup_hash_count"] <= e["dup_count"], (
                     f"Host {h['host']} segment '{e['segment']}': "
@@ -132,7 +204,7 @@ class TestLiveLs:
         """
         hosts = get(live_client, "/hosts")
         for h in hosts:
-            entries = get(live_client, "/files/ls", path="/", host=h["host"])
+            entries = _tree_ls_like_entries(live_client, "/", h["host"])
             for e in entries:
                 extra = e["dup_count"] - e["dup_hash_count"]
                 assert extra >= 0, (
@@ -147,7 +219,7 @@ class TestLiveLs:
         """
         hosts = get(live_client, "/hosts")
         host = hosts[0]["host"]
-        entries = get(live_client, "/files/ls", path="/", host=host)
+        entries = _tree_ls_like_entries(live_client, "/", host)
         for e in entries:
             if e["entry_type"] == "file":
                 assert e["dup_count"] in (0, 1), (
@@ -157,7 +229,7 @@ class TestLiveLs:
     def test_total_bytes_non_negative(self, live_client):
         hosts = get(live_client, "/hosts")
         for h in hosts[:2]:
-            entries = get(live_client, "/files/ls", path="/", host=h["host"])
+            entries = _tree_ls_like_entries(live_client, "/", h["host"])
             for e in entries:
                 if e["total_bytes"] is not None:
                     assert e["total_bytes"] >= 0
@@ -172,8 +244,10 @@ class TestLiveLs:
         """
         hosts = get(live_client, "/hosts")
         host = hosts[0]["host"]
-        entries = get(live_client, "/files/ls", path="/", host=host)
-        file_entries = [e for e in entries if e["entry_type"] == "file" and e.get("hash")]
+        entries = _tree_ls_like_entries(live_client, "/", host)
+        file_entries = [
+            e for e in entries if e["entry_type"] == "file" and e.get("hash")
+        ]
 
         for e in file_entries[:5]:  # spot-check first 5 file entries
             if e["dup_count"] == 1:
@@ -189,6 +263,7 @@ class TestLiveLs:
 # /files (search)
 # ---------------------------------------------------------------------------
 
+
 class TestLiveFiles:
     def test_hash_search_returns_results(self, live_client):
         """Find a known-duplicate hash and confirm /files?hash= works."""
@@ -202,8 +277,15 @@ class TestLiveFiles:
     def test_all_results_have_required_fields(self, live_client):
         results = get(live_client, "/files", limit=20)
         for r in results:
-            for field in ("host", "drive", "path_display", "filename",
-                          "ext", "file_category", "size_bytes"):
+            for field in (
+                "host",
+                "drive",
+                "path_display",
+                "filename",
+                "ext",
+                "file_category",
+                "size_bytes",
+            ):
                 assert field in r, f"Missing field '{field}' in /files result"
 
     def test_size_bytes_non_negative(self, live_client):
@@ -224,6 +306,7 @@ class TestLiveFiles:
 # ---------------------------------------------------------------------------
 # /stats/duplicates
 # ---------------------------------------------------------------------------
+
 
 class TestLiveDuplicates:
     def test_duplicate_sets_have_copy_count_gte_2(self, live_client):
@@ -260,6 +343,7 @@ class TestLiveDuplicates:
 # /files/ls/dup-hash — "1 extra copy" click feature
 # ---------------------------------------------------------------------------
 
+
 def _find_one_extra_copy_dir(live_client, path, host, max_depth=4, _visited=None):
     """Walk the tree to find the first directory where dup_count - dup_hash_count == 1."""
     if _visited is None:
@@ -268,7 +352,7 @@ def _find_one_extra_copy_dir(live_client, path, host, max_depth=4, _visited=None
         return None
     _visited.add(path)
     try:
-        entries = get(live_client, "/files/ls", path=path, host=host)
+        entries = _tree_ls_like_entries(live_client, path, host)
     except Exception:
         return None
     for e in entries:
@@ -278,7 +362,9 @@ def _find_one_extra_copy_dir(live_client, path, host, max_depth=4, _visited=None
         if (e["dup_count"] - e["dup_hash_count"]) == 1:
             return full
         if max_depth > 0 and e["dup_count"] > 0:
-            result = _find_one_extra_copy_dir(live_client, full, host, max_depth - 1, _visited)
+            result = _find_one_extra_copy_dir(
+                live_client, full, host, max_depth - 1, _visited
+            )
             if result:
                 return result
     return None
@@ -313,7 +399,6 @@ class TestLiveDupHash:
         )
 
     def test_dup_hash_404_for_no_dup_dir(self, live_client):
-
         """
         A directory with no same-host duplicates should return 404,
         not a spurious hash.
@@ -321,13 +406,15 @@ class TestLiveDupHash:
         hosts = get(live_client, "/hosts")
         host = hosts[0]["host"]
 
-        entries = get(live_client, "/files/ls", path="/", host=host)
+        entries = _tree_ls_like_entries(live_client, "/", host)
         no_dup = next(
             (e for e in entries if e["entry_type"] == "dir" and e["dup_count"] == 0),
             None,
         )
         if no_dup is None:
-            pytest.skip("Every root-level directory has duplicates — cannot test 404 case")
+            pytest.skip(
+                "Every root-level directory has duplicates — cannot test 404 case"
+            )
 
         path = "/" + no_dup["segment"]
         r = live_client.get(
@@ -343,6 +430,7 @@ class TestLiveDupHash:
 # ---------------------------------------------------------------------------
 # /directories — directory search
 # ---------------------------------------------------------------------------
+
 
 class TestLiveDirectories:
     def test_all_results_contain_query(self, live_client):
@@ -402,6 +490,7 @@ class TestLiveDirectories:
         assert not missing, (
             "These result paths have matching ancestors not in the results "
             "(the UI will expand the ancestor without highlighting it):\n"
-            + "\n".join(f"  {child!r} is missing ancestor {anc!r}"
-                        for child, anc in missing[:5])
+            + "\n".join(
+                f"  {child!r} is missing ancestor {anc!r}" for child, anc in missing[:5]
+            )
         )

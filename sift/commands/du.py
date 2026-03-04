@@ -1,4 +1,5 @@
 """sift du — disk usage summary."""
+
 from __future__ import annotations
 
 import os
@@ -14,17 +15,94 @@ from sift.normalize import local_hostname, normalize_query_path
 def _human_size(n: Optional[int]) -> str:
     if n is None:
         return "0"
+    val = float(n)
     for unit in ("B", "K", "M", "G", "T", "P"):
-        if abs(n) < 1024:
-            return f"{n:.1f}{unit}" if unit != "B" else f"{n}B"
-        n /= 1024
-    return f"{n:.1f}P"
+        if abs(val) < 1024:
+            return f"{val:.1f}{unit}" if unit != "B" else f"{int(val)}B"
+        val /= 1024
+    return f"{val:.1f}P"
+
+
+def _fetch_tree_entries(
+    path: str,
+    host: str,
+    drive: str = "",
+    min_size: int = 0,
+    depth: int = 1,
+) -> list[dict]:
+    """Fetch tree children + dup metrics and merge into ls-like entries."""
+    all_items: list[dict] = []
+    cursor = None
+    page_size = 2000
+    while True:
+        params = {"limit": page_size}
+        if cursor is not None:
+            params["cursor"] = cursor
+        resp = client.get(
+            "/tree/children",
+            params={
+                "path": path,
+                "host": host,
+                "drive": drive,
+                "depth": depth,
+                **params,
+            },
+        )
+        items = resp.get("items") or []
+        all_items.extend(items)
+        if not resp.get("has_more"):
+            break
+        cursor = resp.get("next_cursor")
+        if cursor is None:
+            break
+
+    if not all_items:
+        return []
+
+    segments = [e.get("segment") for e in all_items if e.get("segment")]
+    metrics: dict = {}
+    chunk_size = 200
+    for i in range(0, len(segments), chunk_size):
+        seg_chunk = segments[i : i + chunk_size]
+        metrics_resp = client.get(
+            "/tree/dup-metrics",
+            params={
+                "path": path,
+                "host": host,
+                "drive": drive,
+                "depth": depth,
+                "min_size": min_size,
+                "segments": seg_chunk,
+            },
+        )
+        metrics.update((metrics_resp or {}).get("metrics") or {})
+    merged: list[dict] = []
+    for entry in all_items:
+        seg = entry.get("segment")
+        m = metrics.get(seg, {})
+        merged.append(
+            {
+                **entry,
+                "dup_count": m.get("dup_count", 0),
+                "dup_hash_count": m.get("dup_hash_count", 0),
+                "other_hosts": m.get("other_hosts"),
+                "is_hard_linked": bool(m.get("is_hard_linked", False)),
+                "file_count": m.get("file_count", entry.get("file_count")),
+                "total_bytes": m.get("total_bytes", entry.get("total_bytes")),
+            }
+        )
+    return merged
 
 
 def cmd_du(args) -> None:
     print_server_info()
     cli_cfg = get_cli_config()
-    host = getattr(args, "host", None) or os.environ.get("SIFT_HOST") or cli_cfg.get("host") or local_hostname()
+    host = (
+        getattr(args, "host", None)
+        or os.environ.get("SIFT_HOST")
+        or cli_cfg.get("host")
+        or local_hostname()
+    )
     all_hosts = getattr(args, "all_hosts", False)
 
     raw_path = getattr(args, "path", "/") or "/"
@@ -41,7 +119,9 @@ def cmd_du(args) -> None:
         depth = 0
 
     if by_category:
-        _du_by_category(None if all_hosts else host, path_prefix, human, duplicates_only)
+        _du_by_category(
+            None if all_hosts else host, path_prefix, human, duplicates_only
+        )
         return
 
     if all_hosts:
@@ -58,11 +138,14 @@ def cmd_du(args) -> None:
     entries = []
     for h in host_names:
         try:
-            entries.extend(client.get("/files/ls", params={
-                "path": path_prefix,
-                "host": h,
-                "depth": max(depth, 1),
-            }))
+            entries.extend(
+                _fetch_tree_entries(
+                    path=path_prefix,
+                    host=h,
+                    min_size=0,
+                    depth=max(depth, 1),
+                )
+            )
         except Exception as e:
             print(f"sift: error querying {h}: {e}", file=sys.stderr)
 
@@ -97,7 +180,9 @@ def cmd_du(args) -> None:
     print(f"{total_str}\ttotal")
 
 
-def _du_by_category(host: Optional[str], path_prefix: str, human: bool, duplicates_only: bool) -> None:
+def _du_by_category(
+    host: Optional[str], path_prefix: str, human: bool, duplicates_only: bool
+) -> None:
     """Show disk usage broken down by file category."""
     params: dict = {
         "path_prefix": path_prefix,

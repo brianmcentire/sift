@@ -165,9 +165,7 @@ def _bootstrap_aggregates() -> None:
             db.refresh_host_hash_stats(host)
             db.set_aggregate_meta(f"host_hash_stats:{host}", "fresh")
             elapsed = time.monotonic() - start
-            logger.info(
-                "Bootstrapped host_hash_stats for %s in %.1fs", host, elapsed
-            )
+            logger.info("Bootstrapped host_hash_stats for %s in %.1fs", host, elapsed)
 
         logger.info("Bootstrapping global hash_stats ...")
         start = time.monotonic()
@@ -179,9 +177,7 @@ def _bootstrap_aggregates() -> None:
         start = time.monotonic()
         db.refresh_directory_index()
         db.set_aggregate_meta("directory_index", "fresh")
-        logger.info(
-            "Bootstrapped directory_index in %.1fs", time.monotonic() - start
-        )
+        logger.info("Bootstrapped directory_index in %.1fs", time.monotonic() - start)
 
         _invalidate_query_caches()
         logger.info("Aggregate bootstrap complete.")
@@ -197,7 +193,9 @@ def _cleanup_stale_scan_runs():
     """
     stale = db.query("SELECT id, host FROM scan_runs WHERE status = 'running'")
     if stale:
-        db.execute("UPDATE scan_runs SET status = 'interrupted' WHERE status = 'running'")
+        db.execute(
+            "UPDATE scan_runs SET status = 'interrupted' WHERE status = 'running'"
+        )
         hosts = {r[1] for r in stale}
         logger.info(
             "Marked %d stale running scan_run(s) as interrupted (hosts: %s)",
@@ -403,7 +401,12 @@ async def log_requests(request: Request, call_next):
         qs = str(request.url.query)
         full = f"{path}?{qs}" if qs else path
         logger.warning(
-            "(recv %s) %s %s %d — %.1fs", received, request.method, full, response.status_code, elapsed
+            "(recv %s) %s %s %d — %.1fs",
+            received,
+            request.method,
+            full,
+            response.status_code,
+            elapsed,
         )
     elif request.method in ("POST", "PATCH"):
         logger.info(
@@ -854,7 +857,10 @@ def get_cache_stream(host: str, root: str, drive: str = Query("")):
 
 @app.get("/files/ls/dup-hash")
 def ls_dup_hash(
-    path: str = Query("/"), host: str = Query(""), drive: str = Query(""), min_size: int = Query(0, ge=0)
+    path: str = Query("/"),
+    host: str = Query(""),
+    drive: str = Query(""),
+    min_size: int = Query(0, ge=0),
 ):
     """Return the first duplicated hash found within the given subtree for a host.
     Uses the same hard-link exclusion logic as the dupes CTE in ls_files so the
@@ -1818,19 +1824,60 @@ def list_files(
         conditions.append("LOWER(f.filename) LIKE LOWER(?) ESCAPE '\\'")
         params.append(sql_pat)
 
-    if has_duplicates is True:
-        dup_clause = (
-            " AND f.hash IN (SELECT hash FROM files WHERE hash IS NOT NULL "
-            "GROUP BY hash HAVING COUNT(*) > 1)"
-        )
-    elif has_duplicates is False:
-        dup_clause = (
-            " AND (f.hash IS NULL OR f.hash NOT IN "
-            "(SELECT hash FROM files WHERE hash IS NOT NULL "
-            "GROUP BY hash HAVING COUNT(*) > 1))"
-        )
-    else:
-        dup_clause = ""
+    dup_clause = ""
+    dup_params: list = []
+    if has_duplicates is not None:
+        # Prefer aggregate-backed duplicate filtering when available to avoid
+        # expensive full-table GROUP BY scans in interactive find/search paths.
+        if host:
+            host_agg = db.query_one(
+                "SELECT 1 FROM host_hash_stats WHERE host = ? LIMIT 1",
+                [host],
+            )
+            if host_agg is not None:
+                if has_duplicates is True:
+                    dup_clause = (
+                        " AND f.hash IN ("
+                        "SELECT hash FROM host_hash_stats "
+                        "WHERE host = ? AND copy_count_effective > 1"
+                        ")"
+                    )
+                    dup_params = [host]
+                else:
+                    dup_clause = (
+                        " AND (f.hash IS NULL OR f.hash NOT IN ("
+                        "SELECT hash FROM host_hash_stats "
+                        "WHERE host = ? AND copy_count_effective > 1"
+                        "))"
+                    )
+                    dup_params = [host]
+        if not dup_clause:
+            global_agg = db.query_one("SELECT 1 FROM hash_stats LIMIT 1")
+            if global_agg is not None:
+                if has_duplicates is True:
+                    dup_clause = (
+                        " AND f.hash IN ("
+                        "SELECT hash FROM hash_stats WHERE copy_count > 1"
+                        ")"
+                    )
+                else:
+                    dup_clause = (
+                        " AND (f.hash IS NULL OR f.hash NOT IN ("
+                        "SELECT hash FROM hash_stats WHERE copy_count > 1"
+                        "))"
+                    )
+        if not dup_clause:
+            if has_duplicates is True:
+                dup_clause = (
+                    " AND f.hash IN (SELECT hash FROM files WHERE hash IS NOT NULL "
+                    "GROUP BY hash HAVING COUNT(*) > 1)"
+                )
+            else:
+                dup_clause = (
+                    " AND (f.hash IS NULL OR f.hash NOT IN "
+                    "(SELECT hash FROM files WHERE hash IS NOT NULL "
+                    "GROUP BY hash HAVING COUNT(*) > 1))"
+                )
 
     where = " AND ".join(conditions)
 
@@ -1859,6 +1906,7 @@ def list_files(
         ORDER BY f.path_display
         LIMIT ?
         """
+    params.extend(dup_params)
     params.append(limit)
 
     rows = db.query(sql, params)

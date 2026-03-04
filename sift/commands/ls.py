@@ -1,4 +1,5 @@
 """sift ls — list files/directories in the inventory."""
+
 from __future__ import annotations
 
 import os
@@ -15,13 +16,14 @@ from sift.normalize import local_hostname, normalize_query_path
 def _human_size(n: Optional[int]) -> str:
     if n is None:
         return "  0B"
+    val = float(n)
     for unit in ("B", "K", "M", "G", "T", "P"):
-        if abs(n) < 1024:
+        if abs(val) < 1024:
             if unit == "B":
-                return f"{n:4d}B"
-            return f"{n:5.1f}{unit}"
-        n /= 1024
-    return f"{n:5.1f}P"
+                return f"{int(val):4d}B"
+            return f"{val:5.1f}{unit}"
+        val /= 1024
+    return f"{val:5.1f}P"
 
 
 def _fmt_size(n: Optional[int], human: bool) -> str:
@@ -43,12 +45,88 @@ def _fmt_hash(hash_val: Optional[str], full: bool = False) -> str:
     return hash_val if full else hash_val[:8]
 
 
+def _fetch_tree_entries(
+    path: str,
+    host: str,
+    drive: str = "",
+    min_size: int = 0,
+    depth: int = 1,
+) -> list[dict]:
+    """Fetch tree children + dup metrics and merge into ls-like entries."""
+    all_items: list[dict] = []
+    cursor = None
+    page_size = 2000
+    while True:
+        params = {"limit": page_size}
+        if cursor is not None:
+            params["cursor"] = cursor
+        resp = client.get(
+            "/tree/children",
+            params={
+                "path": path,
+                "host": host,
+                "drive": drive,
+                "depth": depth,
+                **params,
+            },
+        )
+        items = resp.get("items") or []
+        all_items.extend(items)
+        if not resp.get("has_more"):
+            break
+        cursor = resp.get("next_cursor")
+        if cursor is None:
+            break
+
+    if not all_items:
+        return []
+
+    segments = [e.get("segment") for e in all_items if e.get("segment")]
+    metrics: dict = {}
+    chunk_size = 200
+    for i in range(0, len(segments), chunk_size):
+        seg_chunk = segments[i : i + chunk_size]
+        metrics_resp = client.get(
+            "/tree/dup-metrics",
+            params={
+                "path": path,
+                "host": host,
+                "drive": drive,
+                "depth": depth,
+                "min_size": min_size,
+                "segments": seg_chunk,
+            },
+        )
+        metrics.update((metrics_resp or {}).get("metrics") or {})
+    merged: list[dict] = []
+    for entry in all_items:
+        seg = entry.get("segment")
+        m = metrics.get(seg, {})
+        merged.append(
+            {
+                **entry,
+                "dup_count": m.get("dup_count", 0),
+                "dup_hash_count": m.get("dup_hash_count", 0),
+                "other_hosts": m.get("other_hosts"),
+                "is_hard_linked": bool(m.get("is_hard_linked", False)),
+                "file_count": m.get("file_count", entry.get("file_count")),
+                "total_bytes": m.get("total_bytes", entry.get("total_bytes")),
+            }
+        )
+    return merged
+
+
 def cmd_ls(args) -> None:
     print_server_info()
     cli_cfg = get_cli_config()
 
     # Resolve host
-    host = getattr(args, "host", None) or os.environ.get("SIFT_HOST") or cli_cfg.get("host") or local_hostname()
+    host = (
+        getattr(args, "host", None)
+        or os.environ.get("SIFT_HOST")
+        or cli_cfg.get("host")
+        or local_hostname()
+    )
     all_hosts = getattr(args, "all_hosts", False)
 
     # Normalize path
@@ -65,6 +143,7 @@ def cmd_ls(args) -> None:
     one_per_line = getattr(args, "one_per_line", False)
     recursive = getattr(args, "recursive", False)
     duplicates_only = getattr(args, "duplicates", False)
+    min_size = 0
 
     # Determine depth
     depth = 0 if recursive else 1
@@ -84,7 +163,12 @@ def cmd_ls(args) -> None:
     all_entries = []
     for h in host_names:
         try:
-            entries = client.get("/files/ls", params={"path": path, "host": h, "depth": max(depth, 1)})
+            entries = _fetch_tree_entries(
+                path=path,
+                host=h,
+                min_size=min_size,
+                depth=max(depth, 1),
+            )
         except Exception as e:
             print(f"sift: error querying {h}: {e}", file=sys.stderr)
             continue
@@ -101,18 +185,27 @@ def cmd_ls(args) -> None:
             parent = parent or "/"
             for h in host_names:
                 try:
-                    entries = client.get("/files/ls", params={"path": parent, "host": h, "depth": 1})
+                    entries = _fetch_tree_entries(
+                        path=parent,
+                        host=h,
+                        min_size=min_size,
+                        depth=1,
+                    )
                 except Exception:
                     continue
                 for entry in entries:
-                    if (entry.get("entry_type") == "file"
-                            and entry.get("segment", "").lower() == name.lower()):
+                    if (
+                        entry.get("entry_type") == "file"
+                        and entry.get("segment", "").lower() == name.lower()
+                    ):
                         entry["_host"] = h
                         all_entries.append(entry)
                         file_lookup = True
 
     if duplicates_only:
-        all_entries = [e for e in all_entries if e.get("dup_count", 0) > 0 or e.get("other_hosts")]
+        all_entries = [
+            e for e in all_entries if e.get("dup_count", 0) > 0 or e.get("other_hosts")
+        ]
 
     # Sort
     if sort_size:
@@ -132,12 +225,20 @@ def cmd_ls(args) -> None:
 
     if long_fmt and not file_lookup:
         if total_dups:
-            print(f"total {_fmt_size(total_bytes, human)}  ({total_dups} duplicates on other hosts)")
+            print(
+                f"total {_fmt_size(total_bytes, human)}  ({total_dups} duplicates on other hosts)"
+            )
         else:
             print(f"total {_fmt_size(total_bytes, human)}")
 
     for entry in all_entries:
-        _print_entry(entry, long_fmt=long_fmt, human=human, one_per_line=one_per_line, full_hash=full_hash)
+        _print_entry(
+            entry,
+            long_fmt=long_fmt,
+            human=human,
+            one_per_line=one_per_line,
+            full_hash=full_hash,
+        )
 
     if recursive and all_entries:
         # Recurse into directories
@@ -145,24 +246,34 @@ def cmd_ls(args) -> None:
         for d in dirs:
             child_path = path.rstrip("/") + "/" + d["segment"]
             print(f"\n{child_path}:")
-            child_args = type("A", (), {
-                "path": child_path,
-                "host": host,
-                "all_hosts": all_hosts,
-                "long": long_fmt,
-                "human": human,
-                "sort_size": sort_size,
-                "sort_time": sort_time,
-                "reverse": reverse,
-                "one_per_line": one_per_line,
-                "recursive": recursive,
-                "duplicates": duplicates_only,
-                "full_hash": full_hash,
-            })()
+            child_args = type(
+                "A",
+                (),
+                {
+                    "path": child_path,
+                    "host": host,
+                    "all_hosts": all_hosts,
+                    "long": long_fmt,
+                    "human": human,
+                    "sort_size": sort_size,
+                    "sort_time": sort_time,
+                    "reverse": reverse,
+                    "one_per_line": one_per_line,
+                    "recursive": recursive,
+                    "duplicates": duplicates_only,
+                    "full_hash": full_hash,
+                },
+            )()
             cmd_ls(child_args)
 
 
-def _print_entry(entry: dict, long_fmt: bool, human: bool, one_per_line: bool, full_hash: bool = False) -> None:
+def _print_entry(
+    entry: dict,
+    long_fmt: bool,
+    human: bool,
+    one_per_line: bool,
+    full_hash: bool = False,
+) -> None:
     segment = entry.get("segment", "")
     entry_type = entry.get("entry_type", "file")
     other_hosts = entry.get("other_hosts")
@@ -174,7 +285,9 @@ def _print_entry(entry: dict, long_fmt: bool, human: bool, one_per_line: bool, f
         # Short format
         if entry_type == "file":
             path_display = entry.get("path_display") or ""
-            display_name = os.path.basename(path_display) if path_display else segment_display
+            display_name = (
+                os.path.basename(path_display) if path_display else segment_display
+            )
             if full_hash:
                 hash_str = _fmt_hash(entry.get("hash"), full=True)
                 print(f"{hash_str}  {display_name}{also}")
