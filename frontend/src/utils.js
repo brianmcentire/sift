@@ -1,5 +1,27 @@
 // ─── Formatting ─────────────────────────────────────────────────────────────
 
+let PERF_ENABLED_CACHE = null
+
+export function isPerfEnabled() {
+  if (PERF_ENABLED_CACHE !== null) return PERF_ENABLED_CACHE
+  try {
+    const flag = window.localStorage?.getItem('sift:perf')
+    PERF_ENABLED_CACHE = window.__SIFT_PERF === true || flag === '1'
+  } catch {
+    PERF_ENABLED_CACHE = false
+  }
+  return PERF_ENABLED_CACHE
+}
+
+export function logPerf(event, fields = {}) {
+  if (!isPerfEnabled()) return
+  const payload = Object.entries(fields)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(' ')
+  // eslint-disable-next-line no-console
+  console.info(`[perf] ${event}${payload ? ` ${payload}` : ''}`)
+}
+
 export function formatBytes(bytes) {
   if (bytes == null) return '—'
   if (bytes === 0) return '0 B'
@@ -38,6 +60,26 @@ export function pathSegments(path) {
   return path.split('/').filter(Boolean)
 }
 
+export function formatClipboardPath(displayPath, drive = '') {
+  let path = displayPath || ''
+  if (drive && !path.startsWith(`${drive}:`)) {
+    path = `${drive}:${path}`
+  }
+
+  if (drive) {
+    const winPath = path.replace(/\//g, '\\')
+    const needsQuoting = /[\s"&|;(){}[\]<>]/.test(winPath)
+    return needsQuoting
+      ? `"${winPath.replace(/"/g, '\\"')}"`
+      : winPath
+  }
+
+  const needsQuoting = /[\s"'\\$`!#&|;(){}[\]*?<>~]/.test(path)
+  return needsQuoting
+    ? "'" + path.replace(/'/g, "'\\''") + "'"
+    : path
+}
+
 // ─── Host color palette ──────────────────────────────────────────────────────
 
 const PALETTE = [
@@ -72,6 +114,14 @@ export function hostColor(index) {
   return PALETTE[index % PALETTE.length]
 }
 
+// ─── Host-aware dup helpers ──────────────────────────────────────────────────
+
+/** True if any host in the comma-separated other_hosts string is in selectedHosts */
+export function hasSelectedOtherHost(otherHosts, selectedHosts) {
+  if (!otherHosts) return false
+  return otherHosts.split(',').some(h => selectedHosts.has(h.trim()))
+}
+
 // ─── Data merging ────────────────────────────────────────────────────────────
 
 /**
@@ -90,8 +140,8 @@ export function mergeEntries(hostDataMap, selectedHosts) {
           segment: entry.segment,
           segment_display: entry.segment_display || entry.segment,
           entry_type: entry.entry_type,
-          file_count: 0,
-          total_bytes: 0,
+          file_count: null,
+          total_bytes: null,
           dup_count: 0,
           presentHosts: [],
           dup_hash_count: 0,
@@ -104,13 +154,15 @@ export function mergeEntries(hostDataMap, selectedHosts) {
           file_category: null,
           path_display: null,
           other_hosts: null,
+          is_hard_linked: false,
         })
       }
 
       const m = bySegment.get(entry.segment)
       m.presentHosts.push(host)
-      m.file_count += entry.file_count || 0
-      m.total_bytes = (m.total_bytes || 0) + (entry.total_bytes || 0)
+      // Preserve null for dirs until dup-metrics enrichment provides real values
+      if (entry.file_count != null) m.file_count = (m.file_count || 0) + entry.file_count
+      if (entry.total_bytes != null) m.total_bytes = (m.total_bytes || 0) + entry.total_bytes
       m.dup_count += entry.dup_count || 0
       m.dup_hash_count += entry.dup_hash_count || 0
 
@@ -124,6 +176,7 @@ export function mergeEntries(hostDataMap, selectedHosts) {
       if (entry.file_category) m.file_category = entry.file_category
       if (entry.path_display) m.path_display = entry.path_display
       if (entry.other_hosts) m.other_hosts = entry.other_hosts
+      if (entry.is_hard_linked) m.is_hard_linked = true
     }
   }
 
@@ -171,7 +224,11 @@ export function sortEntries(entries, sortBy, sortDir) {
  * Convert a FileEntry (from /files API) into a FileTable row object.
  */
 export function fileEntryToRow(fe) {
-  const parts = (fe.path_display || '').split('/')
+  // Prepend drive letter for Windows files in display
+  const displayPath = fe.drive
+    ? `${fe.drive}:${fe.path_display || ''}`
+    : (fe.path_display || '')
+  const parts = displayPath.split('/')
   const parentPath = parts.length > 1 ? parts.slice(0, -1).join('/') || '/' : '/'
   const entry = {
     segment: fe.filename,
@@ -188,10 +245,10 @@ export function fileEntryToRow(fe) {
     mtime: fe.mtime,
     last_seen_at: fe.last_seen_at,
     file_category: fe.file_category,
-    path_display: fe.path_display,
+    path_display: displayPath,
     other_hosts: fe.other_hosts || null,
   }
-  return { entry, parentPath, fullPath: fe.path_display, depth: 0 }
+  return { entry, parentPath, fullPath: displayPath, depth: 0, driveContext: fe.drive || '' }
 }
 
 /**

@@ -129,6 +129,18 @@ def _format_duration(seconds: float) -> str:
     return f"{m}:{sec:02d}"
 
 
+def _display_scan_path(raw_path: str, source_os: str) -> str:
+    """Return a user-friendly path for scan progress output only."""
+    if source_os != "windows":
+        return raw_path
+    if not (raw_path.startswith("\\\\?\\") or raw_path.startswith("//?/")):
+        return raw_path
+    _, path_display, drive = normalize_path_for_storage(raw_path, source_os)
+    if drive:
+        return f"{drive}:{path_display}"
+    return raw_path
+
+
 def _print_progress(
     stats: dict,
     scan_start: datetime,
@@ -247,7 +259,7 @@ class _ServerDown(Exception):
 
 _RETRY_TIMEOUT = 90  # seconds before giving up and aborting the scan
 _INTERRUPT_RETRY_TIMEOUT = 15  # shorter timeout when flushing on Ctrl-C
-_FLUSH_INTERVAL = 10       # flush upsert records every 10 seconds
+_FLUSH_INTERVAL = 10  # flush upsert records every 10 seconds
 _SEEN_FLUSH_INTERVAL = 10  # flush seen-path records every 10 seconds
 
 
@@ -344,7 +356,10 @@ def cmd_scan(args) -> None:
 
     # Refuse to scan UNC paths (\\server\share) — network mounts are excluded by default.
     if root.startswith("\\\\"):
-        print("sift: scanning UNC paths (\\\\server\\share) is not supported.", file=sys.stderr)
+        print(
+            "sift: scanning UNC paths (\\\\server\\share) is not supported.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # Refuse to scan network filesystem roots (NFS, SMB/CIFS, sshfs, etc.)
@@ -362,7 +377,10 @@ def cmd_scan(args) -> None:
     root_dev = os.stat(walk_root).st_dev if one_filesystem else None
 
     # Normalize root path for storage
-    root_path, root_path_display, _ = normalize_path_for_storage(root, source_os)
+    root_path, root_path_display, drive = normalize_path_for_storage(root, source_os)
+    # Show drive prefix in display string when scanning a Windows drive
+    if drive:
+        root_path_display = f"{drive}:{root_path_display}"
 
     if getattr(args, "ask", False):
         from sift.config import get_server_url
@@ -394,7 +412,7 @@ def cmd_scan(args) -> None:
     # 1. Register scan run
     # -----------------------------------------------------------------------
     if not quiet:
-        print(f"Registering scan run for {host}:{root_path}...", file=sys.stderr)
+        print(f"Registering scan run for {host}:{root_path_display}...", file=sys.stderr)
 
     stop_event = threading.Event()
     _progress_stop = threading.Event()
@@ -404,6 +422,7 @@ def cmd_scan(args) -> None:
             "/scan-runs",
             {
                 "host": host,
+                "drive": drive,
                 "root_path": root_path,
                 "root_path_display": root_path_display,
                 "started_at": scan_start_iso,
@@ -450,17 +469,18 @@ def cmd_scan(args) -> None:
         try:
             cache: dict[str, dict] = {}
             with client.get_stream(
-                "/files/cache/stream", params={"host": host, "root": root_path}
+                "/files/cache/stream",
+                params={"host": host, "root": root_path, "drive": drive},
             ) as resp:
                 for line in resp.iter_lines():
                     if line:
                         entry = json.loads(line)
                         cache[entry[0]] = {"mtime": entry[1], "size_bytes": entry[2]}
                         if not quiet and len(cache) % 10_000 == 0:
-                            sys.stderr.write(f"\rFetching file cache: {len(cache):,}")
+                            sys.stderr.write(f"\r\x1b[2KFetching file cache: {len(cache):,}")
                             sys.stderr.flush()
             if not quiet:
-                sys.stderr.write(f"\rFetching file cache: {len(cache):,} entries.\n")
+                sys.stderr.write(f"\r\x1b[2KFetching file cache: {len(cache):,} entries.\n")
                 sys.stderr.flush()
         except Exception as e:
             if not quiet:
@@ -505,8 +525,12 @@ def cmd_scan(args) -> None:
         _last_file_progress = _last_stats_progress
         _last_flush_time = time.time()
         _last_seen_flush_time = time.time()
-        _flush_in_progress = threading.Lock()  # prevents concurrent upsert flush attempts
-        _seen_flush_in_progress = threading.Lock()  # prevents concurrent seen flush attempts
+        _flush_in_progress = (
+            threading.Lock()
+        )  # prevents concurrent upsert flush attempts
+        _seen_flush_in_progress = (
+            threading.Lock()
+        )  # prevents concurrent seen flush attempts
         _render_lock = threading.Lock()
 
         def _render_warn(msg: str) -> None:
@@ -530,7 +554,12 @@ def cmd_scan(args) -> None:
                 signal.SIGWINCH,
                 lambda sig, frame: display.update({"lines": 0}),
             )
-        _seen_stats = {"queued": 0, "heartbeat_sent": 0, "finalize_sent": 0, "max_depth": 0}
+        _seen_stats = {
+            "queued": 0,
+            "heartbeat_sent": 0,
+            "finalize_sent": 0,
+            "max_depth": 0,
+        }
 
         def _queue_upsert(record: dict) -> None:
             with _upsert_lock:
@@ -564,7 +593,9 @@ def cmd_scan(args) -> None:
             if not acquired:
                 with _upsert_lock:
                     upsert_records[:0] = pending
-                    _last_flush_time = prev_flush_time  # restore so timer fires next cycle
+                    _last_flush_time = (
+                        prev_flush_time  # restore so timer fires next cycle
+                    )
                 if debug:
                     _debug(
                         f"[flush] skipped — another thread is flushing"
@@ -769,9 +800,12 @@ def cmd_scan(args) -> None:
 
                     # Inode tracking for hard link detection.
                     # Windows returns st_ino=0 for most files — treat as unknown.
+                    # NTFS can also return unsigned 64-bit inodes that overflow
+                    # DuckDB BIGINT (signed 64-bit); treat those as unknown too.
+                    _I64_MAX = (1 << 63) - 1
                     raw_ino = stat_result.st_ino
                     raw_dev = stat_result.st_dev
-                    if raw_ino == 0:
+                    if raw_ino == 0 or raw_ino > _I64_MAX or raw_dev > _I64_MAX:
                         inode_val = None
                         device_val = None
                         inode_key = None
@@ -781,7 +815,7 @@ def cmd_scan(args) -> None:
                         inode_key = (raw_dev, raw_ino)
 
                     stats["bytes_scanned"] += stat_result.st_size
-                    display["current_file"] = raw_path
+                    display["current_file"] = _display_scan_path(raw_path, source_os)
 
                     # Cache check — if mtime+size unchanged, the DB record
                     # is already correct.  Just update last_seen_at.
@@ -806,7 +840,9 @@ def cmd_scan(args) -> None:
                     # logical size >> actual on-disk bytes — hashing would read
                     # the full logical size (potentially TBs of holes).
                     if is_sparse_file(
-                        stat_result.st_size, getattr(stat_result, "st_blocks", 0), source_os
+                        stat_result.st_size,
+                        getattr(stat_result, "st_blocks", 0),
+                        source_os,
                     ):
                         if debug:
                             _debug(f"[sparse_file]    {raw_path}")
@@ -833,7 +869,9 @@ def cmd_scan(args) -> None:
                         continue
 
                     # macOS: skip APFS dataless stubs and Mail partial downloads — no local bytes to hash
-                    if _is_macos_dataless(getattr(stat_result, "st_blocks", 0), source_os):
+                    if _is_macos_dataless(
+                        getattr(stat_result, "st_blocks", 0), source_os
+                    ):
                         if debug:
                             _debug(f"[macos_dataless] {raw_path}")
                         _queue_upsert(
@@ -973,9 +1011,7 @@ def cmd_scan(args) -> None:
                             )
                             stats["files_hashed"] += 1
                         else:
-                            hash_val = hash_file(
-                                sp, chunk_size=chunk_size_bytes
-                            )
+                            hash_val = hash_file(sp, chunk_size=chunk_size_bytes)
                             if hash_val is None:
                                 msg = f"cannot read {raw_path}: permission denied"
                                 if debug:
@@ -1070,14 +1106,18 @@ def cmd_scan(args) -> None:
         # -------------------------------------------------------------------
         # 4. Flush remaining batches (with progress)
         # -------------------------------------------------------------------
+        # Track transient lines written during finalize so we can erase them
+        # before printing the clean summary.
+        is_tty = sys.stderr.isatty()
+        finalize_lines = 0  # lines written below the progress bar
+
         # Upsert: remaining records with new hash data
         with _upsert_lock:
             n_pending_upserts = len(upsert_records)
         if n_pending_upserts and not quiet:
-            sys.stderr.write(
-                f"\nSaving {n_pending_upserts:,} file records..."
-            )
+            sys.stderr.write(f"\nSaving {n_pending_upserts:,} file records...")
             sys.stderr.flush()
+            finalize_lines += 1
         _flush_queued_upserts(force=True)
         if n_pending_upserts and not quiet:
             sys.stderr.write(" done.\n")
@@ -1096,16 +1136,17 @@ def cmd_scan(args) -> None:
                     f" ({n_batches} batch{'es' if n_batches != 1 else ''})..."
                 )
                 sys.stderr.flush()
+                finalize_lines += 1
             for chunk in _chunks(remaining_seen, seen_batch_size):
                 _flush_seen(chunk, host, scan_start_iso)
                 sent_seen += len(chunk)
                 if not quiet:
                     n_batches = math.ceil(len(remaining_seen) / seen_batch_size)
                     done = math.ceil(sent_seen / seen_batch_size)
-                    sys.stderr.write(f"\r  seen-path updates: {done}/{n_batches}")
+                    sys.stderr.write(f"\r\x1b[2K  seen-path updates: {done}/{n_batches}")
                     sys.stderr.flush()
             if not quiet:
-                sys.stderr.write("\r  seen-path updates: done.              \n")
+                sys.stderr.write("\r\x1b[2K  seen-path updates: done.\n")
                 sys.stderr.flush()
         if debug:
             _seen_stats["finalize_sent"] += sent_seen
@@ -1126,7 +1167,18 @@ def cmd_scan(args) -> None:
                 f"\nsift: warning — failed to mark scan complete: {e}", file=sys.stderr
             )
 
-        if not quiet:
+        # Erase transient finalize lines + progress bar, leaving cursor on
+        # the progress bar's line so the summary prints cleanly after the
+        # "Fetching file cache" line.
+        if not quiet and is_tty:
+            # Move up over finalize lines + the 1-line progress bar, then
+            # erase from cursor to end of screen.
+            up = finalize_lines + display.get("lines", 0)
+            if up > 0:
+                sys.stderr.write(f"\x1b[{up}A\r\x1b[J")
+                sys.stderr.flush()
+                display["lines"] = 0
+        elif not quiet:
             _print_progress(stats, scan_start, display, final=True)
         if debug:
             _dump_api_log("final")
@@ -1194,9 +1246,9 @@ def cmd_scan(args) -> None:
                         retry_timeout=_INTERRUPT_RETRY_TIMEOUT,
                     )
                     flushed += len(chunk)
-                    sys.stderr.write(f"\r  {flushed:,} / {total:,}")
+                    sys.stderr.write(f"\r\x1b[2K  {flushed:,} / {total:,}")
                     sys.stderr.flush()
-                sys.stderr.write(f"\r  {total:,} / {total:,}  done.\n")
+                sys.stderr.write(f"\r\x1b[2K  {total:,} / {total:,}  done.\n")
                 sys.stderr.flush()
             except KeyboardInterrupt:
                 sys.stderr.write(
@@ -1289,7 +1341,9 @@ def _flush_upsert(
     )
 
 
-def _flush_seen(paths: list[dict], host: str, scan_start_iso: str, on_warn=None) -> None:
+def _flush_seen(
+    paths: list[dict], host: str, scan_start_iso: str, on_warn=None
+) -> None:
     if not paths:
         return
     _post_with_retry(

@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
 import FileRow from './FileRow.jsx'
 
 // Skeleton row name-column widths (varied to look natural)
@@ -21,6 +22,8 @@ function SortIcon({ col, sortBy, sortDir }) {
 export default function FileTable({
   rows,
   hostColorMap,
+  selectedHosts,
+  minDupSize,
   visibleColumns,
   columnOrder,
   sortBy,
@@ -32,6 +35,7 @@ export default function FileTable({
   onTypeClick,
   onDupHashClick,
   onDupSubtreeClick,
+  onLoadMore,
   highlightedPaths,
   matchedDirPaths,
   expandedPaths,
@@ -41,9 +45,63 @@ export default function FileTable({
   // Ordered list of visible non-name columns
   const orderedCols = columnOrder.filter(k => visibleColumns[k])
   const colCount = 1 + orderedCols.length
+  const scrollRef = useRef(null)
+  const [scrollTop, setScrollTop] = useState(0)
+  const [viewportHeight, setViewportHeight] = useState(520)
+
+  useEffect(() => {
+    function updateHeight() {
+      const next = Math.max(360, Math.floor(window.innerHeight * 0.68))
+      setViewportHeight(next)
+    }
+    updateHeight()
+    window.addEventListener('resize', updateHeight)
+    return () => window.removeEventListener('resize', updateHeight)
+  }, [])
+
+  const rowHeights = useMemo(() => rows.map(row => {
+    if (row.isGroupHeader) return 30
+    if (row.isLoadMore) return 40
+    return 34
+  }), [rows])
+
+  const prefixSums = useMemo(() => {
+    const sums = new Array(rowHeights.length + 1)
+    sums[0] = 0
+    for (let i = 0; i < rowHeights.length; i++) sums[i + 1] = sums[i] + rowHeights[i]
+    return sums
+  }, [rowHeights])
+
+  const totalHeight = prefixSums[prefixSums.length - 1] || 0
+
+  const windowed = useMemo(() => {
+    if (rows.length <= 200) {
+      return {
+        start: 0,
+        end: rows.length,
+      }
+    }
+
+    const top = Math.max(0, scrollTop - 300)
+    const bottom = scrollTop + viewportHeight + 300
+    let start = 0
+    while (start < rows.length && prefixSums[start + 1] < top) start++
+    let end = start
+    while (end < rows.length && prefixSums[end] < bottom) end++
+    return { start: Math.max(0, start), end: Math.min(rows.length, end + 1) }
+  }, [rows.length, scrollTop, viewportHeight, prefixSums])
+
+  const topPad = prefixSums[windowed.start] || 0
+  const bottomPad = totalHeight - (prefixSums[windowed.end] || 0)
+  const visibleRows = rows.slice(windowed.start, windowed.end)
 
   return (
-    <div className="overflow-x-auto">
+    <div
+      ref={scrollRef}
+      className="overflow-x-auto overflow-y-auto"
+      style={{ maxHeight: `${viewportHeight}px` }}
+      onScroll={e => setScrollTop(e.currentTarget.scrollTop)}
+    >
       <table className="w-full text-left border-collapse">
         <thead>
           <tr className="border-b border-slate-200">
@@ -100,10 +158,29 @@ export default function FileTable({
                   </td>
                 </tr>
               )
-            : rows.map((row, i) => row.isGroupHeader ? (
-                <tr key={`gh:${i}:${row.hash}`} className="bg-slate-100 border-t border-slate-200">
+            : <>
+                {topPad > 0 && (
+                  <tr>
+                    <td colSpan={colCount} style={{ height: `${topPad}px`, padding: 0 }} />
+                  </tr>
+                )}
+                {visibleRows.map((row, i) => row.isGroupHeader ? (
+                <tr key={`gh:${windowed.start + i}:${row.hash}`} className="bg-slate-100 border-t border-slate-200">
                   <td colSpan={colCount} className="py-1 px-4 text-xs text-slate-500 font-medium">
                     {row.hash.slice(0, 12)}… · {row.count} copies
+                  </td>
+                </tr>
+              ) : row.isLoadMore ? (
+                <tr key={`more:${row.fullPath}`} className="border-b border-slate-100">
+                  <td colSpan={colCount} className="py-1.5 pr-3">
+                    <div style={{ paddingLeft: row.depth * 20 + 16 }}>
+                      <button
+                        className="text-xs px-2 py-1 rounded border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                        onClick={() => onLoadMore?.(row.path)}
+                      >
+                        Load more
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ) : (
@@ -114,6 +191,7 @@ export default function FileTable({
                   fullPath={row.fullPath}
                   fullDisplayPath={row.fullDisplayPath}
                   depth={row.depth}
+                  driveContext={row.driveContext}
                   isExpanded={expandedPaths.has(row.fullPath)}
                   onToggleDir={onToggleDir}
                   onFileClick={onFileClick}
@@ -124,10 +202,18 @@ export default function FileTable({
                   highlightedPaths={highlightedPaths}
                   matchedDirPaths={matchedDirPaths}
                   hostColorMap={hostColorMap}
+                  selectedHosts={selectedHosts}
+                  minDupSize={minDupSize}
                   orderedCols={orderedCols}
                   filterActive={filterActive}
                 />
-              ))
+              ))}
+                {bottomPad > 0 && (
+                  <tr>
+                    <td colSpan={colCount} style={{ height: `${bottomPad}px`, padding: 0 }} />
+                  </tr>
+                )}
+              </>
           }
         </tbody>
       </table>

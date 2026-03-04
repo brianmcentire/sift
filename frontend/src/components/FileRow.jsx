@@ -94,6 +94,7 @@ export default function FileRow({
   fullPath,
   fullDisplayPath,
   depth,
+  driveContext,
   isExpanded,
   onToggleDir,
   onFileClick,
@@ -104,13 +105,15 @@ export default function FileRow({
   highlightedPaths,
   matchedDirPaths,
   hostColorMap,
+  selectedHosts,
+  minDupSize,
   orderedCols,
   filterActive,
 }) {
   const isDir = entry.entry_type === 'dir'
 
   const otherHostList = entry.other_hosts
-    ? entry.other_hosts.split(',').map(h => h.trim()).filter(Boolean)
+    ? entry.other_hosts.split(',').map(h => h.trim()).filter(h => h && selectedHosts.has(h))
     : []
 
   // Duplicate detection:
@@ -119,7 +122,8 @@ export default function FileRow({
   //                           another host). Using other_hosts rather than presentHosts.length
   //                           avoids false positives: two hosts can have the same path with
   //                           different content (e.g. /home/pi/.bash_history on two Pis).
-  const isDup = !isDir && (
+  const meetsDupSize = (entry.size_bytes || 0) >= (minDupSize || 0)
+  const isDup = !isDir && meetsDupSize && (
     entry.dup_count > 0 ||
     otherHostList.length > 0
   )
@@ -143,13 +147,15 @@ export default function FileRow({
     : null
   const copyTargetPath = isDir
     ? (fullDisplayPath || fullPath)
-    : (entry.path_display || fullDisplayPath || fullPath)
+    : filterActive
+      ? (entry.path_display || fullDisplayPath || fullPath)
+      : (fullDisplayPath || entry.path_display || fullPath)
 
   function handleRowClick() {
     if (isDir) {
-      onToggleDir(fullPath)
+      onToggleDir(fullPath, { driveContext, isDriveNode: entry.isDriveNode, driveLabel: entry.driveLabel })
     } else {
-      onFileClick?.(entry)
+      onFileClick?.(entry, fullDisplayPath)
     }
   }
 
@@ -188,7 +194,7 @@ export default function FileRow({
             </div>
             {onCopyPath && (
               <button
-                onClick={e => { e.stopPropagation(); onCopyPath(copyTargetPath) }}
+                onClick={e => { e.stopPropagation(); onCopyPath(copyTargetPath, driveContext) }}
                 className="opacity-0 group-hover:opacity-100 shrink-0 ml-1 text-slate-500 hover:text-slate-800 transition-opacity leading-none"
                 title={isDir ? 'Copy path to clipboard' : 'Copy file path to clipboard'}
               >

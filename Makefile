@@ -1,4 +1,5 @@
-.PHONY: dist-agent build-frontend dev-frontend clean help
+.PHONY: dist-agent build-frontend dev-frontend clean help \
+	test-fast test-unit test-server test-integration-live smoke-local verify-local soak-local
 # Local targets (sync-db, deploy, etc.) live in local.mk — see bottom of this file
 
 help: ## Show available targets
@@ -11,6 +12,32 @@ build-frontend: ## Build the React UI (outputs to frontend/dist/)
 
 dev-frontend: ## Start Vite dev server (proxies API to :8765)
 	cd frontend && npm install && npm run dev
+
+test-fast: ## Run fast local tests (unit + server, excludes integration/e2e/perf/soak)
+	pytest tests/unit tests/server -q
+
+test-unit: ## Run unit tests only
+	pytest tests/unit -q
+
+test-server: ## Run server API tests only
+	pytest tests/server -q
+
+test-integration-live: ## Run live integration tests (requires SIFT_TEST_SERVER)
+	@if [ -z "$$SIFT_TEST_SERVER" ]; then \
+		echo "SIFT_TEST_SERVER is required, e.g. SIFT_TEST_SERVER=http://host:8765"; \
+		exit 1; \
+	fi
+	pytest -o addopts='' -m integration tests/integration -q
+
+smoke-local: ## Run quick smoke checks (server-side)
+	pytest -m smoke tests/server/test_smoke.py -q
+
+verify-local: ## Fast local verification before deploy (tests + frontend build)
+	pytest tests/unit tests/server -q
+	cd frontend && npm run build
+
+soak-local: ## Run long soak/perf tests (manual usage only)
+	pytest -o addopts='' -m "soak or perf" -q
 
 dist-agent: ## Build standalone sift binary for Linux x86_64 (Unraid)
 	mkdir -p dist

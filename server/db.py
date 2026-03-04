@@ -1,4 +1,5 @@
 """DuckDB connection, schema DDL, thread-safe query helpers."""
+
 import logging
 import os
 import threading
@@ -15,6 +16,7 @@ _conn: duckdb.DuckDBPyConnection | None = None
 
 SCHEMA_SQL = """
 CREATE SEQUENCE IF NOT EXISTS scan_run_id_seq START 1;
+CREATE SEQUENCE IF NOT EXISTS maintenance_job_id_seq START 1;
 
 CREATE TABLE IF NOT EXISTS files (
     host            TEXT        NOT NULL,
@@ -39,6 +41,7 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE TABLE IF NOT EXISTS scan_runs (
     id                BIGINT      PRIMARY KEY DEFAULT nextval('scan_run_id_seq'),
     host              TEXT        NOT NULL,
+    drive             TEXT        NOT NULL DEFAULT '',
     root_path         TEXT        NOT NULL,
     root_path_display TEXT,
     started_at        TIMESTAMPTZ NOT NULL,
@@ -53,6 +56,58 @@ CREATE TABLE IF NOT EXISTS host_stats (
     updated_at      TIMESTAMPTZ NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS hash_stats (
+    hash            TEXT PRIMARY KEY,
+    copy_count      BIGINT NOT NULL,
+    host_count      BIGINT NOT NULL,
+    size_bytes      BIGINT,
+    wasted_bytes    BIGINT,
+    updated_at      TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS host_hash_stats (
+    host            TEXT NOT NULL,
+    hash            TEXT NOT NULL,
+    copy_count      BIGINT NOT NULL,
+    copy_count_effective BIGINT NOT NULL,
+    size_bytes      BIGINT,
+    updated_at      TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (host, hash)
+);
+
+CREATE TABLE IF NOT EXISTS directory_index (
+    dir_path        TEXT PRIMARY KEY,
+    dir_display     TEXT,
+    updated_at      TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS aggregate_meta (
+    key             TEXT PRIMARY KEY,
+    status          TEXT NOT NULL,
+    updated_at      TIMESTAMPTZ NOT NULL,
+    note            TEXT
+);
+
+CREATE TABLE IF NOT EXISTS host_hard_linked_inodes (
+    host            TEXT NOT NULL,
+    device          BIGINT NOT NULL,
+    inode           BIGINT NOT NULL,
+    PRIMARY KEY (host, device, inode)
+);
+
+CREATE TABLE IF NOT EXISTS maintenance_jobs (
+    id              BIGINT PRIMARY KEY DEFAULT nextval('maintenance_job_id_seq'),
+    job_type        TEXT NOT NULL,
+    host            TEXT,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    priority        INTEGER NOT NULL DEFAULT 50,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    payload         TEXT,
+    created_at      TIMESTAMPTZ NOT NULL,
+    updated_at      TIMESTAMPTZ NOT NULL,
+    last_error      TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_files_hash      ON files(hash);
 CREATE INDEX IF NOT EXISTS idx_files_size      ON files(size_bytes);
 CREATE INDEX IF NOT EXISTS idx_files_host      ON files(host);
@@ -62,6 +117,8 @@ CREATE INDEX IF NOT EXISTS idx_files_category  ON files(file_category);
 CREATE INDEX IF NOT EXISTS idx_files_seen      ON files(host, last_seen_at);
 CREATE INDEX IF NOT EXISTS idx_files_host_path ON files(host, path);
 CREATE INDEX IF NOT EXISTS idx_files_host_hash ON files(host, hash);
+CREATE INDEX IF NOT EXISTS idx_dir_index_path ON directory_index(dir_path);
+CREATE INDEX IF NOT EXISTS idx_maintenance_jobs_status_priority ON maintenance_jobs(status, priority, created_at);
 """
 
 
@@ -87,7 +144,7 @@ def _run_migrations(conn: duckdb.DuckDBPyConnection) -> None:
         ).fetchall()
     }
     for col, ddl in [
-        ("inode",  "ALTER TABLE files ADD COLUMN inode  BIGINT"),
+        ("inode", "ALTER TABLE files ADD COLUMN inode  BIGINT"),
         ("device", "ALTER TABLE files ADD COLUMN device BIGINT"),
     ]:
         if col not in existing:
@@ -102,16 +159,41 @@ def _run_migrations(conn: duckdb.DuckDBPyConnection) -> None:
     }
     if "root_path_display" not in sr_cols:
         conn.execute("ALTER TABLE scan_runs ADD COLUMN root_path_display TEXT")
+    if "drive" not in sr_cols:
+        # DuckDB does not support ADD COLUMN with constraints in one statement.
+        # Add nullable/default first, backfill, then enforce NOT NULL.
+        conn.execute("ALTER TABLE scan_runs ADD COLUMN drive TEXT DEFAULT ''")
+        conn.execute("UPDATE scan_runs SET drive = '' WHERE drive IS NULL")
+        conn.execute("ALTER TABLE scan_runs ALTER COLUMN drive SET NOT NULL")
 
     # Backfill host_stats if empty (one-time on upgrade)
-    hs_count = conn.execute("SELECT COUNT(*) FROM host_stats").fetchone()[0]
+    hs_row = conn.execute("SELECT COUNT(*) FROM host_stats").fetchone()
+    hs_count = hs_row[0] if hs_row else 0
     if hs_count == 0:
         conn.execute("""
             INSERT INTO host_stats (host, total_files, total_bytes, total_hashed, updated_at)
             SELECT host, COUNT(*), COALESCE(SUM(size_bytes), 0),
                    COUNT(CASE WHEN hash IS NOT NULL THEN 1 END), now()
-            FROM files GROUP BY host
+            FROM files WHERE skipped_reason IS NULL GROUP BY host
         """)
+
+    dir_row = conn.execute("SELECT COUNT(*) FROM directory_index").fetchone()
+    dir_count = dir_row[0] if dir_row else 0
+    file_row = conn.execute("SELECT COUNT(*) FROM files").fetchone()
+    file_count = file_row[0] if file_row else 0
+    if dir_count == 0 and file_count > 0:
+        conn.execute(
+            """
+            INSERT INTO directory_index (dir_path, dir_display, updated_at)
+            SELECT
+                regexp_replace(path, '/[^/]+$', '') AS dir_path,
+                ANY_VALUE(regexp_replace(path_display, '/[^/]+$', '')) AS dir_display,
+                now()
+            FROM files
+            GROUP BY regexp_replace(path, '/[^/]+$', '')
+            HAVING regexp_replace(path, '/[^/]+$', '') != ''
+            """
+        )
 
 
 def init_db(db_path: str | None = None) -> None:
@@ -147,7 +229,8 @@ def execute(sql: str, params: list[Any] | None = None) -> None:
             conn.execute(sql)
         elapsed = time.monotonic() - start
         if elapsed > 1.0:
-            logger.warning("slow execute (%.1fs): %s", elapsed, sql[:120])
+            param_str = f" params={params!r}" if params else ""
+            logger.warning("slow execute (%.1fs): %s%s", elapsed, sql[:120], param_str)
 
 
 def query(sql: str, params: list[Any] | None = None) -> list[tuple]:
@@ -162,7 +245,10 @@ def query(sql: str, params: list[Any] | None = None) -> list[tuple]:
         rows = result.fetchall()
         elapsed = time.monotonic() - start
         if elapsed > 1.0:
-            logger.warning("slow query (%.1fs, %d rows): %s", elapsed, len(rows), sql[:120])
+            param_str = f" params={params!r}" if params else ""
+            logger.warning(
+                "slow query (%.1fs, %d rows): %s%s", elapsed, len(rows), sql[:120], param_str
+            )
         return rows
 
 
@@ -180,7 +266,9 @@ def executemany(sql: str, data: list[list[Any]]) -> None:
         conn.executemany(sql, data)
         elapsed = time.monotonic() - start
         if elapsed > 1.0:
-            logger.warning("slow executemany (%.1fs, %d rows): %s", elapsed, len(data), sql[:120])
+            logger.warning(
+                "slow executemany (%.1fs, %d rows): %s", elapsed, len(data), sql[:120]
+            )
 
 
 def refresh_host_stats(host: str) -> None:
@@ -190,10 +278,13 @@ def refresh_host_stats(host: str) -> None:
         row = conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0), "
             "COUNT(CASE WHEN hash IS NOT NULL THEN 1 END) "
-            "FROM files WHERE host = ?",
+            "FROM files WHERE host = ? AND skipped_reason IS NULL",
             [host],
         ).fetchone()
-        total_files, total_bytes, total_hashed = row
+        if row is None:
+            total_files, total_bytes, total_hashed = 0, 0, 0
+        else:
+            total_files, total_bytes, total_hashed = row
         conn.execute(
             "DELETE FROM host_stats WHERE host = ?",
             [host],
@@ -203,3 +294,238 @@ def refresh_host_stats(host: str) -> None:
             "VALUES (?, ?, ?, ?, now())",
             [host, total_files, total_bytes, total_hashed],
         )
+
+
+def refresh_host_hard_linked_inodes(host: str) -> None:
+    """Recompute pre-computed hard-linked inode pairs for a host."""
+    with _lock:
+        conn = get_connection()
+        conn.execute("BEGIN TRANSACTION")
+        conn.execute("DELETE FROM host_hard_linked_inodes WHERE host = ?", [host])
+        conn.execute(
+            """
+            INSERT INTO host_hard_linked_inodes (host, device, inode)
+            SELECT ?, device, inode FROM files
+            WHERE host = ? AND inode IS NOT NULL AND device IS NOT NULL
+            GROUP BY device, inode HAVING COUNT(*) > 1
+            """,
+            [host, host],
+        )
+        conn.execute("COMMIT")
+
+
+def refresh_host_hash_stats(host: str) -> None:
+    """Recompute per-host hash aggregates for eventual-consistent reads."""
+    refresh_host_hard_linked_inodes(host)
+    with _lock:
+        conn = get_connection()
+        conn.execute("BEGIN TRANSACTION")
+        conn.execute("DELETE FROM host_hash_stats WHERE host = ?", [host])
+        conn.execute(
+            """
+            WITH hard_linked_inodes AS (
+                SELECT device, inode FROM host_hard_linked_inodes
+                WHERE host = ?
+            )
+            INSERT INTO host_hash_stats (host, hash, copy_count, copy_count_effective, size_bytes, updated_at)
+            SELECT
+                ?,
+                f.hash,
+                COUNT(*) AS copy_count,
+                COUNT(CASE WHEN NOT (
+                    f.inode IS NOT NULL AND f.device IS NOT NULL
+                    AND (f.device, f.inode) IN (SELECT device, inode FROM hard_linked_inodes)
+                ) THEN 1 END) AS copy_count_effective,
+                MAX(f.size_bytes) AS size_bytes,
+                now()
+            FROM files f
+            WHERE f.host = ? AND f.hash IS NOT NULL
+            GROUP BY f.hash
+            """,
+            [host, host, host],
+        )
+        conn.execute("COMMIT")
+
+
+def refresh_hash_stats() -> None:
+    """Recompute global hash aggregates from current files table."""
+    with _lock:
+        conn = get_connection()
+        conn.execute("BEGIN TRANSACTION")
+        conn.execute("DELETE FROM hash_stats")
+        conn.execute(
+            """
+            INSERT INTO hash_stats (hash, copy_count, host_count, size_bytes, wasted_bytes, updated_at)
+            SELECT
+                hash,
+                COUNT(*) AS copy_count,
+                COUNT(DISTINCT host) AS host_count,
+                MAX(size_bytes) AS size_bytes,
+                CASE WHEN COUNT(*) > 1 THEN (COUNT(*) - 1) * MAX(size_bytes) ELSE 0 END AS wasted_bytes,
+                now()
+            FROM files
+            WHERE hash IS NOT NULL
+            GROUP BY hash
+            """
+        )
+        conn.execute("COMMIT")
+
+
+def refresh_directory_index() -> None:
+    """Recompute directory search index from files table."""
+    with _lock:
+        conn = get_connection()
+        conn.execute("BEGIN TRANSACTION")
+        conn.execute("DELETE FROM directory_index")
+        conn.execute(
+            """
+            INSERT INTO directory_index (dir_path, dir_display, updated_at)
+            SELECT
+                regexp_replace(path, '/[^/]+$', '') AS dir_path,
+                ANY_VALUE(regexp_replace(path_display, '/[^/]+$', '')) AS dir_display,
+                now()
+            FROM files
+            GROUP BY regexp_replace(path, '/[^/]+$', '')
+            """
+        )
+        conn.execute("COMMIT")
+
+
+def refresh_aggregates_for_host(host: str) -> None:
+    """Refresh aggregate tables after a host scan completes."""
+    refresh_host_hash_stats(host)
+    refresh_hash_stats()
+    refresh_directory_index()
+
+
+def set_aggregate_meta(key: str, status: str, note: str | None = None) -> None:
+    """Upsert aggregate freshness/status metadata."""
+    with _lock:
+        conn = get_connection()
+        conn.execute(
+            """
+            INSERT INTO aggregate_meta (key, status, updated_at, note)
+            VALUES (?, ?, now(), ?)
+            ON CONFLICT (key)
+            DO UPDATE SET status = excluded.status,
+                          updated_at = now(),
+                          note = excluded.note
+            """,
+            [key, status, note],
+        )
+
+
+def enqueue_maintenance_job(
+    job_type: str,
+    host: str | None = None,
+    priority: int = 50,
+    payload: str | None = None,
+) -> bool:
+    """Queue a maintenance job unless an equivalent pending/running one exists."""
+    with _lock:
+        conn = get_connection()
+        row = conn.execute(
+            """
+            SELECT COUNT(*) FROM maintenance_jobs
+            WHERE job_type = ?
+              AND ((host IS NULL AND ? IS NULL) OR host = ?)
+              AND status IN ('pending', 'running')
+            """,
+            [job_type, host, host],
+        ).fetchone()
+        count = row[0] if row else 0
+        if count > 0:
+            return False
+        conn.execute(
+            """
+            INSERT INTO maintenance_jobs
+            (job_type, host, status, priority, attempts, payload, created_at, updated_at)
+            VALUES (?, ?, 'pending', ?, 0, ?, now(), now())
+            """,
+            [job_type, host, priority, payload],
+        )
+        return True
+
+
+def dequeue_maintenance_job(max_priority: int | None = None) -> dict[str, Any] | None:
+    """Pick the next pending maintenance job and mark it running."""
+    with _lock:
+        conn = get_connection()
+        if max_priority is None:
+            row = conn.execute(
+                """
+                SELECT id, job_type, host, priority, attempts, payload
+                FROM maintenance_jobs
+                WHERE status = 'pending'
+                ORDER BY priority ASC, created_at ASC
+                LIMIT 1
+                """
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT id, job_type, host, priority, attempts, payload
+                FROM maintenance_jobs
+                WHERE status = 'pending' AND priority <= ?
+                ORDER BY priority ASC, created_at ASC
+                LIMIT 1
+                """,
+                [max_priority],
+            ).fetchone()
+        if row is None:
+            return None
+
+        conn.execute(
+            """
+            UPDATE maintenance_jobs
+            SET status = 'running', attempts = attempts + 1, updated_at = now(), last_error = NULL
+            WHERE id = ?
+            """,
+            [row[0]],
+        )
+        return {
+            "id": row[0],
+            "job_type": row[1],
+            "host": row[2],
+            "priority": row[3],
+            "attempts": row[4] + 1,
+            "payload": row[5],
+        }
+
+
+def complete_maintenance_job(job_id: int) -> None:
+    with _lock:
+        conn = get_connection()
+        conn.execute(
+            "UPDATE maintenance_jobs SET status = 'complete', updated_at = now() WHERE id = ?",
+            [job_id],
+        )
+
+
+def fail_maintenance_job(job_id: int, error: str, requeue: bool = False) -> None:
+    with _lock:
+        conn = get_connection()
+        status = "pending" if requeue else "failed"
+        conn.execute(
+            """
+            UPDATE maintenance_jobs
+            SET status = ?, updated_at = now(), last_error = ?
+            WHERE id = ?
+            """,
+            [status, error[:1000], job_id],
+        )
+
+
+def list_maintenance_jobs(limit: int = 50) -> list[tuple]:
+    with _lock:
+        conn = get_connection()
+        return conn.execute(
+            """
+            SELECT id, job_type, host, status, priority, attempts, payload,
+                   created_at, updated_at, last_error
+            FROM maintenance_jobs
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            [limit],
+        ).fetchall()

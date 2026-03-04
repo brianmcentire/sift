@@ -204,8 +204,9 @@ def is_excluded_dir(
     dirpath is the full path of the directory; dirname is its basename.
     allow_unraid_disks: if True, skip the Unraid /mnt/diskN exclusion (--yolo).
     """
-    # UNC paths (\\server\share) — network mounts excluded by default
-    if dirpath.startswith("\\\\"):
+    # UNC paths (\\server\share) — network mounts excluded by default.
+    # Don't match the \\?\ long-path prefix (safe_path adds it on Windows).
+    if dirpath.startswith("\\\\") and not dirpath.startswith("\\\\?\\"):
         return True
 
     # Leaf name check (case-insensitive)

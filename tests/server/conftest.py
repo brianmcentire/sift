@@ -5,6 +5,7 @@ Each test gets a fresh in-memory DuckDB — we reset the global _conn before
 every test via the autouse `fresh_db` fixture, then pre-init with ":memory:"
 so the FastAPI lifespan's init_db() call hits the guard and skips.
 """
+
 import pytest
 import server.db as db_module
 from fastapi.testclient import TestClient
@@ -28,8 +29,9 @@ def fresh_db():
     db_module._conn = None
     db_module.init_db(":memory:")
     # Clear any module-level caches that survive across tests
-    from server.main import _stats_cache
-    _stats_cache.clear()
+    from server.main import _invalidate_query_caches
+
+    _invalidate_query_caches()
     yield
     if db_module._conn:
         db_module._conn.close()
@@ -93,10 +95,22 @@ def insert_files(records: list[dict]) -> None:
     """
     data = [
         [
-            r["host"], r["drive"], r["path"], r["path_display"], r["filename"],
-            r["ext"], r["file_category"], r["size_bytes"], r["hash"], r["mtime"],
-            r["last_checked"], r["source_os"], r["skipped_reason"], r["last_seen_at"],
-            r.get("inode"), r.get("device"),
+            r["host"],
+            r["drive"],
+            r["path"],
+            r["path_display"],
+            r["filename"],
+            r["ext"],
+            r["file_category"],
+            r["size_bytes"],
+            r["hash"],
+            r["mtime"],
+            r["last_checked"],
+            r["source_os"],
+            r["skipped_reason"],
+            r["last_seen_at"],
+            r.get("inode"),
+            r.get("device"),
         ]
         for r in records
     ]
@@ -117,4 +131,5 @@ def insert_scan_run(host="mac", root_path="/", status="complete") -> int:
         "SELECT id FROM scan_runs WHERE host = ? AND root_path = ? ORDER BY id DESC LIMIT 1",
         [host, root_path],
     )
+    assert row is not None
     return row[0]

@@ -50,6 +50,7 @@ class SeenRequest(BaseModel):
 
 class ScanRunCreate(BaseModel):
     host: str
+    drive: str = ""
     root_path: str
     root_path_display: Optional[str] = None
     started_at: datetime
@@ -62,6 +63,7 @@ class ScanRunPatch(BaseModel):
 class ScanRunResponse(BaseModel):
     id: int
     host: str
+    drive: str = ""
     root_path: str
     root_path_display: Optional[str] = None
     started_at: datetime
@@ -106,8 +108,8 @@ class TrimResponse(BaseModel):
 class LsEntry(BaseModel):
     segment: str
     entry_type: str  # 'file' | 'dir'
-    file_count: int
-    total_bytes: Optional[int]
+    file_count: Optional[int] = None
+    total_bytes: Optional[int] = None
     dup_count: int
     dup_hash_count: int = 0
     filename: Optional[str] = None
@@ -120,6 +122,29 @@ class LsEntry(BaseModel):
     segment_display: Optional[str] = None
     other_hosts: Optional[str] = None
     is_hard_linked: bool = False
+
+
+class TreeChildrenResponse(BaseModel):
+    items: list[LsEntry]
+    next_cursor: Optional[str] = None
+    has_more: bool = False
+    aggregated_at: Optional[datetime] = None
+    data_freshness: str = "fresh"
+
+
+class TreeDupMetric(BaseModel):
+    dup_count: int = 0
+    dup_hash_count: int = 0
+    other_hosts: Optional[str] = None
+    is_hard_linked: bool = False
+    file_count: Optional[int] = None
+    total_bytes: Optional[int] = None
+
+
+class TreeDupMetricsResponse(BaseModel):
+    metrics: dict[str, TreeDupMetric] = Field(default_factory=dict)
+    aggregated_at: Optional[datetime] = None
+    data_freshness: str = "fresh"
 
 
 class FileEntry(BaseModel):
@@ -143,6 +168,8 @@ class HostEntry(BaseModel):
     total_files: int
     total_bytes: Optional[int]
     total_hashed: int
+    drives: list[str] = []
+    is_scanning: bool = False
 
 
 class StatsOverview(BaseModel):
@@ -152,6 +179,8 @@ class StatsOverview(BaseModel):
     duplicate_sets: int
     wasted_bytes: Optional[int]
     total_bytes: Optional[int]
+    aggregated_at: Optional[datetime] = None
+    data_freshness: str = "fresh"
 
 
 class DuplicateLocation(BaseModel):
