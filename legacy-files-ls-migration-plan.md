@@ -98,12 +98,12 @@ Use checkboxes and update as work lands.
 
 ### Phase 5 - Deprecate Legacy `/files/ls` Tests
 
-- [ ] Mark and remove/replace tests that directly target `/files/ls` behavior.
-- [ ] Replace with tree-endpoint and invariant-based tests.
+- [x] Mark and remove/replace tests that directly target `/files/ls` behavior.
+- [x] Replace with tree-endpoint and invariant-based tests.
 - [ ] Candidate files to update:
-  - [ ] `tests/server/test_ls.py`
-  - [ ] `tests/server/test_query_cache.py` (`/files/ls` cache expectations)
-  - [ ] `tests/server/test_ingest.py` (`/files/ls` assertions)
+  - [x] `tests/server/test_ls.py`
+  - [x] `tests/server/test_query_cache.py` (`/files/ls` cache expectations)
+  - [x] `tests/server/test_ingest.py` (`/files/ls` assertions)
   - [x] `/files/ls` portions of `tests/integration/test_live.py`
 
 ### Phase 6 - Final Validation and Rollout
@@ -173,6 +173,38 @@ Add new entries at the top (newest first).
 ```
 
 ### Entries
+
+### 2026-03-04 - OpenCode - Deprecate Remaining Legacy `/files/ls` Tests
+
+- Scope:
+  - Replaced remaining server test usage of legacy `/files/ls` with `/tree/children` where applicable.
+  - Removed the dedicated legacy `/files/ls` server test module.
+  - Kept `/files/ls/dup-hash` integration coverage intact.
+- Files changed:
+  - `tests/server/test_query_cache.py`
+  - `tests/server/test_ingest.py`
+  - `tests/server/test_ls.py` (deleted)
+  - `legacy-files-ls-migration-plan.md`
+- Checklist updates:
+  - [x] Mark and remove/replace tests that directly target `/files/ls` behavior
+  - [x] Replace with tree-endpoint and invariant-based tests
+  - [x] `tests/server/test_ls.py`
+  - [x] `tests/server/test_query_cache.py`
+  - [x] `tests/server/test_ingest.py`
+- Validation run:
+  - `pytest tests/server/test_query_cache.py tests/server/test_ingest.py tests/server/test_tree_endpoints.py -q` -> `24 passed`
+  - `pytest tests/unit/test_commands_ls_du_tree_api.py -q` -> `2 passed`
+  - `make test-fast` -> `280 passed`
+- Perf notes:
+  - Baseline: existing lock contention evidence remains tied to legacy endpoint runtime access.
+  - After: test suite no longer exercises legacy `/files/ls`; runtime callers already migrated in CLI.
+  - Result: migration confidence improved; live perf benchmark capture still pending.
+- Frontend safety notes:
+  - Frontend endpoints unchanged.
+  - `/files/ls/dup-hash` test coverage remains active in integration tests.
+- Risks / follow-ups:
+  - Need quantitative live benchmark capture to fully satisfy prime-directive performance evidence.
+  - Remaining `/files/ls` endpoint deprecation/removal should follow compatibility window gates.
 
 ### 2026-03-04 - OpenCode - Find Hardening and Legacy-Test Migration (Partial)
 

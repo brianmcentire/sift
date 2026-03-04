@@ -3,35 +3,41 @@
 from tests.server.conftest import client, insert_files, insert_scan_run, make_file
 
 
-class TestLsCacheInvalidation:
-    def test_post_files_invalidates_ls_cache(self, client):
+class TestTreeCacheInvalidation:
+    def test_post_files_invalidates_tree_children_cache(self, client):
         resp = client.post(
             "/files",
             json=[make_file(path="/users/brian/a.txt", filename="a.txt")],
         )
         assert resp.status_code == 200
 
-        first = client.get("/files/ls", params={"path": "/users/brian", "host": "mac"})
+        first = client.get(
+            "/tree/children", params={"path": "/users/brian", "host": "mac"}
+        )
         assert first.status_code == 200
-        assert {e["segment"] for e in first.json()} == {"a.txt"}
+        assert {e["segment"] for e in first.json()["items"]} == {"a.txt"}
 
         # Prime cache explicitly with a second read.
-        second = client.get("/files/ls", params={"path": "/users/brian", "host": "mac"})
+        second = client.get(
+            "/tree/children", params={"path": "/users/brian", "host": "mac"}
+        )
         assert second.status_code == 200
-        assert {e["segment"] for e in second.json()} == {"a.txt"}
+        assert {e["segment"] for e in second.json()["items"]} == {"a.txt"}
 
-        # Data mutation through POST /files should clear ls cache.
+        # Data mutation through POST /files should clear tree cache.
         resp = client.post(
             "/files",
             json=[make_file(path="/users/brian/b.txt", filename="b.txt")],
         )
         assert resp.status_code == 200
 
-        third = client.get("/files/ls", params={"path": "/users/brian", "host": "mac"})
+        third = client.get(
+            "/tree/children", params={"path": "/users/brian", "host": "mac"}
+        )
         assert third.status_code == 200
-        assert {e["segment"] for e in third.json()} == {"a.txt", "b.txt"}
+        assert {e["segment"] for e in third.json()["items"]} == {"a.txt", "b.txt"}
 
-    def test_trim_invalidates_ls_cache(self, client):
+    def test_trim_invalidates_tree_children_cache(self, client):
         client.post(
             "/files",
             json=[
@@ -40,12 +46,12 @@ class TestLsCacheInvalidation:
             ],
         )
 
-        before = client.get("/files/ls", params={"path": "/users", "host": "mac"})
+        before = client.get("/tree/children", params={"path": "/users", "host": "mac"})
         assert before.status_code == 200
-        assert {e["segment"] for e in before.json()} == {"brian", "brian2"}
+        assert {e["segment"] for e in before.json()["items"]} == {"brian", "brian2"}
 
         # Prime cache.
-        cached = client.get("/files/ls", params={"path": "/users", "host": "mac"})
+        cached = client.get("/tree/children", params={"path": "/users", "host": "mac"})
         assert cached.status_code == 200
 
         trim_resp = client.post(
@@ -62,28 +68,34 @@ class TestLsCacheInvalidation:
         assert trim_resp.status_code == 200
         assert trim_resp.json()["deleted"] == 1
 
-        after = client.get("/files/ls", params={"path": "/users", "host": "mac"})
+        after = client.get("/tree/children", params={"path": "/users", "host": "mac"})
         assert after.status_code == 200
-        assert {e["segment"] for e in after.json()} == {"brian2"}
+        assert {e["segment"] for e in after.json()["items"]} == {"brian2"}
 
-    def test_scan_completion_invalidates_ls_cache(self, client):
+    def test_scan_completion_invalidates_tree_children_cache(self, client):
         run_id = insert_scan_run(host="mac", root_path="/users", status="running")
         insert_files([make_file(path="/users/brian/a.txt", filename="a.txt")])
 
-        first = client.get("/files/ls", params={"path": "/users/brian", "host": "mac"})
+        first = client.get(
+            "/tree/children", params={"path": "/users/brian", "host": "mac"}
+        )
         assert first.status_code == 200
-        assert {e["segment"] for e in first.json()} == {"a.txt"}
+        assert {e["segment"] for e in first.json()["items"]} == {"a.txt"}
 
         # Mutate DB directly (simulates out-of-band updates) so cache would be stale.
         insert_files([make_file(path="/users/brian/b.txt", filename="b.txt")])
-        stale = client.get("/files/ls", params={"path": "/users/brian", "host": "mac"})
-        assert {e["segment"] for e in stale.json()} == {"a.txt"}
+        stale = client.get(
+            "/tree/children", params={"path": "/users/brian", "host": "mac"}
+        )
+        assert {e["segment"] for e in stale.json()["items"]} == {"a.txt"}
 
         patch = client.patch(f"/scan-runs/{run_id}", json={"status": "complete"})
         assert patch.status_code == 200
 
-        fresh = client.get("/files/ls", params={"path": "/users/brian", "host": "mac"})
-        assert {e["segment"] for e in fresh.json()} == {"a.txt", "b.txt"}
+        fresh = client.get(
+            "/tree/children", params={"path": "/users/brian", "host": "mac"}
+        )
+        assert {e["segment"] for e in fresh.json()["items"]} == {"a.txt", "b.txt"}
 
 
 class TestDirectoryCacheInvalidation:
