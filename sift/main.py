@@ -121,6 +121,25 @@ def main() -> None:
     p_find.add_argument(
         "-ls", dest="ls", action="store_true", help="List in long format (like ls -l)"
     )
+    p_find.add_argument(
+        "--limit",
+        dest="limit",
+        type=int,
+        default=2000,
+        help="Maximum results to return (default: 2000)",
+    )
+    p_find.add_argument(
+        "--lite",
+        dest="lite",
+        action="store_true",
+        help="Skip cross-host enrichment for faster searches (default behavior)",
+    )
+    p_find.add_argument(
+        "--with-other-hosts",
+        dest="with_other_hosts",
+        action="store_true",
+        help="Include cross-host enrichment in results (slower on very large datasets)",
+    )
 
     # sift du
     p_du = sub.add_parser("du", help="Disk usage summary", conflict_handler="resolve")

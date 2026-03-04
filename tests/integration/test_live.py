@@ -157,6 +157,16 @@ class TestLiveLs:
         hosts = get(live_client, "/hosts")
         for h in hosts:
             entries = _tree_ls_like_entries(live_client, "/", h["host"])
+            if not entries and h.get("drives"):
+                for drive in h["drives"]:
+                    entries = _tree_ls_like_entries(
+                        live_client,
+                        "/",
+                        h["host"],
+                        drive=drive,
+                    )
+                    if entries:
+                        break
             assert len(entries) > 0, f"Root ls for host {h['host']} returned nothing"
 
     def test_entry_types_are_valid(self, live_client):

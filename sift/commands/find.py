@@ -1,4 +1,5 @@
 """sift find — search the inventory."""
+
 from __future__ import annotations
 
 import os
@@ -78,15 +79,21 @@ def _parse_mtime(mtime_str: str) -> tuple[Optional[int], Optional[int]]:
 def cmd_find(args) -> None:
     print_server_info()
     cli_cfg = get_cli_config()
-    host = getattr(args, "host", None) or os.environ.get("SIFT_HOST") or cli_cfg.get("host") or local_hostname()
+    host = (
+        getattr(args, "host", None)
+        or os.environ.get("SIFT_HOST")
+        or cli_cfg.get("host")
+        or local_hostname()
+    )
     all_hosts = getattr(args, "all_hosts", False)
 
     raw_path = getattr(args, "path", "/") or "/"
     path_prefix = normalize_query_path(raw_path)
 
+    limit = max(1, int(getattr(args, "limit", 2000) or 2000))
     params: dict = {
         "path_prefix": path_prefix,
-        "limit": 10000,
+        "limit": limit,
     }
     if not all_hosts:
         params["host"] = host
@@ -102,6 +109,12 @@ def cmd_find(args) -> None:
 
     if getattr(args, "duplicates", False):
         params["has_duplicates"] = "true"
+
+    use_lite = not getattr(args, "with_other_hosts", False)
+    if getattr(args, "lite", False):
+        use_lite = True
+    if use_lite:
+        params["lite"] = "true"
 
     if getattr(args, "name", None):
         params["name"] = args.name
@@ -146,6 +159,12 @@ def cmd_find(args) -> None:
             _print_ls(entry)
         else:
             _print_short(entry)
+
+    if len(entries) >= limit:
+        print(
+            f"sift: showing first {limit} results; use --limit to increase",
+            file=sys.stderr,
+        )
 
 
 def _print_short(entry: dict) -> None:
@@ -192,8 +211,9 @@ def _fmt_mtime(mtime: Optional[int]) -> str:
 
 
 def _format_size(n: int) -> str:
+    val = float(n)
     for unit in ("B", "K", "M", "G", "T"):
-        if n < 1024:
-            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
-        n /= 1024
-    return f"{n:.1f}P"
+        if val < 1024:
+            return f"{val:.0f}{unit}" if unit == "B" else f"{val:.1f}{unit}"
+        val /= 1024
+    return f"{val:.1f}P"

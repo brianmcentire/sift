@@ -1881,31 +1881,104 @@ def list_files(
 
     where = " AND ".join(conditions)
 
+    use_host_dup_join = False
+    if has_duplicates is True and host:
+        host_dup_agg = db.query_one(
+            "SELECT 1 FROM host_hash_stats WHERE host = ? LIMIT 1",
+            [host],
+        )
+        use_host_dup_join = host_dup_agg is not None
+        if use_host_dup_join:
+            # duplicate filtering is provided by INNER JOIN host_hash_stats
+            dup_clause = ""
+            dup_params = []
+
     if lite:
-        sql = f"""
-        SELECT
-            f.host, f.drive, f.path_display, f.filename, f.ext,
-            f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at,
-            NULL AS other_hosts
-        FROM files f
-        WHERE {where} {dup_clause}
-        ORDER BY f.path_display
-        LIMIT ?
-        """
+        if use_host_dup_join:
+            sql = f"""
+            SELECT
+                f.host, f.drive, f.path_display, f.filename, f.ext,
+                f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at,
+                NULL AS other_hosts
+            FROM files f
+            INNER JOIN host_hash_stats hdup
+                ON hdup.host = ?
+               AND hdup.hash = f.hash
+               AND hdup.copy_count_effective > 1
+            WHERE {where}
+            ORDER BY f.path
+            LIMIT ?
+            """
+        else:
+            sql = f"""
+            SELECT
+                f.host, f.drive, f.path_display, f.filename, f.ext,
+                f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at,
+                NULL AS other_hosts
+            FROM files f
+            WHERE {where} {dup_clause}
+            ORDER BY f.path
+            LIMIT ?
+            """
     else:
-        sql = f"""
-        SELECT
-            f.host, f.drive, f.path_display, f.filename, f.ext,
-            f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at,
-            STRING_AGG(DISTINCT f2.host ORDER BY f2.host) AS other_hosts
-        FROM files f
-        LEFT JOIN files f2 ON f2.hash = f.hash AND f2.host != f.host AND f.hash IS NOT NULL
-        WHERE {where} {dup_clause}
-        GROUP BY f.host, f.drive, f.path_display, f.filename, f.ext,
-                 f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at
-        ORDER BY f.path_display
-        LIMIT ?
-        """
+        # Prefer host_hash_stats for cross-host enrichment: one row per
+        # (host, hash) is substantially smaller than self-joining files.
+        has_host_hash_stats = db.query_one("SELECT 1 FROM host_hash_stats LIMIT 1")
+        if has_host_hash_stats is not None:
+            if use_host_dup_join:
+                sql = f"""
+                SELECT
+                    f.host, f.drive, f.path_display, f.filename, f.ext,
+                    f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at,
+                    STRING_AGG(DISTINCT hhs.host ORDER BY hhs.host) AS other_hosts
+                FROM files f
+                INNER JOIN host_hash_stats hdup
+                    ON hdup.host = ?
+                   AND hdup.hash = f.hash
+                   AND hdup.copy_count_effective > 1
+                LEFT JOIN host_hash_stats hhs
+                    ON hhs.hash = f.hash
+                   AND hhs.host != f.host
+                   AND f.hash IS NOT NULL
+                WHERE {where}
+                GROUP BY f.host, f.drive, f.path_display, f.filename, f.ext,
+                         f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at, f.path
+                ORDER BY f.path
+                LIMIT ?
+                """
+            else:
+                sql = f"""
+                SELECT
+                    f.host, f.drive, f.path_display, f.filename, f.ext,
+                    f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at,
+                    STRING_AGG(DISTINCT hhs.host ORDER BY hhs.host) AS other_hosts
+                FROM files f
+                LEFT JOIN host_hash_stats hhs
+                    ON hhs.hash = f.hash
+                   AND hhs.host != f.host
+                   AND f.hash IS NOT NULL
+                WHERE {where} {dup_clause}
+                GROUP BY f.host, f.drive, f.path_display, f.filename, f.ext,
+                         f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at, f.path
+                ORDER BY f.path
+                LIMIT ?
+                """
+        else:
+            sql = f"""
+            SELECT
+                f.host, f.drive, f.path_display, f.filename, f.ext,
+                f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at,
+                STRING_AGG(DISTINCT f2.host ORDER BY f2.host) AS other_hosts
+            FROM files f
+            LEFT JOIN files f2 ON f2.hash = f.hash AND f2.host != f.host AND f.hash IS NOT NULL
+            WHERE {where} {dup_clause}
+            GROUP BY f.host, f.drive, f.path_display, f.filename, f.ext,
+                     f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at, f.path
+            ORDER BY f.path
+            LIMIT ?
+            """
+    if use_host_dup_join:
+        params.append(host)
     params.extend(dup_params)
     params.append(limit)
 
