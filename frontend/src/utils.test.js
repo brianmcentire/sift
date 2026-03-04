@@ -39,6 +39,11 @@ describe('shouldApplyOnlyDupsInSearch', () => {
       .toBe(false)
   })
 
+  it('bypasses filter for pinned file copies', () => {
+    expect(shouldApplyOnlyDupsInSearch(true, { isHashResultsMode: false, subtreeDupPath: null, isPinnedCopiesMode: true }))
+      .toBe(false)
+  })
+
   it('does not apply when onlyDups is disabled', () => {
     expect(shouldApplyOnlyDupsInSearch(false, { isHashResultsMode: false, subtreeDupPath: null }))
       .toBe(false)

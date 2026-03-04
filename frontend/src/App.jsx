@@ -871,12 +871,12 @@ export default function App() {
       if (sourceBelowMinDupSize) return sourceRow ? [sourceRow] : []
 
       // In pinned copies view above threshold, all rows share the same hash and are duplicates.
-      hostFiltered.forEach(r => { r.entry.dup_count = 1 })
+      // hostFiltered.forEach(r => { r.entry.dup_count = 1 })
     }
 
     // In subtree dup mode, mark all rows as dups so "only dups" filter doesn't hide them
     if (subtreeDupPath) {
-      hostFiltered.forEach(r => { r.entry.dup_count = 1 })
+      // hostFiltered.forEach(r => { r.entry.dup_count = 1 })
     }
     let filtered = categoryFilter.size > 0
       ? hostFiltered.filter(r => categoryFilter.has(r.entry.file_category))
@@ -891,7 +891,7 @@ export default function App() {
     // IMPORTANT: hash-result overlays are already hash-qualified and should not
     // be re-filtered by generic "Only dups" logic. Doing so can hide valid
     // same-host duplicate click-through results (for example from "1 extra copy").
-    if (shouldApplyOnlyDupsInSearch(onlyDups, { isHashResultsMode, subtreeDupPath })) {
+    if (shouldApplyOnlyDupsInSearch(onlyDups, { isHashResultsMode, subtreeDupPath, isPinnedCopiesMode })) {
       filtered = filtered.filter(r =>
         r.entry.dup_count > 0 || hasSelectedOtherHost(r.entry.other_hosts, selectedHosts)
       )
