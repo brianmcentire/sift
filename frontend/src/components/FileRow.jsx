@@ -42,23 +42,28 @@ const CELL_RENDERERS = {
     </td>
   ),
 
-  hash: ({ entry, extraCopies, fullPath, onDupHashClick, onDupSubtreeClick }) => (
+  hash: ({ entry, extraCopies, fullPath, onDupHashClick, onDupSubtreeClick }) => {
+    // For directories: show "uniq dup hashes" (stable set count) instead of "extra copies" (intra-redundancy).
+    // This aligns with navigation visibility: if a dir is shown, it's because it leads to duplicate sets.
+    const dirDupCount = entry.entry_type === 'dir' ? (entry.dup_hash_count || 0) : 0
+    
+    return (
     <td key="hash" className="py-1.5 pr-4">
       {entry.entry_type === 'dir' ? (
-        extraCopies > 0 ? (
+        dirDupCount > 0 ? (
           <span className="inline-flex items-center gap-1">
             <span
               className={`text-[11px] text-amber-600 font-medium ${
-                extraCopies === 1 && onDupHashClick
+                onDupHashClick
                   ? 'cursor-pointer hover:text-amber-800 hover:underline'
                   : ''
               }`}
-              title={extraCopies === 1 && onDupHashClick ? 'Show all copies' : undefined}
-              onClick={extraCopies === 1 && onDupHashClick
+              title={onDupHashClick ? 'Show all files in these duplicate sets' : undefined}
+              onClick={onDupHashClick
                 ? e => { e.stopPropagation(); onDupHashClick(fullPath, entry) }
                 : undefined}
             >
-              {extraCopies} extra cop{extraCopies !== 1 ? 'ies' : 'y'}
+              {dirDupCount} uniq dup hash{dirDupCount !== 1 ? 'es' : ''}
             </span>
             {onDupSubtreeClick && (
               <span
@@ -72,10 +77,20 @@ const CELL_RENDERERS = {
           </span>
         ) : null
       ) : (
-        <HashCell hash={entry.hash} />
+        extraCopies > 0 ? (
+          <span
+            className="text-[11px] text-amber-600 font-medium cursor-pointer hover:text-amber-800 hover:underline"
+            title="Show all copies of this file"
+            onClick={onDupHashClick ? e => { e.stopPropagation(); onDupHashClick(fullPath, entry) } : undefined}
+          >
+            {extraCopies} extra cop{extraCopies !== 1 ? 'ies' : 'y'}
+          </span>
+        ) : (
+          <HashCell hash={entry.hash} />
+        )
       )}
     </td>
-  ),
+  )},
 
   hosts: ({ entry, allHostsSet, hostColorMap }) => (
     <td key="hosts" className="py-1.5">

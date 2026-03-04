@@ -968,8 +968,8 @@ export default function App() {
       })
     }
     if (onlyDups) {
-      // Strict pass: dirs with extraCopies>0 or cross-host dups, files with dup_count>0 or cross-host same-hash.
-      const strictFiltered = filtered.filter(row => {
+      // Strict pass: dirs with extra copies, files with dup participation.
+      const strictRows = filtered.filter(row => {
         if (row.entry.entry_type === 'dir') {
           const extraCopies = Math.max(0, (row.entry.dup_count || 0) - (row.entry.dup_hash_count || 0))
           return extraCopies > 0 || hasSelectedOtherHost(row.entry.other_hosts, selectedHosts)
@@ -977,11 +977,9 @@ export default function App() {
         return row.entry.dup_count > 0 || hasSelectedOtherHost(row.entry.other_hosts, selectedHosts)
       })
 
-      // Build keep-set: strict rows + every ancestor dir up to root.
-      // This ensures the tree path to any dup is always visible, even
-      // through dirs whose own extraCopies is 0.
+      // Keep strict rows + ancestors for navigable path chains.
       const keepPaths = new Set()
-      strictFiltered.forEach(row => {
+      strictRows.forEach(row => {
         keepPaths.add(row.fullPath)
         const parts = row.fullPath.split('/').filter(Boolean)
         for (let i = 1; i < parts.length; i++) {
@@ -989,27 +987,65 @@ export default function App() {
         }
       })
 
-      // Lenient expansion: when a strict dir is expanded but has no strict
-      // children (dup is split across sibling subdirs), show children with
-      // dup_count > 0 so the user can navigate into the split-dup structure.
-      const strictChildParents = new Set(strictFiltered.map(r => r.parentPath))
+      // Cascading lenient pass: include child dirs with dup_count>0 under
+      // expanded STRICT dirs (extraCopies>0). Cascades through lenient dirs
+      // so auto-expanded chains work. allTreeRows is depth-first so a single
+      // forward pass suffices.  currentPath is treated as an honorary strict
+      // parent so depth-0 children remain navigable when the user drills in.
+      // Ancestor-only dirs (those in keepPaths solely from the ancestor chain)
+      // do NOT trigger the lenient pass — this prevents leaking sibling
+      // branches like PMS that have dup_count>0 but extraCopies=0.
+      const strictDirPaths = new Set(
+        strictRows
+          .filter(r => r.entry.entry_type === 'dir')
+          .map(r => r.fullPath)
+      )
+      const activeParents = new Set(strictDirPaths)
       filtered.forEach(row => {
+        if (row.entry.entry_type !== 'dir') return
         if (keepPaths.has(row.fullPath)) return
-        if (
-          row.entry.entry_type === 'dir' &&
-          effectiveExpanded.has(row.parentPath) &&
-          keepPaths.has(row.parentPath) &&
-          !strictChildParents.has(row.parentPath) &&
-          (row.entry.dup_count || 0) > 0
-        ) {
+        const isChildOfRoot = row.parentPath === currentPath
+        const parentActive = activeParents.has(row.parentPath) || isChildOfRoot
+        if (!parentActive) return
+        const parentVisible = effectiveExpanded.has(row.parentPath) || isChildOfRoot
+        if (!parentVisible) return
+        if ((row.entry.dup_count || 0) > 0 || hasSelectedOtherHost(row.entry.other_hosts, selectedHosts)) {
           keepPaths.add(row.fullPath)
+          activeParents.add(row.fullPath)
         }
       })
+
+      // Pending-metrics fallback: tree/children returns dup_count=0 for all
+      // entries; real values arrive asynchronously from dup-metrics.  When an
+      // expanded kept dir has ALL children still at dup_count=0 &&
+      // dup_hash_count=0, assume metrics are in-flight and temporarily show
+      // all child dirs to avoid an empty-expanded-dir flash.
+      const childDirsByParent = new Map()
+      filtered.forEach(row => {
+        if (row.entry.entry_type !== 'dir') return
+        if (keepPaths.has(row.fullPath)) return
+        let list = childDirsByParent.get(row.parentPath)
+        if (!list) { list = []; childDirsByParent.set(row.parentPath, list) }
+        list.push(row)
+      })
+      for (const dirPath of keepPaths) {
+        if (!(effectiveExpanded.has(dirPath) || dirPath === currentPath)) continue
+        const ch = childDirsByParent.get(dirPath)
+        if (!ch || ch.length === 0) continue
+        // Check ALL children of this parent (not just un-kept dirs) for zero metrics
+        const allChildren = filtered.filter(c => c.parentPath === dirPath)
+        const metricsLoaded = allChildren.some(c =>
+          (c.entry.dup_count || 0) !== 0 || (c.entry.dup_hash_count || 0) !== 0
+        )
+        if (!metricsLoaded) {
+          ch.forEach(c => keepPaths.add(c.fullPath))
+        }
+      }
 
       filtered = filtered.filter(row => keepPaths.has(row.fullPath))
     }
     return filtered
-  }, [allTreeRows, categoryFilter, minDupSize, onlyDups, selectedHosts, effectiveExpanded])
+  }, [allTreeRows, categoryFilter, minDupSize, onlyDups, selectedHosts, currentPath, effectiveExpanded])
 
   // ── Rows: search overlay > dir-search path-chain filter > plain tree ──────
   const rows = useMemo(() => {
