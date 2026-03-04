@@ -943,10 +943,11 @@ export default function App() {
       })
     }
     if (onlyDups) {
-      // Strict pass: dirs with extraCopies>0, files with dup_count>0 or cross-host same-hash.
+      // Strict pass: dirs with extraCopies>0 or cross-host dups, files with dup_count>0 or cross-host same-hash.
       const strictFiltered = filtered.filter(row => {
         if (row.entry.entry_type === 'dir') {
-          return Math.max(0, (row.entry.dup_count || 0) - (row.entry.dup_hash_count || 0)) > 0
+          const extraCopies = Math.max(0, (row.entry.dup_count || 0) - (row.entry.dup_hash_count || 0))
+          return extraCopies > 0 || Boolean(row.entry.other_hosts)
         }
         return row.entry.dup_count > 0 || Boolean(row.entry.other_hosts)
       })
