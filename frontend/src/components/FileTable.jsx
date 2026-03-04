@@ -22,6 +22,7 @@ function SortIcon({ col, sortBy, sortDir }) {
 export default function FileTable({
   rows,
   hostColorMap,
+  selectedHosts,
   visibleColumns,
   columnOrder,
   sortBy,
@@ -200,6 +201,7 @@ export default function FileTable({
                   highlightedPaths={highlightedPaths}
                   matchedDirPaths={matchedDirPaths}
                   hostColorMap={hostColorMap}
+                  selectedHosts={selectedHosts}
                   orderedCols={orderedCols}
                   filterActive={filterActive}
                 />

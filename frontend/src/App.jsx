@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { api } from './api.js'
-import { joinPath, mergeEntries, sortEntries, hostColor, fileEntryToRow, sortFileEntries, logPerf, formatClipboardPath } from './utils.js'
+import { joinPath, mergeEntries, sortEntries, hostColor, fileEntryToRow, sortFileEntries, logPerf, formatClipboardPath, hasSelectedOtherHost } from './utils.js'
 import Header from './components/Header.jsx'
 import StatsBar from './components/StatsBar.jsx'
 import FileTable from './components/FileTable.jsx'
@@ -861,14 +861,14 @@ export default function App() {
       : converted
     if (minDupSize > 0) {
       filtered = filtered.filter(r => {
-        const isDup = r.entry.dup_count > 0 || Boolean(r.entry.other_hosts)
+        const isDup = r.entry.dup_count > 0 || hasSelectedOtherHost(r.entry.other_hosts, selectedHosts)
         if (!isDup) return true
         return (r.entry.size_bytes || 0) >= minDupSize
       })
     }
     if (onlyDups) {
       filtered = filtered.filter(r =>
-        r.entry.dup_count > 0 || Boolean(r.entry.other_hosts)
+        r.entry.dup_count > 0 || hasSelectedOtherHost(r.entry.other_hosts, selectedHosts)
       )
       // In pinned single-file mode, force-include the source file even if it has no dups
       if (pinnedResults !== null && !subtreeDupPath && pinnedSourcePath) {
@@ -918,7 +918,7 @@ export default function App() {
       return grouped
     }
     return sortFileEntries(filtered, sortBy, sortDir)
-  }, [activeResults, subtreeDupPath, pinnedSourcePath, categoryFilter, minDupSize, onlyDups, sortBy, sortDir])
+  }, [activeResults, subtreeDupPath, pinnedSourcePath, categoryFilter, minDupSize, onlyDups, selectedHosts, sortBy, sortDir])
 
   // ── Unfiltered tree rows — used for available categories so the type picker
   //    doesn't collapse while multi-selecting.  Skip in search mode since
@@ -937,7 +937,7 @@ export default function App() {
     if (minDupSize > 0) {
       filtered = filtered.filter(row => {
         if (row.entry.entry_type !== 'file') return true
-        const isDup = row.entry.dup_count > 0 || Boolean(row.entry.other_hosts)
+        const isDup = row.entry.dup_count > 0 || hasSelectedOtherHost(row.entry.other_hosts, selectedHosts)
         if (!isDup) return true
         return (row.entry.size_bytes || 0) >= minDupSize
       })
@@ -947,9 +947,9 @@ export default function App() {
       const strictFiltered = filtered.filter(row => {
         if (row.entry.entry_type === 'dir') {
           const extraCopies = Math.max(0, (row.entry.dup_count || 0) - (row.entry.dup_hash_count || 0))
-          return extraCopies > 0 || Boolean(row.entry.other_hosts)
+          return extraCopies > 0 || hasSelectedOtherHost(row.entry.other_hosts, selectedHosts)
         }
-        return row.entry.dup_count > 0 || Boolean(row.entry.other_hosts)
+        return row.entry.dup_count > 0 || hasSelectedOtherHost(row.entry.other_hosts, selectedHosts)
       })
 
       // Build keep-set: strict rows + every ancestor dir up to root.
@@ -984,7 +984,7 @@ export default function App() {
       filtered = filtered.filter(row => keepPaths.has(row.fullPath))
     }
     return filtered
-  }, [allTreeRows, categoryFilter, minDupSize, onlyDups, effectiveExpanded])
+  }, [allTreeRows, categoryFilter, minDupSize, onlyDups, selectedHosts, effectiveExpanded])
 
   // ── Rows: search overlay > dir-search path-chain filter > plain tree ──────
   const rows = useMemo(() => {
@@ -1180,6 +1180,7 @@ export default function App() {
         <FileTable
           rows={rows}
           hostColorMap={hostColorMap}
+          selectedHosts={selectedHosts}
           visibleColumns={visibleColumns}
           columnOrder={columnOrder}
           sortBy={sortBy}

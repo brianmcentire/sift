@@ -105,13 +105,14 @@ export default function FileRow({
   highlightedPaths,
   matchedDirPaths,
   hostColorMap,
+  selectedHosts,
   orderedCols,
   filterActive,
 }) {
   const isDir = entry.entry_type === 'dir'
 
   const otherHostList = entry.other_hosts
-    ? entry.other_hosts.split(',').map(h => h.trim()).filter(Boolean)
+    ? entry.other_hosts.split(',').map(h => h.trim()).filter(h => h && selectedHosts.has(h))
     : []
 
   // Duplicate detection:

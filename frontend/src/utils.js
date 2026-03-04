@@ -114,6 +114,14 @@ export function hostColor(index) {
   return PALETTE[index % PALETTE.length]
 }
 
+// ─── Host-aware dup helpers ──────────────────────────────────────────────────
+
+/** True if any host in the comma-separated other_hosts string is in selectedHosts */
+export function hasSelectedOtherHost(otherHosts, selectedHosts) {
+  if (!otherHosts) return false
+  return otherHosts.split(',').some(h => selectedHosts.has(h.trim()))
+}
+
 // ─── Data merging ────────────────────────────────────────────────────────────
 
 /**
