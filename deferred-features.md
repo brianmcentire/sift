@@ -15,6 +15,106 @@ REPL with `cd`/`ls`/`find` against the inventory. Includes `rm` for removing inv
 
 ---
 
+## `/files` Duplicate Metadata Enrichment (Option C)
+
+**Context / Motivation:**
+The tree view (`/tree/children` + `/tree/dup-metrics`) carries duplicate semantics via
+`dup_count`, `dup_hash_count`, and `other_hosts`. Search/hash overlays based on `/files`
+currently do not return those fields, so frontend conversion code defaults duplicate counters
+to zero. This can cause semantic drift in filtered views (for example, click-through from
+"1 extra copy" where the source is known-duplicate, but overlay filtering logic treats rows
+as non-dup unless separately inferred).
+
+The goal is to make duplicate semantics explicit and consistent across tree mode and search
+mode without reintroducing expensive query paths.
+
+### Design goals
+
+1. **Single source of truth for duplicate status in `/files` results**
+   - Avoid frontend guesswork based on missing fields.
+   - Make behavior of `Only dups` deterministic in search/hash overlays.
+
+2. **Preserve fast default behavior**
+   - Do not force expensive enrichment for every `/files` caller.
+   - Keep lightweight paths available for high-frequency UI interactions.
+
+3. **Correct host-scoped semantics**
+   - For host-filtered queries, duplicate metadata should respect the selected host's view.
+   - Cross-host indicators should remain explicit and not be conflated with same-host dup counts.
+
+4. **Backwards-compatible rollout**
+   - Additive API change first (new optional fields/flag), then frontend adoption.
+   - No immediate contract break for existing clients.
+
+### Proposed API shape
+
+Add optional `/files` enrichment controlled by query parameter, e.g.:
+
+- `dup_meta=1` (or `include_dup_meta=1`) to request duplicate metadata.
+
+Candidate response additions per `FileEntry` row:
+
+- `is_duplicate_for_host: bool`
+- `same_host_copy_count: int | null` (or effective copy count)
+- `is_cross_host_duplicate: bool`
+
+Alternative minimal contract:
+
+- `dup_flags: { same_host: bool, cross_host: bool }`
+
+The minimal contract is preferred for payload size and simplicity.
+
+### Query/performance strategy (critical)
+
+Do **not** compute per-row duplicate metadata via raw `files` self-joins on every request.
+Use pre-aggregated tables where available:
+
+- `host_hash_stats` for host-scoped duplicate checks (`copy_count_effective > 1`)
+- `hash_stats` for global checks when needed
+
+For `host`-scoped `/files` requests, enrichment should be implemented as lightweight joins to
+`host_hash_stats` keyed by `(host, hash)`. Avoid fallback to full-table `GROUP BY hash` unless
+explicitly allowed and guarded.
+
+### Risk management requirements
+
+1. **No regression in lock behavior**
+   - Any new enrichment path must avoid recreating multi-minute lock contention patterns.
+   - Validate with mixed-load tests (`/hosts`, `/stats/overview`, tree endpoints in parallel).
+
+2. **Feature-flagged rollout**
+   - Gate enrichment behind request param and/or server flag initially.
+   - Allow immediate rollback to current behavior if latency spikes are observed.
+
+3. **Budgeted performance checks**
+   - Track p50/p95/max on representative large paths and hosts.
+   - Specifically test host-filtered duplicate lookups and hash-click overlay workloads.
+
+4. **Cache/aggregation freshness behavior**
+   - Define behavior when aggregate tables are stale/missing:
+     - either return conservative flags (`false`/`null`) plus freshness marker,
+     - or skip enrichment and report metadata unavailable.
+   - Avoid silently switching to expensive live fallback on large hosts.
+
+### Frontend semantics guidance
+
+- In hash-result overlays, if results originate from an explicitly duplicate-qualified action
+  (e.g. click on "1 extra copy"), the UI should not hide those rows due to absent duplicate
+  metadata.
+- `Only dups` should continue to mean "show rows with matching hashes that are duplicates under
+  current semantics"; it should not require toggling state changes for hash-overlay behavior.
+- Click-through from a file row should continue to include the clicked source row even when it is
+  non-duplicate under current filters.
+
+### Validation checklist
+
+- `/files` with enrichment enabled returns stable duplicate flags for same-host and cross-host cases.
+- Frontend hash overlays no longer regress to empty results for known duplicate click-through flows.
+- No measurable DB regression under mixed UI + CLI load on production-scale datasets.
+- No reintroduction of lock-fanout completion patterns in server logs.
+
+---
+
 ## Host-Aware Dup Semantics
 
 **Context:** Today "is this a duplicate?" has one meaning regardless of which hosts are selected.

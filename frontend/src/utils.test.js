@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatClipboardPath } from './utils.js'
+import { formatClipboardPath, shouldApplyOnlyDupsInSearch } from './utils.js'
 
 describe('formatClipboardPath', () => {
   it('formats windows drive paths with backslashes', () => {
@@ -20,5 +20,27 @@ describe('formatClipboardPath', () => {
   it('uses POSIX quoting for non-windows paths', () => {
     expect(formatClipboardPath('/Users/me/My Files/report.txt', ''))
       .toBe("'/Users/me/My Files/report.txt'")
+  })
+})
+
+describe('shouldApplyOnlyDupsInSearch', () => {
+  it('applies filter in normal filename search mode', () => {
+    expect(shouldApplyOnlyDupsInSearch(true, { isHashResultsMode: false, subtreeDupPath: null }))
+      .toBe(true)
+  })
+
+  it('bypasses filter for hash-result overlays', () => {
+    expect(shouldApplyOnlyDupsInSearch(true, { isHashResultsMode: true, subtreeDupPath: null }))
+      .toBe(false)
+  })
+
+  it('bypasses filter for subtree duplicate overlays', () => {
+    expect(shouldApplyOnlyDupsInSearch(true, { isHashResultsMode: false, subtreeDupPath: '/x' }))
+      .toBe(false)
+  })
+
+  it('does not apply when onlyDups is disabled', () => {
+    expect(shouldApplyOnlyDupsInSearch(false, { isHashResultsMode: false, subtreeDupPath: null }))
+      .toBe(false)
   })
 })

@@ -122,6 +122,20 @@ export function hasSelectedOtherHost(otherHosts, selectedHosts) {
   return otherHosts.split(',').some(h => selectedHosts.has(h.trim()))
 }
 
+/**
+ * Decide whether the search overlay should apply the "Only dups" row filter.
+ *
+ * Hash-result overlays are already hash-qualified result sets. In that mode,
+ * applying the generic duplicate filter can hide valid same-host duplicates
+ * because /files rows do not carry tree dup_count fields.
+ */
+export function shouldApplyOnlyDupsInSearch(onlyDups, { isHashResultsMode = false, subtreeDupPath = null } = {}) {
+  if (!onlyDups) return false
+  if (isHashResultsMode) return false
+  if (subtreeDupPath) return false
+  return true
+}
+
 // ─── Data merging ────────────────────────────────────────────────────────────
 
 /**

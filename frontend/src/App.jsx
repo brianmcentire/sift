@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { api } from './api.js'
-import { joinPath, mergeEntries, sortEntries, hostColor, fileEntryToRow, sortFileEntries, logPerf, formatClipboardPath, hasSelectedOtherHost } from './utils.js'
+import { joinPath, mergeEntries, sortEntries, hostColor, fileEntryToRow, sortFileEntries, logPerf, formatClipboardPath, hasSelectedOtherHost, shouldApplyOnlyDupsInSearch } from './utils.js'
 import Header from './components/Header.jsx'
 import StatsBar from './components/StatsBar.jsx'
 import FileTable from './components/FileTable.jsx'
@@ -842,6 +842,7 @@ export default function App() {
   // ── Active results: pinned > filename > hash ──────────────────────────────
   const activeResults = pinnedResults ?? filenameResults ?? hashResults
   const isSearchMode = activeResults !== null
+  const isHashResultsMode = pinnedResults === null && filenameResults === null && hashResults !== null
 
   // Clear highlighted paths whenever the results overlay closes
   useEffect(() => {
@@ -854,8 +855,15 @@ export default function App() {
     const converted = activeResults.map(fe => fileEntryToRow(fe))
     const isPinnedCopiesMode = pinnedResults !== null && !subtreeDupPath && !!pinnedSourcePath
 
+    // Keep search/overlay results host-scoped to current selection.
+    // Without this, hash overlays can leak rows from unselected hosts.
+    const hostFiltered = converted.filter(r => {
+      const host = (r.entry.presentHosts && r.entry.presentHosts[0]) || ''
+      return selectedHosts.has(host)
+    })
+
     if (isPinnedCopiesMode) {
-      const sourceRow = converted.find(r => (r.entry.path_display || '').toLowerCase() === pinnedSourcePath)
+      const sourceRow = hostFiltered.find(r => (r.entry.path_display || '').toLowerCase() === pinnedSourcePath)
       const sourceBelowMinDupSize =
         sourceRow && minDupSize > 0 && (sourceRow.entry.size_bytes || 0) < minDupSize
 
@@ -863,16 +871,16 @@ export default function App() {
       if (sourceBelowMinDupSize) return sourceRow ? [sourceRow] : []
 
       // In pinned copies view above threshold, all rows share the same hash and are duplicates.
-      converted.forEach(r => { r.entry.dup_count = 1 })
+      hostFiltered.forEach(r => { r.entry.dup_count = 1 })
     }
 
     // In subtree dup mode, mark all rows as dups so "only dups" filter doesn't hide them
     if (subtreeDupPath) {
-      converted.forEach(r => { r.entry.dup_count = 1 })
+      hostFiltered.forEach(r => { r.entry.dup_count = 1 })
     }
     let filtered = categoryFilter.size > 0
-      ? converted.filter(r => categoryFilter.has(r.entry.file_category))
-      : converted
+      ? hostFiltered.filter(r => categoryFilter.has(r.entry.file_category))
+      : hostFiltered
     if (minDupSize > 0) {
       filtered = filtered.filter(r => {
         const isDup = r.entry.dup_count > 0 || hasSelectedOtherHost(r.entry.other_hosts, selectedHosts)
@@ -880,7 +888,10 @@ export default function App() {
         return (r.entry.size_bytes || 0) >= minDupSize
       })
     }
-    if (onlyDups) {
+    // IMPORTANT: hash-result overlays are already hash-qualified and should not
+    // be re-filtered by generic "Only dups" logic. Doing so can hide valid
+    // same-host duplicate click-through results (for example from "1 extra copy").
+    if (shouldApplyOnlyDupsInSearch(onlyDups, { isHashResultsMode, subtreeDupPath })) {
       filtered = filtered.filter(r =>
         r.entry.dup_count > 0 || hasSelectedOtherHost(r.entry.other_hosts, selectedHosts)
       )
@@ -888,7 +899,7 @@ export default function App() {
       if (pinnedResults !== null && !subtreeDupPath && pinnedSourcePath) {
         const hasSource = filtered.some(r => (r.entry.path_display || '').toLowerCase() === pinnedSourcePath)
         if (!hasSource) {
-          const sourceRow = converted.find(r => (r.entry.path_display || '').toLowerCase() === pinnedSourcePath)
+          const sourceRow = hostFiltered.find(r => (r.entry.path_display || '').toLowerCase() === pinnedSourcePath)
           if (sourceRow) filtered = [sourceRow, ...filtered]
         }
       }
@@ -932,7 +943,7 @@ export default function App() {
       return grouped
     }
     return sortFileEntries(filtered, sortBy, sortDir)
-  }, [activeResults, subtreeDupPath, pinnedSourcePath, categoryFilter, minDupSize, onlyDups, selectedHosts, sortBy, sortDir])
+  }, [activeResults, isHashResultsMode, subtreeDupPath, pinnedSourcePath, categoryFilter, minDupSize, onlyDups, selectedHosts, sortBy, sortDir])
 
   // ── Unfiltered tree rows — used for available categories so the type picker
   //    doesn't collapse while multi-selecting.  Skip in search mode since
