@@ -266,7 +266,7 @@ def _maybe_refresh_host_stats(host: str) -> None:
     ).start()
 
 
-app = FastAPI(title="sift", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="sift", version="0.8.5", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
@@ -1610,8 +1610,7 @@ def tree_dup_metrics(
             seg_params = seg_list
         # Aggregate-first approach: GROUP BY (segment, hash) first to reduce
         # row count from 852k+ down to ~unique hashes per segment, THEN join
-        # to host_hash_stats.  Cross-host info is pre-aggregated per segment
-        # in a separate CTE to avoid fan-out inflating dup_count.
+        # to host_hash_stats.  Cross-host info is pre-aggregated per segment.
         sql = f"""
         WITH seg_hashes AS (
             SELECT
@@ -1634,18 +1633,25 @@ def tree_dup_metrics(
               {scoped_seg_clause}
             GROUP BY SPLIT_PART(f.path, '/', {split_idx}), f.hash
         ),
-        cross_hosts AS (
-            SELECT sh.segment, STRING_AGG(DISTINCT oh.host ORDER BY oh.host) AS other_hosts
+        cross_matches AS (
+            SELECT sh.segment, sh.hash, oh.host
             FROM seg_hashes sh
             INNER JOIN host_hash_stats oh ON oh.hash = sh.hash AND oh.host != ?
-            GROUP BY sh.segment
+        ),
+        cross_hosts AS (
+            SELECT segment, STRING_AGG(DISTINCT host ORDER BY host) AS other_hosts
+            FROM cross_matches
+            GROUP BY segment
+        ),
+        cross_dups AS (
+            SELECT DISTINCT segment, hash FROM cross_matches
         )
         SELECT
             sh.segment,
-            SUM(CASE WHEN hhs.copy_count_effective > 1
+            SUM(CASE WHEN (hhs.copy_count_effective > 1 OR cd.hash IS NOT NULL)
                       AND COALESCE(hhs.size_bytes, 0) >= ?
                      THEN sh.file_count ELSE 0 END) AS dup_count,
-            COUNT(DISTINCT CASE WHEN hhs.copy_count_effective > 1
+            COUNT(DISTINCT CASE WHEN (hhs.copy_count_effective > 1 OR cd.hash IS NOT NULL)
                                  AND COALESCE(hhs.size_bytes, 0) >= ?
                                 THEN sh.hash END) AS dup_hash_count,
             ch.other_hosts,
@@ -1655,6 +1661,7 @@ def tree_dup_metrics(
         FROM seg_hashes sh
         LEFT JOIN host_hash_stats hhs ON hhs.host = ? AND hhs.hash = sh.hash
         LEFT JOIN cross_hosts ch ON ch.segment = sh.segment
+        LEFT JOIN cross_dups cd ON cd.segment = sh.segment AND cd.hash = sh.hash
         WHERE sh.segment IS NOT NULL AND sh.segment != ''
           {seg_clause}
         GROUP BY sh.segment, ch.other_hosts
@@ -1686,7 +1693,7 @@ def tree_dup_metrics(
             )
             seg_params = seg_list
         # Aggregate-first: GROUP BY (segment, hash) to reduce join size.
-        # Cross-host info pre-aggregated per segment to avoid fan-out.
+        # Cross-host info pre-aggregated per segment.
         sql = f"""
         WITH hard_linked_inodes AS (
             SELECT device, inode FROM files
@@ -1707,6 +1714,7 @@ def tree_dup_metrics(
                 f.hash,
                 COUNT(*) AS file_count,
                 SUM(COALESCE(f.size_bytes, 0)) AS total_bytes,
+                MAX(COALESCE(f.size_bytes, 0)) AS file_size,
                 BOOL_OR(
                     SPLIT_PART(f.path, '/', {split_idx + 1}) = ''
                     AND f.inode IS NOT NULL AND f.device IS NOT NULL
@@ -1720,17 +1728,26 @@ def tree_dup_metrics(
               {scoped_seg_clause}
             GROUP BY SPLIT_PART(f.path, '/', {split_idx}), f.hash
         ),
-        cross_hosts AS (
-            SELECT sh.segment, STRING_AGG(DISTINCT f2.host ORDER BY f2.host) AS other_hosts
+        cross_matches AS (
+            SELECT sh.segment, sh.hash, f2.host
             FROM seg_hashes sh
             INNER JOIN files f2 ON f2.hash = sh.hash AND f2.host != ?
-            GROUP BY sh.segment
+        ),
+        cross_hosts AS (
+            SELECT segment, STRING_AGG(DISTINCT host ORDER BY host) AS other_hosts
+            FROM cross_matches
+            GROUP BY segment
+        ),
+        cross_dups AS (
+            SELECT DISTINCT segment, hash FROM cross_matches
         )
         SELECT
             sh.segment,
-            SUM(CASE WHEN sh.hash IN (SELECT hash FROM dupes)
+            SUM(CASE WHEN (sh.hash IN (SELECT hash FROM dupes) OR cd.hash IS NOT NULL)
+                      AND sh.file_size >= ?
                      THEN sh.file_count ELSE 0 END) AS dup_count,
-            COUNT(DISTINCT CASE WHEN sh.hash IN (SELECT hash FROM dupes)
+            COUNT(DISTINCT CASE WHEN (sh.hash IN (SELECT hash FROM dupes) OR cd.hash IS NOT NULL)
+                                 AND sh.file_size >= ?
                                 THEN sh.hash END) AS dup_hash_count,
             ch.other_hosts,
             BOOL_OR(sh.has_hard_link) AS is_hard_linked,
@@ -1738,6 +1755,7 @@ def tree_dup_metrics(
             SUM(sh.total_bytes) AS total_bytes
         FROM seg_hashes sh
         LEFT JOIN cross_hosts ch ON ch.segment = sh.segment
+        LEFT JOIN cross_dups cd ON cd.segment = sh.segment AND cd.hash = sh.hash
         WHERE sh.segment IS NOT NULL AND sh.segment != ''
           {seg_clause}
         GROUP BY sh.segment, ch.other_hosts
@@ -1747,12 +1765,15 @@ def tree_dup_metrics(
             host,
             min_size,
             host,
+            host,
             drive,
             lower_bound,
             upper_bound,
             prefix,
             *seg_params,
             host,
+            min_size,
+            min_size,
             *seg_params,
         ]
         source = "live"
