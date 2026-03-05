@@ -912,43 +912,82 @@ def duplicates_in_subtree(
     """Return all files that are duplicated within a subtree, grouped by hash."""
     req_start = time.monotonic()
     prefix = path_prefix.lower().rstrip("/")
-    sql = """
-    WITH hard_linked_inodes AS (
-        SELECT device, inode FROM files
-        WHERE host = ? AND inode IS NOT NULL AND device IS NOT NULL
-        GROUP BY device, inode HAVING COUNT(*) > 1
-    ),
-    dup_hashes AS (
-        SELECT hash FROM files
-        WHERE host = ? AND drive = ? AND hash IS NOT NULL
-          AND (path LIKE ? OR path = ?)
-          AND size_bytes >= ?
-          AND NOT (inode IS NOT NULL AND device IS NOT NULL
-                   AND (device, inode) IN (SELECT device, inode FROM hard_linked_inodes))
-        GROUP BY hash HAVING COUNT(*) > 1
+
+    # Check for pre-aggregated host stats to run the optimized query.
+    has_host_hash_stats = db.query_one(
+        "SELECT 1 FROM host_hash_stats WHERE host = ? LIMIT 1",
+        [host],
     )
-    SELECT f.host, f.drive, f.path_display, f.filename, f.ext, f.file_category,
-           f.size_bytes, f.hash, f.mtime, f.last_seen_at
-    FROM files f
-    WHERE f.host = ? AND f.drive = ? AND f.hash IN (SELECT hash FROM dup_hashes)
-      AND (f.path LIKE ? OR f.path = ?)
-    ORDER BY f.hash, f.path_display
-    LIMIT ?
-    """
-    params = [
-        host,  # hard_linked_inodes
-        host,
-        drive,
-        prefix + "/%",
-        prefix,
-        min_size,  # dup_hashes
-        host,
-        drive,
-        prefix + "/%",
-        prefix,  # result rows
-        limit,
-    ]
-    rows = db.query(sql, params)
+
+    if has_host_hash_stats:
+        sql = """
+        SELECT f.host, f.drive, f.path_display, f.filename, f.ext, f.file_category,
+               f.size_bytes, f.hash, f.mtime, f.last_seen_at
+        FROM files f
+        INNER JOIN host_hash_stats hdup
+            ON hdup.host = f.host
+           AND hdup.hash = f.hash
+           AND hdup.copy_count_effective > 1
+        WHERE f.host = ? AND f.drive = ?
+          AND (f.path LIKE ? OR f.path = ?)
+          AND f.size_bytes >= ?
+        ORDER BY f.hash, f.path_display
+        LIMIT ?
+        """
+        params = [
+            host,
+            drive,
+            prefix + "/%",
+            prefix,
+            min_size,
+            limit,
+        ]
+        rows = db.query(sql, params)
+    else:
+        # Fallback for hosts without aggregate stats: compute dupes on the fly.
+        # Note: This checks for *intra-subtree* duplicates only if we use the old logic.
+        # To align with semantics, we should check host-wide.
+        # But doing a host-wide GROUP BY is too expensive here without aggregates.
+        # So we keep the legacy behavior (intra-subtree) as a fallback, but users
+        # on large hosts should have aggregates.
+        sql = """
+        WITH hard_linked_inodes AS (
+            SELECT device, inode FROM files
+            WHERE host = ? AND inode IS NOT NULL AND device IS NOT NULL
+            GROUP BY device, inode HAVING COUNT(*) > 1
+        ),
+        dup_hashes AS (
+            SELECT hash FROM files
+            WHERE host = ? AND drive = ? AND hash IS NOT NULL
+              AND (path LIKE ? OR path = ?)
+              AND size_bytes >= ?
+              AND NOT (inode IS NOT NULL AND device IS NOT NULL
+                       AND (device, inode) IN (SELECT device, inode FROM hard_linked_inodes))
+            GROUP BY hash HAVING COUNT(*) > 1
+        )
+        SELECT f.host, f.drive, f.path_display, f.filename, f.ext, f.file_category,
+               f.size_bytes, f.hash, f.mtime, f.last_seen_at
+        FROM files f
+        WHERE f.host = ? AND f.drive = ? AND f.hash IN (SELECT hash FROM dup_hashes)
+          AND (f.path LIKE ? OR f.path = ?)
+        ORDER BY f.hash, f.path_display
+        LIMIT ?
+        """
+        params = [
+            host,  # hard_linked_inodes
+            host,
+            drive,
+            prefix + "/%",
+            prefix,
+            min_size,  # dup_hashes
+            host,
+            drive,
+            prefix + "/%",
+            prefix,  # result rows
+            limit,
+        ]
+        rows = db.query(sql, params)
+
     _log_perf(
         "/files/duplicates-in-subtree",
         req_start,
@@ -957,6 +996,7 @@ def duplicates_in_subtree(
         min_size=min_size,
         limit=limit,
         rows=len(rows),
+        source="aggregate" if has_host_hash_stats else "legacy_scan",
     )
     return [
         FileEntry(
