@@ -225,6 +225,58 @@ No further server changes needed for stats.
 
 ---
 
+## Host-Scoped Directory Search Index (for Tree View)
+
+**Context:** Tree View directory search currently queries a global directory index and then tries to expand matches in the selected host set. With multiple hosts selected, common terms (for example `Documents`) can return many global matches that do not map cleanly to visible branches for the current selection.
+
+**Why defer:** The current UX can be improved cheaply with better ranking and a higher limit, but true host-aware relevance requires schema and maintenance changes.
+
+### Desired behavior
+
+1. Directory search results are scoped to selected hosts by default.
+2. Matches are ranked so basename/segment matches surface first (for example exact `Documents` before deep incidental matches).
+3. Tree expansion uses host-relevant matches, reducing "typed a valid term but nothing obvious happened" moments.
+
+### Proposed backend shape
+
+Add a host-scoped aggregate table (or equivalent materialized structure), for example:
+
+- `directory_index_by_host(host, dir_path, dir_display, updated_at)`
+
+Refresh strategy:
+
+- On scan ingest for host `H`, enqueue/refresh only `directory_index_by_host` for `H`.
+- Keep existing global `directory_index` for non-host-scoped use cases and backward compatibility.
+
+Endpoint strategy (additive):
+
+- Extend `GET /directories` with optional `hosts` query param (comma-separated).
+- If `hosts` is present, query host-scoped index with `WHERE host IN (...)` and return de-duplicated paths.
+- Keep old behavior when `hosts` is absent.
+
+### Frontend changes when this is implemented
+
+1. In Tree View directory search, pass selected hosts to `/directories`.
+2. Keep mode-specific behavior already defined:
+   - Tree View: search drives path expansion.
+   - List View: search is path text filter (`path_contains`).
+
+### Performance / lock-safety requirements
+
+1. No live full-table fallback on large inventories for host-scoped directory queries.
+2. Cache key must include normalized host-set + query + limit.
+3. Maintenance jobs should update host-scoped directory index incrementally per host.
+4. Validate no reintroduction of long lock hold times under mixed `/hosts`, tree, and stats traffic.
+
+### Rollout notes
+
+1. Land schema + refresh path first.
+2. Add host-aware query path behind optional `hosts` param.
+3. Wire frontend Tree View to pass selected hosts.
+4. Keep global path as fallback for compatibility and staged rollout.
+
+---
+
 ## Preserve Tree State on Filter/Host Changes
 
 **Context:** Changing `minDupSize` currently collapses the tree (expanded directories reset), which interrupts navigation and forces users back to top-level. Host selection changes can similarly feel disruptive when the user is deep in the tree.
@@ -259,6 +311,30 @@ No further server changes needed for stats.
 ---
 
 ## APFS Dataless / Cloud-Stub File Handling
+
+## Filename Whitespace Visualization
+
+**Context:** Some real inventories include filenames with leading/trailing or repeated internal spaces. These can make sort order look "wrong" to users (for example leading-space files appearing first) and are hard to visually spot in proportional UI text.
+
+**Deferred UX enhancement:** Add optional filename whitespace visualization in the table row name cell:
+
+- Render visible-space markers with subtle tint (for example light dot/space tint) for all whitespace characters in displayed filenames.
+- Preserve true underlying filename bytes (display-only transform).
+- Prefer mode-agnostic behavior (Tree and List), with a toggle if visual noise is a concern.
+
+**Why this helps:**
+
+1. Clarifies seemingly odd sort positions without changing filesystem semantics.
+2. Reveals trailing spaces and double-spaces that are otherwise easy to miss.
+3. Reduces user confusion during dedupe/manual cleanup workflows.
+
+**Implementation notes (future):**
+
+- Keep clipboard/copy-path behavior unchanged (raw filename/path).
+- Ensure marker rendering does not break truncation/ellipsis performance.
+- Consider monospaced fallback or partial monospaced spans only for markerized filename text.
+
+---
 
 **Context / Why this matters:**
 `sift scan` is extremely slow on macOS machines with large Apple Mail libraries or iCloud Drive

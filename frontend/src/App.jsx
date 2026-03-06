@@ -72,6 +72,7 @@ export default function App() {
   const [listHasMore, setListHasMore] = useState(false)
   const [listLoading, setListLoading] = useState(false)
   const [listPendingDetail, setListPendingDetail] = useState('')
+  const [listActionStack, setListActionStack] = useState([])
   const listFetchControllerRef = useRef(null)
   const listCursorRef = useRef(null)
 
@@ -573,7 +574,7 @@ export default function App() {
     }
     const controller = new AbortController()
     const started = performance.now()
-    api.directories(debouncedDirQuery, 10, { signal: controller.signal })
+    api.directories(debouncedDirQuery, 50, { signal: controller.signal })
       .then(dirs => {
         logPerf('search.directory', {
           query_len: debouncedDirQuery.length,
@@ -667,6 +668,7 @@ export default function App() {
     setPinnedSourcePath(null)
     setSubtreeDupPath(null)
     setListPendingDetail('')
+    setListActionStack([])
     setSelectedHosts(new Set(hosts.map(h => h.host)))
     setExpandedPaths(new Set())
     setDupAutoExpanded(new Map())
@@ -748,6 +750,40 @@ export default function App() {
     setHighlightedPaths(new Set())
     setMatchedDirPaths(new Set())
     setListPendingDetail('')
+    setListActionStack([])
+  }, [])
+
+  const pushListState = useCallback((reason = 'action') => {
+    setListActionStack(prev => {
+      const next = [...prev, {
+        reason,
+        dirQuery,
+        filenameQuery,
+        hashQuery,
+        sortBy,
+        sortDir,
+        onlyDups,
+        minDupSize,
+        categoryFilter: [...categoryFilter],
+      }]
+      return next.slice(-20)
+    })
+  }, [dirQuery, filenameQuery, hashQuery, sortBy, sortDir, onlyDups, minDupSize, categoryFilter])
+
+  const popListState = useCallback(() => {
+    setListActionStack(prev => {
+      if (prev.length === 0) return prev
+      const last = prev[prev.length - 1]
+      setDirQuery(last.dirQuery || '')
+      setFilenameQuery(last.filenameQuery || '')
+      setHashQuery(last.hashQuery || '')
+      setSortBy(last.sortBy || 'name')
+      setSortDir(last.sortDir || 'asc')
+      setOnlyDups(Boolean(last.onlyDups))
+      setMinDupSize(last.minDupSize || 0)
+      setCategoryFilter(new Set(last.categoryFilter || []))
+      return prev.slice(0, -1)
+    })
   }, [])
 
   // ── Handle file click → zoom to all copies ────────────────────────────────
@@ -812,13 +848,14 @@ export default function App() {
     try {
       const result = await api.dupHash(fullPath, host, minDupSizeRef.current, drive)
       if (result?.hash) {
+        if (viewMode === 'list') pushListState('dup_hash_click')
         // Find the specific files in this subtree with that hash so we can highlight them
         const inDir = await api.files({ hash: result.hash, path_prefix: fullPath, host, limit: 50, lite: 1 })
         setHighlightedPaths(new Set(inDir.map(f => (f.path_display || '').toLowerCase())))
         setHashQuery(result.hash)
       }
     } catch (_) {}
-  }, [hostDrive])
+  }, [hostDrive, viewMode, pushListState])
 
   // ── Handle subtree dup arrow → show all dups in subtree grouped by hash ──
   const handleDupSubtreeClick = useCallback(async (fullPath, entry) => {
@@ -1372,6 +1409,16 @@ export default function App() {
     return null
   }, [pinnedResults, subtreeDupPath, filenameResults, filenameQuery, hashResults, hashQuery])
 
+  const listBackBanner = useMemo(() => {
+    if (viewMode !== 'list') return null
+    if (isSearchMode) return null
+    if (listActionStack.length === 0) return null
+    if (hashQuery) return { label: `hash: ${hashQuery}` }
+    if (filenameQuery) return { label: `filename: "${filenameQuery}"` }
+    if (dirQuery) return { label: `path contains: "${dirQuery}"` }
+    return { label: 'list filters changed' }
+  }, [viewMode, isSearchMode, listActionStack.length, hashQuery, filenameQuery, dirQuery])
+
   const visibleRowCount = useMemo(
     () => rows.filter(r => !r.isLoadMore && !r.isGroupHeader).length,
     [rows],
@@ -1420,6 +1467,19 @@ export default function App() {
           </div>
         )}
 
+        {listBackBanner && (
+          <div className="flex items-center gap-2 py-2 text-[12px]">
+            <button
+              onClick={popListState}
+              className="px-2 py-0.5 text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded transition-colors font-medium shrink-0"
+            >
+              ← Back
+            </button>
+            <span className="text-slate-400">List filter:</span>
+            <span className="font-medium text-slate-700">{listBackBanner.label}</span>
+          </div>
+        )}
+
         <StatsBar
           stats={stats}
           rowCount={visibleRowCount}
@@ -1454,6 +1514,7 @@ export default function App() {
           expandedPaths={effectiveExpanded}
           isLoading={isLoading && !isSearchMode}
           filterActive={isSearchMode || viewMode === 'list'}
+          hashFilterActive={hashQuery.length >= 4}
         />
       </div>
 

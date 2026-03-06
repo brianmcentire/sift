@@ -55,7 +55,7 @@ export default function Header({
           <DirectorySearch
             value={dirQuery}
             onChange={setDirQuery}
-            placeholder={isTree ? 'find folder to open…' : 'path contains…'}
+            placeholder={isTree ? 'folder to open…' : 'path contains…'}
             className="w-44 shrink-0"
           />
 

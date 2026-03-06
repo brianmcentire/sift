@@ -199,6 +199,42 @@ class TestListFilesPage:
         assert {r["host"] for r in items} == {"mac", "nas"}
         assert all((r.get("dup_count") or 0) > 0 for r in items)
 
+    def test_dup_count_returns_effective_copy_count_for_selected_hosts(self, client):
+        insert_files(
+            [
+                make_file(
+                    host="mac", path="/a/one.txt", filename="one.txt", hash=HASH_A
+                ),
+                make_file(
+                    host="mac", path="/a/two.txt", filename="two.txt", hash=HASH_A
+                ),
+                make_file(
+                    host="nas", path="/b/three.txt", filename="three.txt", hash=HASH_A
+                ),
+                make_file(
+                    host="nas", path="/b/four.txt", filename="four.txt", hash=HASH_A
+                ),
+                make_file(
+                    host="pi", path="/c/five.txt", filename="five.txt", hash=HASH_A
+                ),
+            ]
+        )
+        db_module.refresh_host_hash_stats("mac")
+        db_module.refresh_host_hash_stats("nas")
+        db_module.refresh_host_hash_stats("pi")
+        db_module.set_aggregate_meta("host_hash_stats:mac", "fresh")
+        db_module.set_aggregate_meta("host_hash_stats:nas", "fresh")
+        db_module.set_aggregate_meta("host_hash_stats:pi", "fresh")
+
+        resp = client.get(
+            "/files/page",
+            params={"hosts": "mac,nas,pi", "has_duplicates": True, "limit": 20},
+        )
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) == 5
+        assert all((r.get("dup_count") or 0) == 5 for r in items)
+
     def test_has_duplicates_returns_202_when_aggregate_not_fresh(self, client):
         insert_files(
             [

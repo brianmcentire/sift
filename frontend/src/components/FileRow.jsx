@@ -42,7 +42,7 @@ const CELL_RENDERERS = {
     </td>
   ),
 
-  hash: ({ entry, extraCopies, fullPath, onDupHashClick, onDupSubtreeClick }) => {
+  hash: ({ entry, extraCopies, fullPath, onDupHashClick, onDupSubtreeClick, hashFilterActive }) => {
     // For directories: show "uniq dup sets" (stable set count) instead of "extra copies" (intra-redundancy).
     // This aligns with navigation visibility: if a dir is shown, it's because it leads to duplicate sets.
     const dirDupCount = entry.entry_type === 'dir' ? (entry.dup_hash_count || 0) : 0
@@ -77,7 +77,7 @@ const CELL_RENDERERS = {
           </span>
         ) : null
       ) : (
-        extraCopies > 0 ? (
+        extraCopies > 0 && !hashFilterActive ? (
           <span
             className="text-[11px] text-amber-600 font-medium cursor-pointer hover:text-amber-800 hover:underline"
             title="Show all copies of this file"
@@ -124,6 +124,7 @@ export default function FileRow({
   minDupSize,
   orderedCols,
   filterActive,
+  hashFilterActive,
 }) {
   const isDir = entry.entry_type === 'dir'
 
@@ -146,7 +147,10 @@ export default function FileRow({
   const allHostsSet = new Set([...(entry.presentHosts || []), ...otherHostList])
 
   // Extra copies = files in dup groups minus the distinct dup groups
-  const extraCopies = Math.max(0, (entry.dup_count || 0) - (entry.dup_hash_count || 0))
+  const hashSetCount = isDir
+    ? (entry.dup_hash_count || 0)
+    : ((entry.dup_hash_count || 0) || ((entry.dup_count || 0) > 0 ? 1 : 0))
+  const extraCopies = Math.max(0, (entry.dup_count || 0) - hashSetCount)
 
   // Blue highlight: this is the file (or one of the files) the user navigated from
   const isHighlighted = !!(highlightedPaths?.size && highlightedPaths.has((fullPath || '').toLowerCase()))
@@ -174,7 +178,7 @@ export default function FileRow({
     }
   }
 
-  const cellOpts = { entry, extraCopies, allHostsSet, hostColorMap, onTypeClick, fullPath, onDupHashClick, onDupSubtreeClick }
+  const cellOpts = { entry, extraCopies, allHostsSet, hostColorMap, onTypeClick, fullPath, onDupHashClick, onDupSubtreeClick, hashFilterActive }
 
   return (
     <tr

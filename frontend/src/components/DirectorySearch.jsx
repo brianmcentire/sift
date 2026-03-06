@@ -2,7 +2,7 @@ export default function DirectorySearch({ value, onChange, placeholder = 'direct
   return (
     <div className={`relative ${className}`}>
       <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-sm pointer-events-none">
-        📁
+        🔍
       </span>
       <input
         type="text"

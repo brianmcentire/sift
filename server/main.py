@@ -267,7 +267,7 @@ def _maybe_refresh_host_stats(host: str) -> None:
     ).start()
 
 
-app = FastAPI(title="sift", version="0.8.5", lifespan=lifespan)
+app = FastAPI(title="sift", version="0.9.0", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
@@ -1241,7 +1241,9 @@ def _tree_children_rows(
     dirs AS (
         SELECT
             s.segment,
-            ANY_VALUE(s.segment_display) AS segment_display
+            ANY_VALUE(s.segment_display) AS segment_display,
+            COUNT(*) AS file_count,
+            SUM(COALESCE(s.size_bytes, 0)) AS total_bytes
         FROM scoped s
         WHERE s.entry_type = 'dir'
         GROUP BY s.segment
@@ -1264,8 +1266,8 @@ def _tree_children_rows(
         SELECT
             d.segment,
             'dir' AS entry_type,
-            NULL::INT AS file_count,
-            NULL::BIGINT AS total_bytes,
+            d.file_count,
+            d.total_bytes,
             0 AS dup_count,
             0 AS dup_hash_count,
             NULL::TEXT AS filename,
@@ -1844,7 +1846,7 @@ def list_files_page(
     )
 
     sort_map = {
-        "name": "LOWER(f.filename)",
+        "name": "LOWER(LTRIM(f.filename))",
         "size": "COALESCE(f.size_bytes, 0)",
         "date": "COALESCE(f.mtime, 0)",
         "seen": "COALESCE(f.last_seen_at, TIMESTAMPTZ '1970-01-01 00:00:00+00')",
@@ -1858,7 +1860,7 @@ def list_files_page(
         raise HTTPException(status_code=400, detail="Invalid sort_dir")
 
     # For duplicate-sensitive views, require fresh per-host aggregates.
-    if has_duplicates is not None:
+    if has_duplicates is True:
         key_params = [f"host_hash_stats:{h}" for h in host_list]
         ph = ", ".join(["?" for _ in key_params])
         meta_rows = db.query(
@@ -1924,19 +1926,18 @@ def list_files_page(
         where_params.append(sql_pat)
 
     if has_duplicates is True:
-        conditions.append("sd.hash IS NOT NULL")
+        conditions.append("COALESCE(shs.copies, 0) > 1")
     elif has_duplicates is False:
-        conditions.append("(f.hash IS NULL OR sd.hash IS NULL)")
+        conditions.append("(f.hash IS NULL OR COALESCE(shs.copies, 0) <= 1)")
 
     order_expr = sort_map[sort_by]
     where_sql = " AND ".join(conditions)
     sql = f"""
-    WITH selected_dupes AS (
-        SELECT hash
+    WITH selected_hash_stats AS (
+        SELECT hash, SUM(copy_count_effective) AS copies
         FROM host_hash_stats
         WHERE host IN ({host_ph}) AND hash IS NOT NULL
         GROUP BY hash
-        HAVING SUM(copy_count_effective) > 1
     )
     SELECT
         f.host,
@@ -1957,9 +1958,9 @@ def list_files_page(
               AND hhs.host IN ({host_ph})
               AND f.hash IS NOT NULL
         ) AS other_hosts,
-        CASE WHEN sd.hash IS NULL THEN 0 ELSE 1 END AS dup_count
+        CASE WHEN COALESCE(shs.copies, 0) > 1 THEN shs.copies ELSE 0 END AS dup_count
     FROM files f
-    LEFT JOIN selected_dupes sd ON sd.hash = f.hash
+    LEFT JOIN selected_hash_stats shs ON shs.hash = f.hash
     WHERE {where_sql}
     ORDER BY {order_expr} {sort_dir.upper()}, LOWER(f.path) ASC
     LIMIT ? OFFSET ?
@@ -2696,10 +2697,18 @@ def list_directories(q: str = "", limit: int = Query(20, le=100)):
         FROM directory_index
         WHERE dir_path != ''
           AND lower(dir_path) LIKE '%' || lower(?) || '%'
-        ORDER BY dir_path
+        ORDER BY
+          CASE
+            WHEN lower(regexp_extract(dir_path, '[^/]+$')) = lower(?) THEN 0
+            WHEN lower(regexp_extract(dir_path, '[^/]+$')) LIKE lower(?) || '%' THEN 1
+            WHEN lower(dir_path) LIKE '%/' || lower(?) || '/%' OR lower(dir_path) LIKE '%/' || lower(?) THEN 2
+            ELSE 3
+          END,
+          LENGTH(dir_path),
+          dir_path
         LIMIT ?
         """,
-        [q, limit],
+        [q, q, q, q, q, limit],
     )
     if not rows:
         rows = db.query(
@@ -2713,10 +2722,18 @@ def list_directories(q: str = "", limit: int = Query(20, le=100)):
                 HAVING regexp_replace(path, '/[^/]+$', '') != ''
             ) sub
             WHERE lower(dir_path) LIKE '%' || lower(?) || '%'
-            ORDER BY dir_path
+            ORDER BY
+              CASE
+                WHEN lower(regexp_extract(dir_path, '[^/]+$')) = lower(?) THEN 0
+                WHEN lower(regexp_extract(dir_path, '[^/]+$')) LIKE lower(?) || '%' THEN 1
+                WHEN lower(dir_path) LIKE '%/' || lower(?) || '/%' OR lower(dir_path) LIKE '%/' || lower(?) THEN 2
+                ELSE 3
+              END,
+              LENGTH(dir_path),
+              dir_path
             LIMIT ?
             """,
-            [q, limit],
+            [q, q, q, q, q, limit],
         )
     results = {r[0]: r[1] or r[0] for r in rows}
 

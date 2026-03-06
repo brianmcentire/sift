@@ -41,6 +41,7 @@ export default function FileTable({
   expandedPaths,
   isLoading,
   filterActive,
+  hashFilterActive,
 }) {
   // Ordered list of visible non-name columns
   const orderedCols = columnOrder.filter(k => visibleColumns[k])
@@ -206,6 +207,7 @@ export default function FileTable({
                   minDupSize={minDupSize}
                   orderedCols={orderedCols}
                   filterActive={filterActive}
+                  hashFilterActive={hashFilterActive}
                 />
               ))}
                 {bottomPad > 0 && (

@@ -30,8 +30,8 @@ class TestTreeChildren:
         assert "docs" in entries
         assert "notes.txt" in entries
         assert entries["docs"]["entry_type"] == "dir"
-        assert entries["docs"]["file_count"] is None  # null until dup-metrics enrichment
-        assert entries["docs"]["total_bytes"] is None
+        assert entries["docs"]["file_count"] == 1
+        assert entries["docs"]["total_bytes"] == 1000
         assert entries["notes.txt"]["entry_type"] == "file"
         assert entries["notes.txt"]["file_count"] == 1
         assert entries["notes.txt"]["total_bytes"] == 1000
