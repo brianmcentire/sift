@@ -159,6 +159,13 @@ class FileEntry(BaseModel):
     mtime: Optional[int]
     last_seen_at: Optional[datetime] = None
     other_hosts: Optional[str] = None
+    dup_count: int = 0
+
+
+class FilePageResponse(BaseModel):
+    items: list[FileEntry]
+    next_cursor: Optional[str] = None
+    has_more: bool = False
 
 
 class HostEntry(BaseModel):

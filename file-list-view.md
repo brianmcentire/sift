@@ -41,6 +41,9 @@ No redesign of the current UI is required; this is a mode switch layered onto ex
 3. Keep existing `/files` endpoint behavior unchanged for compatibility.
 4. Use debounced List View search requests and abort stale in-flight requests.
 5. Preserve existing Tree View and duplicate-overlay workflows.
+6. In List View, size filter behaves as **min file size** (universal floor), with label text updated by mode.
+7. For `/files/page` duplicate filtering, use strict aggregate readiness gating: if selected-host duplicate aggregates are not fresh, return HTTP `202` pending (no heavy fallback query).
+8. List View v1 accepts no dedicated path column as an intentional tradeoff.
 
 ## View behavior
 
@@ -55,14 +58,24 @@ List View should respect these existing controls/state:
 - Host selection (`selectedHosts`) — required.
 - Category filter (`categoryFilter`) — multi-select.
 - Dup-only toggle (`onlyDups`) — duplicates within selected hosts only.
-- Min dup size (`minDupSize`) — applied only for duplicate semantics.
+- Size floor (`minDupSize` state reused) — applied as universal minimum file size in List View.
 - Search boxes act as native List View filters in real time while typing.
 
 Clarifications:
 
 - List View base dataset is global over selected hosts (no tree path constraint).
-- If `onlyDups=false`, `minDupSize` should not filter non-duplicates (same semantics as current view logic).
-- If `onlyDups=true`, duplicate determination is within selected hosts only.
+- `minDupSize` in List View always maps to `min_size` (universal file-size floor).
+- If `onlyDups=true`, duplicate determination is within selected hosts only, then `min_size` is applied as an additional floor.
+
+Mode-specific label text for the size control:
+
+- Tree View: `Min dup size`
+- List View: `Min file size`
+
+Performance note:
+
+- Universal `min_size` in List View is expected to improve or preserve performance by reducing row counts early.
+- If production validation shows regressions in specific query plans, revisit and adjust.
 
 ## Search behavior in List View
 
@@ -189,9 +202,19 @@ Preferred execution path:
 2. Build selected-host duplicate hash set by grouping selected host rows by hash and requiring combined effective copies > 1.
 3. Join/filter `files` rows against that set.
 
-Fallback:
+Strict readiness behavior (no heavy fallback):
 
-- If aggregate rows unavailable, fallback to grouped query over `files` constrained to selected hosts.
+- For `has_duplicates=true`, check aggregate freshness for each selected host using `aggregate_meta` key `host_hash_stats:{host}`.
+- If any selected host is missing freshness metadata or not `fresh`, return HTTP `202` with:
+
+```json
+{
+  "status": "pending",
+  "detail": "Duplicate index is still building"
+}
+```
+
+- Do not run inline `GROUP BY` fallback on `files` for this endpoint.
 
 This matches requested behavior: **duplicates within selected hosts only**, not global.
 
@@ -243,7 +266,7 @@ Add List View state:
 - `listCursor` (`string | null`)
 - `listHasMore` (`boolean`)
 - `listLoading` (`boolean`)
-- Optional in-flight request cancellation (`AbortController`)
+- Dedicated in-flight cancellation ref for List View (`AbortController`)
 
 Add behavior:
 
@@ -253,6 +276,7 @@ Add behavior:
 - Convert `listItems` via existing `fileEntryToRow` and feed `FileTable`.
 - Use debounced query state for list searches and cancel stale requests with `AbortController`.
 - Keep Tree View search and overlay effects untouched; guard them behind `viewMode === 'tree'` where needed.
+- Gate existing tree search effects (`filename`, `hash`, `directory`) behind `viewMode === 'tree'` to avoid overlay activation during List View filtering.
 
 ## 3) Header toggle updates
 
@@ -260,6 +284,7 @@ File: `frontend/src/components/Header.jsx`
 
 - Convert top-left `sift` label to a mode toggle control.
 - Show current mode text: `Tree View` or `List View`.
+- Pass mode-specific helper text to search inputs (placeholder copy) and mode-specific size-filter label.
 
 ## 4) Table load-more trigger
 
@@ -291,6 +316,7 @@ File: `server/models.py`
   - `items: list[FileEntry]`
   - `next_cursor: Optional[str]`
   - `has_more: bool`
+- Add `dup_count` (or equivalent duplicate flag) to List View row payload so same-host duplicates can be highlighted correctly.
 
 ## 2) Add endpoint
 
@@ -305,11 +331,13 @@ File: `server/main.py`
 - Return cursor as `offset + limit` when more rows exist.
 - Preserve current hash semantics (exact for full hash, contains for partial hash).
 - Do not alter existing `/files` query semantics.
+- Place `GET /files/page` with the other `/files/*` routes for maintainability.
+- For `has_duplicates=true`, perform aggregate readiness check and return `202 pending` if not ready; no grouped fallback query.
 
 ## 3) Duplicate filtering path
 
 - Preferred aggregate-backed selected-host duplicate set via `host_hash_stats`.
-- Fallback grouped query constrained by selected hosts.
+- If selected-host duplicate aggregates are not fresh/missing, return `202 pending` (no grouped fallback query).
 - Keep logic local to `/files/page`; do not alter `/files` semantics.
 
 ---
@@ -331,6 +359,7 @@ Cover:
 7. Invalid cursor and invalid sort values return 400.
 8. Hash semantics parity with `/files` (64-char exact, partial contains).
 9. Existing `/files` test suite remains green.
+10. `has_duplicates=true` returns `202 pending` when any selected host aggregate is not fresh.
 
 ## Frontend checks
 
@@ -340,6 +369,8 @@ Cover:
 - Verify `onlyDups + minDupSize + selectedHosts` interactions match expected semantics.
 - Verify debounced typing updates list in real time and cancels stale in-flight requests.
 - Verify duplicate overlays (`extra copies`, `uniq dup sets`) keep current behavior.
+- Verify same-host duplicate rows highlight correctly in List View.
+- Verify List View intentionally has no dedicated path column in v1 (filename-focused presentation only).
 
 ---
 
@@ -347,6 +378,7 @@ Cover:
 
 - Replacing existing search overlay architecture.
 - Unifying Tree View directory-search semantics with List View path filtering.
+- Adding a dedicated path column to List View.
 - Refactoring all sort/filter state ownership.
 - Keyset cursor pagination.
 - Backend-side session persistence of List View settings.

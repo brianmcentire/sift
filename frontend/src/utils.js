@@ -251,7 +251,7 @@ export function fileEntryToRow(fe) {
     entry_type: 'file',
     file_count: 1,
     total_bytes: fe.size_bytes,
-    dup_count: 0,
+    dup_count: fe.dup_count || 0,
     dup_hash_count: 0,
     presentHosts: [fe.host],
     filename: fe.filename,

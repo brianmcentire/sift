@@ -1,4 +1,4 @@
-export default function DirectorySearch({ value, onChange, className = '' }) {
+export default function DirectorySearch({ value, onChange, placeholder = 'directory…', className = '' }) {
   return (
     <div className={`relative ${className}`}>
       <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-sm pointer-events-none">
@@ -8,7 +8,7 @@ export default function DirectorySearch({ value, onChange, className = '' }) {
         type="text"
         value={value}
         onChange={e => onChange(e.target.value)}
-        placeholder="directory…"
+        placeholder={placeholder}
         className="
           w-full pl-8 pr-7 py-1.5 text-sm
           bg-white border border-slate-200 rounded-lg

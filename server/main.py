@@ -15,7 +15,7 @@ import json
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 logging.basicConfig(
@@ -109,6 +109,7 @@ from server.models import (
     DuplicateLocation,
     DuplicateSet,
     FileEntry,
+    FilePageResponse,
     FileRecord,
     HostEntry,
     LsEntry,
@@ -1765,7 +1766,6 @@ def tree_dup_metrics(
             host,
             min_size,
             host,
-            host,
             drive,
             lower_bound,
             upper_bound,
@@ -1809,6 +1809,203 @@ def tree_dup_metrics(
         source=source,
     )
     return response
+
+
+@app.get("/files/page", response_model=FilePageResponse)
+def list_files_page(
+    hosts: str = Query(..., description="Comma-separated selected hosts"),
+    categories: Optional[str] = None,
+    path_contains: Optional[str] = None,
+    min_size: Optional[int] = None,
+    max_size: Optional[int] = None,
+    has_duplicates: Optional[bool] = None,
+    hash: Optional[str] = None,
+    iname: Optional[str] = None,
+    sort_by: str = Query("name"),
+    sort_dir: str = Query("asc"),
+    limit: int = Query(200, ge=1, le=2000),
+    cursor: Optional[str] = None,
+):
+    req_start = time.monotonic()
+
+    try:
+        offset = int(cursor) if cursor else 0
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid cursor") from exc
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="Invalid cursor")
+
+    host_list = [h.strip() for h in hosts.split(",") if h.strip()]
+    if not host_list:
+        raise HTTPException(status_code=400, detail="hosts is required")
+    host_list = list(dict.fromkeys(host_list))
+    category_list = (
+        [c.strip() for c in categories.split(",") if c.strip()] if categories else []
+    )
+
+    sort_map = {
+        "name": "LOWER(f.filename)",
+        "size": "COALESCE(f.size_bytes, 0)",
+        "date": "COALESCE(f.mtime, 0)",
+        "seen": "COALESCE(f.last_seen_at, TIMESTAMPTZ '1970-01-01 00:00:00+00')",
+        "type": "LOWER(f.file_category)",
+        "hash": "LOWER(COALESCE(f.hash, ''))",
+        "path": "LOWER(f.path)",
+    }
+    if sort_by not in sort_map:
+        raise HTTPException(status_code=400, detail="Invalid sort_by")
+    if sort_dir not in {"asc", "desc"}:
+        raise HTTPException(status_code=400, detail="Invalid sort_dir")
+
+    # For duplicate-sensitive views, require fresh per-host aggregates.
+    if has_duplicates is not None:
+        key_params = [f"host_hash_stats:{h}" for h in host_list]
+        ph = ", ".join(["?" for _ in key_params])
+        meta_rows = db.query(
+            f"SELECT key, status FROM aggregate_meta WHERE key IN ({ph})",
+            key_params,
+        )
+        meta_by_key = {str(r[0]): str(r[1]) for r in meta_rows}
+        all_fresh = all(meta_by_key.get(k) == "fresh" for k in key_params)
+        if not all_fresh:
+            _log_perf(
+                "/files/page",
+                req_start,
+                hosts=len(host_list),
+                has_duplicates=str(has_duplicates).lower(),
+                result="pending",
+            )
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "status": "pending",
+                    "detail": "Duplicate index is still building",
+                },
+            )
+
+    host_ph = ", ".join(["?" for _ in host_list])
+    conditions = [f"f.host IN ({host_ph})"]
+    where_params: list = [*host_list]
+
+    if category_list:
+        cat_ph = ", ".join(["?" for _ in category_list])
+        conditions.append(f"f.file_category IN ({cat_ph})")
+        where_params.extend(category_list)
+
+    if path_contains:
+        conditions.append("LOWER(f.path) LIKE '%' || ? || '%'")
+        where_params.append(path_contains.lower())
+
+    if min_size is not None:
+        conditions.append("f.size_bytes >= ?")
+        where_params.append(min_size)
+
+    if max_size is not None:
+        conditions.append("f.size_bytes <= ?")
+        where_params.append(max_size)
+
+    if hash:
+        h = hash.lower()
+        if len(h) == 64:
+            conditions.append("f.hash = ?")
+        else:
+            conditions.append("f.hash LIKE '%' || ? || '%'")
+        where_params.append(h)
+
+    if iname:
+        sql_pat = (
+            iname.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+            .replace("*", "%")
+            .replace("?", "_")
+        )
+        conditions.append("LOWER(f.filename) LIKE LOWER(?) ESCAPE '\\'")
+        where_params.append(sql_pat)
+
+    if has_duplicates is True:
+        conditions.append("sd.hash IS NOT NULL")
+    elif has_duplicates is False:
+        conditions.append("(f.hash IS NULL OR sd.hash IS NULL)")
+
+    order_expr = sort_map[sort_by]
+    where_sql = " AND ".join(conditions)
+    sql = f"""
+    WITH selected_dupes AS (
+        SELECT hash
+        FROM host_hash_stats
+        WHERE host IN ({host_ph}) AND hash IS NOT NULL
+        GROUP BY hash
+        HAVING SUM(copy_count_effective) > 1
+    )
+    SELECT
+        f.host,
+        f.drive,
+        f.path_display,
+        f.filename,
+        f.ext,
+        f.file_category,
+        f.size_bytes,
+        f.hash,
+        f.mtime,
+        f.last_seen_at,
+        (
+            SELECT STRING_AGG(DISTINCT hhs.host, ',' ORDER BY hhs.host)
+            FROM host_hash_stats hhs
+            WHERE hhs.hash = f.hash
+              AND hhs.host != f.host
+              AND hhs.host IN ({host_ph})
+              AND f.hash IS NOT NULL
+        ) AS other_hosts,
+        CASE WHEN sd.hash IS NULL THEN 0 ELSE 1 END AS dup_count
+    FROM files f
+    LEFT JOIN selected_dupes sd ON sd.hash = f.hash
+    WHERE {where_sql}
+    ORDER BY {order_expr} {sort_dir.upper()}, LOWER(f.path) ASC
+    LIMIT ? OFFSET ?
+    """
+
+    params = [*host_list, *host_list, *where_params, limit + 1, offset]
+    rows = db.query(sql, params)
+    has_more = len(rows) > limit
+    if has_more:
+        rows = rows[:limit]
+
+    result = FilePageResponse(
+        items=[
+            FileEntry(
+                host=r[0],
+                drive=r[1],
+                path_display=r[2],
+                filename=r[3],
+                ext=r[4],
+                file_category=r[5],
+                size_bytes=r[6],
+                hash=r[7],
+                mtime=r[8],
+                last_seen_at=r[9],
+                other_hosts=r[10],
+                dup_count=r[11] or 0,
+            )
+            for r in rows
+        ],
+        next_cursor=str(offset + limit) if has_more else None,
+        has_more=has_more,
+    )
+
+    _log_perf(
+        "/files/page",
+        req_start,
+        hosts=len(host_list),
+        categories=len(category_list),
+        has_duplicates="*" if has_duplicates is None else str(has_duplicates).lower(),
+        sort=f"{sort_by}:{sort_dir}",
+        limit=limit,
+        offset=offset,
+        rows=len(result.items),
+        has_more=str(has_more).lower(),
+    )
+    return result
 
 
 @app.get("/files", response_model=list[FileEntry])

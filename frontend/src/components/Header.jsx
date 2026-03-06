@@ -7,6 +7,8 @@ import DupOnlyToggle from './DupOnlyToggle.jsx'
 import ColumnToggle from './ColumnToggle.jsx'
 
 export default function Header({
+  viewMode,
+  onToggleViewMode,
   hosts,
   selectedHosts,
   setSelectedHosts,
@@ -28,6 +30,8 @@ export default function Header({
   setVisibleColumns,
   onReset,
 }) {
+  const isTree = viewMode === 'tree'
+
   return (
     <header className="
       sticky top-0 z-40
@@ -38,15 +42,20 @@ export default function Header({
       <div className="max-w-screen-2xl mx-auto px-4 py-2">
         {/* Top row: logo + search bars + controls */}
         <div className="flex items-center gap-3 flex-wrap">
-          {/* Logo */}
-          <span className="text-[15px] font-bold tracking-tight text-slate-800 mr-1 shrink-0">
-            sift
-          </span>
+          {/* App mode toggle */}
+          <button
+            onClick={onToggleViewMode}
+            className="text-[13px] font-bold tracking-tight text-slate-800 mr-1 shrink-0 px-2 py-1 rounded-md hover:bg-slate-100 transition-colors"
+            title={isTree ? 'Switch to List View' : 'Switch to Tree View'}
+          >
+            sift · {isTree ? 'Tree View' : 'List View'}
+          </button>
 
           {/* Directory search */}
           <DirectorySearch
             value={dirQuery}
             onChange={setDirQuery}
+            placeholder={isTree ? 'find folder to open…' : 'path contains…'}
             className="w-44 shrink-0"
           />
 
@@ -54,7 +63,7 @@ export default function Header({
           <SearchBar
             value={filenameQuery}
             onChange={setFilenameQuery}
-            placeholder="filename…"
+            placeholder="filename contains…"
             className="w-44 shrink-0"
           />
 
@@ -62,7 +71,7 @@ export default function Header({
           <SearchBar
             value={hashQuery}
             onChange={setHashQuery}
-            placeholder="# hash…"
+            placeholder="hash prefix or full…"
             className="w-44 shrink-0"
           />
 
@@ -76,6 +85,7 @@ export default function Header({
           <DupSizeFilter
             value={minDupSize}
             onChange={setMinDupSize}
+            label={isTree ? 'Min dup size' : 'Min file size'}
           />
 
           {/* Type filter */}

@@ -57,6 +57,7 @@ export const api = {
     get('/files/duplicates-in-subtree', { host, drive, path_prefix: pathPrefix, min_size: minSize, limit }),
   dupDirAncestors: (host, pathPrefix, minSize = 0, maxPaths = 500, drive = '') =>
     get('/files/dup-ancestor-dirs', { host, drive, path_prefix: pathPrefix, min_size: minSize, max_paths: maxPaths }),
+  filesPage: (params, options = {}) => get('/files/page', params, options),
   files: (params, options = {}) => get('/files', params, options),
   stats: (params = {}, options = {}) => get('/stats/overview', params, options),
   directories: (q, limit = 10, options = {}) => get('/directories', { q, limit }, options),

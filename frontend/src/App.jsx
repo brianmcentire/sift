@@ -21,6 +21,8 @@ export default function App() {
   const [filenameQuery, setFilenameQuery] = useState('')
   const [debouncedFilenameQuery, setDebouncedFilenameQuery] = useState('')
   const [hashQuery, setHashQuery] = useState('')
+  const [debouncedHashQuery, setDebouncedHashQuery] = useState('')
+  const [viewMode, setViewMode] = useState('tree')
   const [matchedDirPaths, setMatchedDirPaths] = useState(new Set()) // lowercase dir paths matched by dir query
   const [filenameResults, setFilenameResults] = useState(null)  // null | FileEntry[]
   const [hashResults, setHashResults] = useState(null)          // null | FileEntry[]
@@ -65,6 +67,13 @@ export default function App() {
 
   // ── Loading ─────────────────────────────────────────────────────────────
   const [loadingPaths, setLoadingPaths] = useState(new Set())
+  const [listItems, setListItems] = useState([])
+  const [listCursor, setListCursor] = useState(null)
+  const [listHasMore, setListHasMore] = useState(false)
+  const [listLoading, setListLoading] = useState(false)
+  const [listPendingDetail, setListPendingDetail] = useState('')
+  const listFetchControllerRef = useRef(null)
+  const listCursorRef = useRef(null)
 
   // ── Host color map ──────────────────────────────────────────────────────
   const hostColorMap = useMemo(() => {
@@ -107,8 +116,17 @@ export default function App() {
     return () => clearTimeout(t)
   }, [filenameQuery])
 
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedHashQuery(hashQuery), 250)
+    return () => clearTimeout(t)
+  }, [hashQuery])
+
   // ── Filename search (server-side) ────────────────────────────────────────
   useEffect(() => {
+    if (viewMode !== 'tree') {
+      setFilenameResults(null)
+      return
+    }
     if (debouncedFilenameQuery.length >= 2) {
       const controller = new AbortController()
       const started = performance.now()
@@ -129,10 +147,14 @@ export default function App() {
     } else {
       setFilenameResults(null)
     }
-  }, [debouncedFilenameQuery])
+  }, [debouncedFilenameQuery, viewMode])
 
   // ── Hash search ─────────────────────────────────────────────────────────
   useEffect(() => {
+    if (viewMode !== 'tree') {
+      setHashResults(null)
+      return
+    }
     if (hashQuery.length >= 4) {
       const controller = new AbortController()
       const started = performance.now()
@@ -153,7 +175,7 @@ export default function App() {
     } else {
       setHashResults(null)
     }
-  }, [hashQuery])
+  }, [hashQuery, viewMode])
 
   // Enable stats fetch after the first tree path has loaded.
   useEffect(() => {
@@ -366,6 +388,117 @@ export default function App() {
     })
   }, [hostDrive])
 
+  const listSortBy = useMemo(() => {
+    const map = { name: 'name', size: 'size', date: 'date', seen: 'seen', type: 'type', hash: 'hash' }
+    return map[sortBy] || 'name'
+  }, [sortBy])
+
+  useEffect(() => {
+    listCursorRef.current = listCursor
+  }, [listCursor])
+
+  const fetchListPage = useCallback(async ({ reset = false } = {}) => {
+    if (viewMode !== 'list') return
+    const hostsCsv = [...selectedHosts].join(',')
+    if (!hostsCsv) {
+      setListItems([])
+      setListCursor(null)
+      setListHasMore(false)
+      return
+    }
+
+    if (listFetchControllerRef.current) {
+      listFetchControllerRef.current.abort()
+    }
+    const controller = new AbortController()
+    listFetchControllerRef.current = controller
+
+    if (reset) {
+      setListItems([])
+      setListCursor(null)
+      setListHasMore(false)
+    }
+    setListLoading(true)
+
+    try {
+      const params = {
+        hosts: hostsCsv,
+        categories: categoryFilter.size > 0 ? [...categoryFilter].join(',') : undefined,
+        has_duplicates: onlyDups ? true : undefined,
+        min_size: minDupSize > 0 ? minDupSize : undefined,
+        path_contains: debouncedDirQuery.length >= 2 ? debouncedDirQuery : undefined,
+        iname: debouncedFilenameQuery.length >= 2 ? `*${debouncedFilenameQuery}*` : undefined,
+        hash: debouncedHashQuery.length >= 4 ? debouncedHashQuery : undefined,
+        sort_by: listSortBy,
+        sort_dir: sortDir,
+        limit: 200,
+        cursor: reset ? undefined : listCursorRef.current,
+      }
+      const data = await api.filesPage(params, { signal: controller.signal })
+      if (data?.status === 'pending') {
+        setListPendingDetail(data.detail || 'Duplicate index is still building')
+        setListHasMore(false)
+        setListCursor(null)
+        return
+      }
+      setListPendingDetail('')
+      const incoming = Array.isArray(data?.items) ? data.items : []
+      setListItems(prev => {
+        if (reset) return incoming
+        const seen = new Set(prev.map(i => `${i.host}|${i.drive}|${i.path_display}`))
+        const merged = [...prev]
+        incoming.forEach(i => {
+          const k = `${i.host}|${i.drive}|${i.path_display}`
+          if (!seen.has(k)) merged.push(i)
+        })
+        return merged
+      })
+      setListHasMore(Boolean(data?.has_more))
+      setListCursor(data?.next_cursor || null)
+    } catch (err) {
+      if (err?.name === 'AbortError') return
+      setListPendingDetail('Failed to load list view data')
+      setListHasMore(false)
+      setListCursor(null)
+    } finally {
+      if (listFetchControllerRef.current === controller) {
+        listFetchControllerRef.current = null
+      }
+      setListLoading(false)
+    }
+  }, [
+    viewMode,
+    selectedHosts,
+    categoryFilter,
+    onlyDups,
+    minDupSize,
+    debouncedDirQuery,
+    debouncedFilenameQuery,
+    debouncedHashQuery,
+    listSortBy,
+    sortDir,
+  ])
+
+  useEffect(() => {
+    if (viewMode !== 'list') {
+      if (listFetchControllerRef.current) {
+        listFetchControllerRef.current.abort()
+        listFetchControllerRef.current = null
+      }
+      return
+    }
+    fetchListPage({ reset: true })
+    return () => {
+      if (listFetchControllerRef.current) {
+        listFetchControllerRef.current.abort()
+        listFetchControllerRef.current = null
+      }
+    }
+  }, [
+    viewMode,
+    fetchListPage,
+  ])
+
   // When dup-only mode is enabled, ensure dup metrics are loaded for the
   // currently visible paths so filtering has data to work with.
   useEffect(() => {
@@ -389,11 +522,15 @@ export default function App() {
   }, [selectedHosts, hostDrive])
 
   const handleLoadMore = useCallback((path) => {
+    if (path === '__list__' && viewMode === 'list') {
+      fetchListPage({ reset: false })
+      return
+    }
     fetchPath(path, activeHosts, {
       loadMore: true,
       enrichDupMetrics: true,
     })
-  }, [fetchPath, activeHosts])
+  }, [fetchPath, activeHosts, viewMode, fetchListPage])
 
   // ── Fetch dup ancestor dirs for auto-expand ─────────────────────────────
   const fetchDupAncestors = useCallback(async (rootPath) => {
@@ -426,6 +563,10 @@ export default function App() {
   // ── Directory search → expand tree to matching dirs ─────────────────────
   // NOTE: must be after `fetchPath` useCallback to avoid TDZ
   useEffect(() => {
+    if (viewMode !== 'tree') {
+      setMatchedDirPaths(new Set())
+      return
+    }
     if (debouncedDirQuery.length < 2) {
       setMatchedDirPaths(new Set())
       return
@@ -473,7 +614,7 @@ export default function App() {
         setMatchedDirPaths(new Set())
       })
     return () => controller.abort()
-  }, [debouncedDirQuery, activeHosts, fetchPath, hostDrive])
+  }, [debouncedDirQuery, activeHosts, fetchPath, hostDrive, viewMode])
 
   // Fetch currentPath whenever it, hosts, or lsFetchKey changes.
   // Always enrich dup metrics — with aggregate tables the call is fast,
@@ -525,6 +666,7 @@ export default function App() {
     setPinnedResults(null)
     setPinnedSourcePath(null)
     setSubtreeDupPath(null)
+    setListPendingDetail('')
     setSelectedHosts(new Set(hosts.map(h => h.host)))
     setExpandedPaths(new Set())
     setDupAutoExpanded(new Map())
@@ -595,6 +737,18 @@ export default function App() {
       setSortDir('asc')
     }
   }, [sortBy])
+
+  const handleToggleViewMode = useCallback(() => {
+    setViewMode(prev => prev === 'tree' ? 'list' : 'tree')
+    setFilenameResults(null)
+    setHashResults(null)
+    setPinnedResults(null)
+    setPinnedSourcePath(null)
+    setSubtreeDupPath(null)
+    setHighlightedPaths(new Set())
+    setMatchedDirPaths(new Set())
+    setListPendingDetail('')
+  }, [])
 
   // ── Handle file click → zoom to all copies ────────────────────────────────
   const handleFileClick = useCallback(async (entry, treeDisplayPath) => {
@@ -1047,8 +1201,25 @@ export default function App() {
     return filtered
   }, [allTreeRows, categoryFilter, minDupSize, onlyDups, selectedHosts, currentPath, effectiveExpanded])
 
+  const listRows = useMemo(() => {
+    const base = listItems.map(fe => fileEntryToRow(fe))
+    if (listHasMore) {
+      return [
+        ...base,
+        {
+          isLoadMore: true,
+          path: '__list__',
+          fullPath: '__list__::__more__',
+          depth: 0,
+        },
+      ]
+    }
+    return base
+  }, [listItems, listHasMore])
+
   // ── Rows: search overlay > dir-search path-chain filter > plain tree ──────
   const rows = useMemo(() => {
+    if (viewMode === 'list' && !isSearchMode) return listRows
     if (isSearchMode) return searchRows ?? []
 
     // Dir search active: filter tree to only show the path chain to each matched dir
@@ -1131,9 +1302,13 @@ export default function App() {
     hasMoreForPath,
     currentPath,
     paginationVersion,
+    viewMode,
+    listRows,
   ])
 
-  const isLoading = hosts.length === 0 || loadingPaths.has(currentPath)
+  const isLoading = viewMode === 'list'
+    ? (hosts.length === 0 || listLoading)
+    : (hosts.length === 0 || loadingPaths.has(currentPath))
 
   useEffect(() => {
     if (!firstTreePaintLoggedRef.current && hosts.length > 0 && rows.length > 0 && !isLoading && !isSearchMode) {
@@ -1163,6 +1338,8 @@ export default function App() {
   const availableCategories = useMemo(() => {
     const source = isSearchMode
       ? (activeResults ? activeResults.map(fe => fileEntryToRow(fe)) : [])
+      : viewMode === 'list'
+        ? listItems.map(fe => fileEntryToRow(fe))
       : allTreeRows
     const cats = new Set()
     source.forEach(r => {
@@ -1171,7 +1348,7 @@ export default function App() {
       }
     })
     return [...cats].sort()
-  }, [isSearchMode, activeResults, allTreeRows])
+  }, [isSearchMode, activeResults, allTreeRows, viewMode, listItems])
 
   // ── Search banner ─────────────────────────────────────────────────────────
   const searchBanner = useMemo(() => {
@@ -1195,9 +1372,16 @@ export default function App() {
     return null
   }, [pinnedResults, subtreeDupPath, filenameResults, filenameQuery, hashResults, hashQuery])
 
+  const visibleRowCount = useMemo(
+    () => rows.filter(r => !r.isLoadMore && !r.isGroupHeader).length,
+    [rows],
+  )
+
   return (
     <div className="min-h-screen bg-slate-50">
       <Header
+        viewMode={viewMode}
+        onToggleViewMode={handleToggleViewMode}
         hosts={hosts}
         selectedHosts={selectedHosts}
         setSelectedHosts={setSelectedHosts}
@@ -1236,7 +1420,17 @@ export default function App() {
           </div>
         )}
 
-        <StatsBar stats={stats} rowCount={rows.length} isFiltered={minDupSize > 0 || categoryFilter.size > 0} />
+        <StatsBar
+          stats={stats}
+          rowCount={visibleRowCount}
+          isFiltered={minDupSize > 0 || categoryFilter.size > 0}
+        />
+
+        {viewMode === 'list' && listPendingDetail && (
+          <div className="mb-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+            {listPendingDetail}
+          </div>
+        )}
 
         <FileTable
           rows={rows}
@@ -1259,7 +1453,7 @@ export default function App() {
           matchedDirPaths={matchedDirPaths}
           expandedPaths={effectiveExpanded}
           isLoading={isLoading && !isSearchMode}
-          filterActive={isSearchMode}
+          filterActive={isSearchMode || viewMode === 'list'}
         />
       </div>
 

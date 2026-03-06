@@ -33,7 +33,7 @@ function formatBytes(bytes) {
 }
 
 // value: number (bytes), onChange: (number) => void
-export default function DupSizeFilter({ value, onChange }) {
+export default function DupSizeFilter({ value, onChange, label = 'Min dup size' }) {
   const [open, setOpen] = useState(false)
   const [custom, setCustom] = useState('')
   const [customError, setCustomError] = useState(false)
@@ -71,7 +71,7 @@ export default function DupSizeFilter({ value, onChange }) {
           ${value > 0 ? 'border-blue-300 text-blue-600' : 'border-slate-200 text-slate-600'}
         `}
       >
-        Min dup size
+        {label}
       </button>
 
       {open && (
