@@ -13,6 +13,27 @@ Safe interactive deletion of confirmed duplicates.
 ## `sift shell`
 REPL with `cd`/`ls`/`find` against the inventory. Includes `rm` for removing inventory entries (not files).
 
+## `sift dircomm`
+Compare files in two directories, across hosts allowed, simiar to coreutils comm command. 
+
+Example command:
+dircomm -r HostA:/mnt/user/media HostB:/Users/Joe/media
+
+Host: is optional and if not included, assume the local host. Resolve the host name similarly to the way the other sift coreutils like commands do, allow . for the current directory. 
+
+in memory sort the hashes of files of dir1 and dir2, then compares the two sorted lists line-by-line and produces three tab-separated columns by default:
+
+Column 1: files unique to DIR1
+
+Column 2: files unique to DIR2
+
+Column 3: files common to both
+
+Not recursive on specified directories unless -r given on command line. 
+Accept -23 to show files only in first or -13 to show files only in dir2 or -12 to show files common to both
+
+Sorting and comparison to be done by the hashs of the files in the specified directories but the output should output, into the correct column(s), the files from the respective directory that carry the hash
+
 ---
 
 ## `/files` Duplicate Metadata Enrichment (Option C)

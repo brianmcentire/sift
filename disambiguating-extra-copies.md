@@ -63,7 +63,7 @@ A file is visible if it is a member of a duplicate set.
 ## 5. Deprecated / Dismissed Concepts
 
 ### [Dismissed] "Removable Copies" (Server-Side Metric)
-*Reason:* Too heavy to compute on the fly; adds backend complexity for marginal UX gain. The distinction between "uniq dup hashes" (dirs) and "extra copies" (files) solves the user confusion without new DB queries.
+*Reason:* Too heavy to compute on the fly; adds backend complexity for marginal UX gain. The distinction between "uniq dup sets" (dirs) and "extra copies" (files) solves the user confusion without new DB queries.
 
 ### [Dismissed] "Extra Copies" on Directories
 *Reason:* Confusing. Users interpreted "0 extra copies" as "no duplicates here," hiding valid navigation paths like the PMS example. Replaced by "uniq dup sets."
