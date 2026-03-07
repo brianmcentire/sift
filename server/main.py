@@ -52,6 +52,7 @@ _directories_cache: dict[tuple, tuple] = {}
 _tree_children_cache: dict[tuple, tuple] = {}
 _tree_dup_metrics_cache: dict[tuple, tuple] = {}
 _stats_overview_cache: dict[tuple, tuple] = {}
+_hosts_cache: dict[tuple, tuple] = {}
 
 
 _MAINTENANCE_ENABLED = _env_flag("SIFT_MAINTENANCE_ENABLED", "0")
@@ -102,6 +103,7 @@ def _invalidate_query_caches() -> None:
         _tree_children_cache.clear()
         _tree_dup_metrics_cache.clear()
         _stats_overview_cache.clear()
+        _hosts_cache.clear()
 
 
 from server import db
@@ -2009,6 +2011,14 @@ def list_files_page(
     return result
 
 
+def _filter_own_host(hosts_csv: str | None, own_host: str) -> str | None:
+    """Remove the file's own host from a comma-separated other_hosts string."""
+    if not hosts_csv:
+        return None
+    others = [h for h in hosts_csv.split(",") if h != own_host]
+    return ",".join(others) if others else None
+
+
 @app.get("/files", response_model=list[FileEntry])
 def list_files(
     host: Optional[str] = None,
@@ -2126,17 +2136,23 @@ def list_files(
                         "))"
                     )
         if not dup_clause:
-            if has_duplicates is True:
-                dup_clause = (
-                    " AND f.hash IN (SELECT hash FROM files WHERE hash IS NOT NULL "
-                    "GROUP BY hash HAVING COUNT(*) > 1)"
-                )
-            else:
-                dup_clause = (
-                    " AND (f.hash IS NULL OR f.hash NOT IN "
-                    "(SELECT hash FROM files WHERE hash IS NOT NULL "
-                    "GROUP BY hash HAVING COUNT(*) > 1))"
-                )
+            # No aggregate tables available (startup window). Return 202
+            # instead of running an expensive inline GROUP BY that would
+            # hold the DB lock for seconds.
+            _log_perf(
+                "/files",
+                req_start,
+                host=host or "*",
+                has_duplicates=str(has_duplicates).lower(),
+                result="pending",
+            )
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "status": "pending",
+                    "detail": "Duplicate index is still building",
+                },
+            )
 
     where = " AND ".join(conditions)
 
@@ -2180,28 +2196,22 @@ def list_files(
             LIMIT ?
             """
     else:
-        # Prefer host_hash_stats for cross-host enrichment: one row per
-        # (host, hash) is substantially smaller than self-joining files.
+        # Two-phase enrichment: fetch base rows without GROUP BY (Phase A),
+        # then batch-enrich other_hosts for distinct hashes (Phase B).
+        # This avoids the expensive 11-column GROUP BY over all matching rows.
         has_host_hash_stats = db.query_one("SELECT 1 FROM host_hash_stats LIMIT 1")
         if has_host_hash_stats is not None:
             if use_host_dup_join:
                 sql = f"""
                 SELECT
                     f.host, f.drive, f.path_display, f.filename, f.ext,
-                    f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at,
-                    STRING_AGG(DISTINCT hhs.host ORDER BY hhs.host) AS other_hosts
+                    f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at
                 FROM files f
                 INNER JOIN host_hash_stats hdup
                     ON hdup.host = ?
                    AND hdup.hash = f.hash
                    AND hdup.copy_count_effective > 1
-                LEFT JOIN host_hash_stats hhs
-                    ON hhs.hash = f.hash
-                   AND hhs.host != f.host
-                   AND f.hash IS NOT NULL
                 WHERE {where}
-                GROUP BY f.host, f.drive, f.path_display, f.filename, f.ext,
-                         f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at, f.path
                 ORDER BY f.path
                 LIMIT ?
                 """
@@ -2209,30 +2219,21 @@ def list_files(
                 sql = f"""
                 SELECT
                     f.host, f.drive, f.path_display, f.filename, f.ext,
-                    f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at,
-                    STRING_AGG(DISTINCT hhs.host ORDER BY hhs.host) AS other_hosts
+                    f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at
                 FROM files f
-                LEFT JOIN host_hash_stats hhs
-                    ON hhs.hash = f.hash
-                   AND hhs.host != f.host
-                   AND f.hash IS NOT NULL
                 WHERE {where} {dup_clause}
-                GROUP BY f.host, f.drive, f.path_display, f.filename, f.ext,
-                         f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at, f.path
                 ORDER BY f.path
                 LIMIT ?
                 """
         else:
+            # Startup fallback: host_hash_stats empty, use files self-join.
+            # Still two-phase: fetch base rows first, enrich after.
             sql = f"""
             SELECT
                 f.host, f.drive, f.path_display, f.filename, f.ext,
-                f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at,
-                STRING_AGG(DISTINCT f2.host ORDER BY f2.host) AS other_hosts
+                f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at
             FROM files f
-            LEFT JOIN files f2 ON f2.hash = f.hash AND f2.host != f.host AND f.hash IS NOT NULL
             WHERE {where} {dup_clause}
-            GROUP BY f.host, f.drive, f.path_display, f.filename, f.ext,
-                     f.file_category, f.size_bytes, f.hash, f.mtime, f.last_seen_at, f.path
             ORDER BY f.path
             LIMIT ?
             """
@@ -2242,6 +2243,73 @@ def list_files(
     params.append(limit)
 
     rows = db.query(sql, params)
+
+    if lite:
+        # Lite mode: no enrichment needed, other_hosts is already NULL.
+        _log_perf(
+            "/files",
+            req_start,
+            host=host or "*",
+            path_prefix=path_prefix or "*",
+            hash="yes" if hash else "no",
+            iname="yes" if iname else "no",
+            lite="yes",
+            limit=limit,
+            rows=len(rows),
+        )
+        return [
+            FileEntry(
+                host=r[0],
+                drive=r[1],
+                path_display=r[2],
+                filename=r[3],
+                ext=r[4],
+                file_category=r[5],
+                size_bytes=r[6],
+                hash=r[7],
+                mtime=r[8],
+                last_seen_at=r[9],
+                other_hosts=r[10],
+            )
+            for r in rows
+        ]
+
+    # Phase B: batch-enrich other_hosts for the result set's distinct hashes.
+    # Collect non-NULL hashes from Phase A rows and look them up in bulk.
+    result_hashes = list({r[7] for r in rows if r[7] is not None})
+    other_hosts_map: dict[str, str] = {}
+
+    if result_hashes:
+        has_host_hash_stats = db.query_one("SELECT 1 FROM host_hash_stats LIMIT 1")
+        if has_host_hash_stats is not None:
+            # Fast path: use pre-aggregated host_hash_stats table.
+            hash_ph = ", ".join(["?" for _ in result_hashes])
+            enrich_rows = db.query(
+                f"""
+                SELECT hash, STRING_AGG(DISTINCT host, ',' ORDER BY host) AS hosts
+                FROM host_hash_stats
+                WHERE hash IN ({hash_ph})
+                GROUP BY hash
+                """,
+                result_hashes,
+            )
+            for er in enrich_rows:
+                other_hosts_map[er[0]] = er[1]
+        else:
+            # Startup fallback: use files table directly.
+            hash_ph = ", ".join(["?" for _ in result_hashes])
+            enrich_rows = db.query(
+                f"""
+                SELECT hash, STRING_AGG(DISTINCT host, ',' ORDER BY host) AS hosts
+                FROM files
+                WHERE hash IN ({hash_ph}) AND hash IS NOT NULL
+                GROUP BY hash
+                """,
+                result_hashes,
+            )
+            for er in enrich_rows:
+                other_hosts_map[er[0]] = er[1]
+
     _log_perf(
         "/files",
         req_start,
@@ -2249,9 +2317,10 @@ def list_files(
         path_prefix=path_prefix or "*",
         hash="yes" if hash else "no",
         iname="yes" if iname else "no",
-        lite="yes" if lite else "no",
+        lite="no",
         limit=limit,
         rows=len(rows),
+        enriched_hashes=len(result_hashes),
     )
     return [
         FileEntry(
@@ -2265,7 +2334,8 @@ def list_files(
             hash=r[7],
             mtime=r[8],
             last_seen_at=r[9],
-            other_hosts=r[10],
+            # Filter out the file's own host from the other_hosts string.
+            other_hosts=_filter_own_host(other_hosts_map.get(r[7]), r[0]),
         )
         for r in rows
     ]
@@ -2307,6 +2377,11 @@ def client_host(request: Request):
 
 @app.get("/hosts", response_model=list[HostEntry])
 def list_hosts():
+    cache_key = ("hosts",)
+    cached = _cache_get(_hosts_cache, cache_key)
+    if cached is not None:
+        return cached
+
     rows = db.query("""
         WITH all_hosts AS (
             SELECT host FROM host_stats
@@ -2344,7 +2419,7 @@ def list_hosts():
         "SELECT DISTINCT host FROM scan_runs WHERE status = 'running'"
     )
     scanning_hosts = {r[0] for r in scanning_rows}
-    return [
+    result = [
         HostEntry(
             host=r[0],
             last_scan_at=r[1],
@@ -2357,6 +2432,8 @@ def list_hosts():
         )
         for r in rows
     ]
+    _cache_set(_hosts_cache, cache_key, result)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -2643,28 +2720,38 @@ def stats_duplicates(
         [min_copies, limit, offset],
     )
 
-    result = []
-    for sr in sets_rows:
-        hash_val, filename, size_bytes, copy_count, wasted_bytes = sr
-        loc_rows = db.query(
-            "SELECT host, drive, path_display FROM files WHERE hash = ? ORDER BY host, path_display",
-            [hash_val],
+    if not sets_rows:
+        return []
+
+    # Batch-fetch all locations in one query instead of N+1.
+    all_hashes = [sr[0] for sr in sets_rows]
+    hash_ph = ", ".join(["?" for _ in all_hashes])
+    loc_rows = db.query(
+        f"""
+        SELECT hash, host, drive, path_display
+        FROM files
+        WHERE hash IN ({hash_ph})
+        ORDER BY hash, host, path_display
+        """,
+        all_hashes,
+    )
+    locs_by_hash: dict[str, list[DuplicateLocation]] = {}
+    for lr in loc_rows:
+        locs_by_hash.setdefault(lr[0], []).append(
+            DuplicateLocation(host=lr[1], drive=lr[2], path_display=lr[3])
         )
-        locations = [
-            DuplicateLocation(host=lr[0], drive=lr[1], path_display=lr[2])
-            for lr in loc_rows
-        ]
-        result.append(
-            DuplicateSet(
-                hash=hash_val,
-                filename=filename,
-                size_bytes=size_bytes,
-                copy_count=copy_count,
-                wasted_bytes=wasted_bytes,
-                locations=locations,
-            )
+
+    return [
+        DuplicateSet(
+            hash=sr[0],
+            filename=sr[1],
+            size_bytes=sr[2],
+            copy_count=sr[3],
+            wasted_bytes=sr[4],
+            locations=locs_by_hash.get(sr[0], []),
         )
-    return result
+        for sr in sets_rows
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -144,6 +144,14 @@ def cmd_find(args) -> None:
         print(f"sift: error: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # Server returns a dict (not a list) when duplicate index is pending (HTTP 202).
+    if isinstance(entries, dict) and entries.get("status") == "pending":
+        print(
+            f"sift: {entries.get('detail', 'Duplicate index is still building')}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     ls_mode = getattr(args, "ls", False)
 
     for entry in entries:
