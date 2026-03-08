@@ -397,11 +397,12 @@ export default function App() {
     if (!enrichDupMetrics) return
 
     const minAtRequest = minDupSizeRef.current
+    const selectedScopeKey = [...selectedHosts].sort().join(',')
     const metricsTargets = hostList
       .map(h => {
         const drive = forceDrive !== undefined ? forceDrive : hostDrive(h.host)
         const key = `${h.host}:${drive}:${path}`
-        const metricKey = `${h.host}:${drive}:${path}:${minAtRequest}`
+        const metricKey = `${h.host}:${drive}:${path}:${minAtRequest}:${selectedScopeKey}`
         const entries = cacheRef.current.get(key) || []
         if (!entries.length) return null
         if (dupMetricsInFlightRef.current.has(metricKey)) return null
@@ -418,7 +419,7 @@ export default function App() {
 
     const hostNames = [...new Set(hostList.map(h => h.host).filter(Boolean))]
     const selectedHostNames = [...new Set([...selectedHosts].filter(Boolean))]
-    const useHostSetMetrics = selectedHostNames.length > 1
+    const useHostSetMetrics = selectedHostNames.length > 0
 
     let metricPromises = []
     if (useHostSetMetrics) {
@@ -1003,6 +1004,11 @@ export default function App() {
     }
   }, [])
 
+  const toResultPathKey = useCallback((f) => {
+    const p = f?.path_display || ''
+    return (f?.drive ? `${f.drive}:${p}` : p).toLowerCase()
+  }, [])
+
   // ── Handle dup-hash click in hash column (file row vs dir row) ─────────────
   const handleDupHashClick = useCallback(async (fullPath, entry) => {
     // Directory rows use selected-host subtree-scoped duplicate-hash results.
@@ -1034,7 +1040,7 @@ export default function App() {
         }
         setOverlayNotice('')
         setOverlayBackStack([])
-        setHighlightedPaths(new Set(rows.map(f => (f.path_display || '').toLowerCase())))
+        setHighlightedPaths(new Set(rows.map(toResultPathKey)))
         setSubtreeDupPath(scopedPath)
         setPinnedResults(rows)
         setHashQuery('')
@@ -1054,7 +1060,7 @@ export default function App() {
         if (viewMode === 'list') pushListState('dup_hash_click')
         const files = await api.files({ hash: entry.hash, limit: 5000, lite: 1 })
         setOverlayNotice('')
-        setHighlightedPaths(new Set((files || []).map(f => (f.path_display || '').toLowerCase())))
+        setHighlightedPaths(new Set((files || []).map(toResultPathKey)))
         setPinnedSourcePath((entry.path_display || fullPath || '').toLowerCase())
         setSubtreeDupPath(null)
         setPinnedResults(files || [])
@@ -1082,7 +1088,7 @@ export default function App() {
         setPinnedSourcePath((entry.path_display || fullPath || '').toLowerCase())
         setSubtreeDupPath(null)
         setPinnedResults(allCopies || [])
-        setHighlightedPaths(new Set((inDir || []).map(f => (f.path_display || '').toLowerCase())))
+        setHighlightedPaths(new Set((inDir || []).map(toResultPathKey)))
         setHashQuery(result.hash)
       }
     } catch (err) {
@@ -1090,7 +1096,7 @@ export default function App() {
       console.error('file dup-hash click failed', err)
       setOverlayNotice('Could not load duplicate copies for this file')
     }
-  }, [hostDrive, viewMode, pushListState, selectedHosts, categoryFilter, activeDrive, pinnedResults, pushOverlayState])
+  }, [hostDrive, viewMode, pushListState, selectedHosts, categoryFilter, activeDrive, pinnedResults, pushOverlayState, toResultPathKey])
 
   // ── Handle subtree list icon → show context for subtree-seeded dup hashes ──
   const handleDupSubtreeClick = useCallback(async (fullPath, entry) => {
@@ -1125,7 +1131,7 @@ export default function App() {
         new Set(
           rows
             .filter(r => r.in_subtree)
-            .map(r => (r.path_display || '').toLowerCase()),
+            .map(toResultPathKey),
         ),
       )
       setSubtreeDupPath(scopedPath)
@@ -1135,7 +1141,7 @@ export default function App() {
       console.error('subtree context click failed', err)
       setOverlayNotice('Could not load duplicate context for this directory')
     }
-  }, [selectedHosts, categoryFilter, activeDrive])
+  }, [selectedHosts, categoryFilter, activeDrive, toResultPathKey])
 
   // ── Handle type badge click → toggle category filter ─────────────────────
   const handleTypeClick = useCallback((category) => {
