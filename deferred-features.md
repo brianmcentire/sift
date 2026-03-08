@@ -2,6 +2,12 @@
 
 Features intentionally left for future development.
 
+Tracking note:
+
+- This file is for intentionally deferred features only.
+- Active behavior contracts live in `architecture-principles.md`, `duplicate-semantics.md`, and `search-interaction-contract.md`.
+- If a deferred item starts affecting active semantics, add/update a tagged item (`[TBD]`, `[TODO]`, `[FUTURE]`) in the relevant contract doc and keep this file as a short pointer.
+
 ---
 
 ## `sift dups`
