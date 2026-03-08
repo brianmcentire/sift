@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
-import { api } from './api.js'
+import { api, subscribeInFlightCount } from './api.js'
 import { joinPath, mergeEntries, sortEntries, hostColor, fileEntryToRow, sortFileEntries, logPerf, formatClipboardPath, hasSelectedOtherHost, shouldApplyOnlyDupsInSearch } from './utils.js'
 import Header from './components/Header.jsx'
 import StatsBar from './components/StatsBar.jsx'
@@ -39,6 +39,7 @@ export default function App() {
   const [columnOrder] = useState(['size', 'date', 'seen', 'type', 'hash', 'hosts'])
   const [sortBy, setSortBy] = useState('name')
   const [sortDir, setSortDir] = useState('asc')
+  const [apiPendingCount, setApiPendingCount] = useState(0)
 
   // ── Clipboard toast ─────────────────────────────────────────────────────
   const [clipboardToast, setClipboardToast] = useState(false)
@@ -72,7 +73,10 @@ export default function App() {
   const [listHasMore, setListHasMore] = useState(false)
   const [listLoading, setListLoading] = useState(false)
   const [listPendingDetail, setListPendingDetail] = useState('')
+  const [overlayNotice, setOverlayNotice] = useState('')
   const [listActionStack, setListActionStack] = useState([])
+  const [overlayBackStack, setOverlayBackStack] = useState([])
+  const [treeMetricsRefreshing, setTreeMetricsRefreshing] = useState(false)
   const listFetchControllerRef = useRef(null)
   const listCursorRef = useRef(null)
 
@@ -228,6 +232,8 @@ export default function App() {
       .catch(() => {})
   }, [statsEnabled, minDupSize, categoryFilter, selectedHosts, hosts.length])
 
+  useEffect(() => subscribeInFlightCount(setApiPendingCount), [])
+
   // ── Sync onlyDupsRef + clear auto-expanded on toggle off ──────────────
   useEffect(() => {
     onlyDupsRef.current = onlyDups
@@ -244,23 +250,24 @@ export default function App() {
     return union
   }, [expandedPaths, dupAutoExpanded])
 
-  // ── When minDupSize changes, bust the ls cache so dup counts refresh ──────
+  // ── When minDupSize changes, refresh dup metrics without collapsing tree ───
   useEffect(() => {
     minDupSizeRef.current = minDupSize
-    cacheRef.current.clear()
     dupMetricSegmentsRef.current.clear()
     dupMetricsInFlightRef.current.clear()
-    treePageStateRef.current.clear()
+    if (viewMode === 'tree' && onlyDupsRef.current) setTreeMetricsRefreshing(true)
     setPaginationVersion(v => v + 1)
-    setExpandedPaths(new Set())
-    setDupAutoExpanded(new Map())
-    setLsFetchKey(k => k + 1)
-  }, [minDupSize])
+  }, [minDupSize, viewMode])
+
+  useEffect(() => {
+    if (viewMode !== 'tree' || !onlyDups) setTreeMetricsRefreshing(false)
+  }, [viewMode, onlyDups])
 
   // ── Fetch ls data for a path (all hosts) ─────────────────────────────────
   const fetchPath = useCallback(async (path, hostList, opts = {}) => {
     const loadMore = Boolean(opts.loadMore)
     const enrichDupMetrics = Boolean(opts.enrichDupMetrics)
+    const awaitDupMetrics = Boolean(opts.awaitDupMetrics)
     const forceDrive = opts.drive  // optional explicit drive override
 
     const hasEmptyAncestor = (host, drive, fullPath) => {
@@ -355,10 +362,10 @@ export default function App() {
 
     if (metricsTargets.length === 0) return
 
-    metricsTargets.forEach(target => {
+    const metricPromises = metricsTargets.map(target => {
       const { host, drive, key, metricKey, missing } = target
       dupMetricsInFlightRef.current.add(metricKey)
-      api.treeDupMetrics(path, host, minAtRequest, missing, drive)
+      return api.treeDupMetrics(path, host, minAtRequest, missing, drive)
         .then(data => {
           if (minDupSizeRef.current !== minAtRequest) return
           const metrics = data?.metrics || {}
@@ -387,7 +394,33 @@ export default function App() {
           dupMetricsInFlightRef.current.delete(metricKey)
         })
     })
+
+    if (awaitDupMetrics) {
+      await Promise.allSettled(metricPromises)
+    }
   }, [hostDrive])
+
+  // Keep user context on min dup size changes: refresh metrics for visible
+  // paths (current path + expanded dirs) instead of resetting expansion state.
+  useEffect(() => {
+    if (hosts.length === 0 || viewMode !== 'tree') return
+    let cancelled = false
+    const expanded = [...effectiveExpanded].filter(p => !p.startsWith('__drive__:'))
+    const paths = Array.from(new Set([currentPath, ...expanded])).slice(0, 60)
+
+    const run = async () => {
+      try {
+        await Promise.all(paths.map(p => fetchPath(p, activeHosts, { enrichDupMetrics: true, awaitDupMetrics: true })))
+      } finally {
+        if (!cancelled) setTreeMetricsRefreshing(false)
+      }
+    }
+    run()
+
+    return () => {
+      cancelled = true
+    }
+  }, [minDupSize, hosts.length, viewMode, currentPath, effectiveExpanded, activeHosts, fetchPath])
 
   const listSortBy = useMemo(() => {
     const map = { name: 'name', size: 'size', date: 'date', seen: 'seen', type: 'type', hash: 'hash' }
@@ -653,6 +686,7 @@ export default function App() {
     setPinnedResults(null)
     setPinnedSourcePath(null)
     setSubtreeDupPath(null)
+    setOverlayBackStack([])
   }, [])
 
   // ── Reset all filters / selections ───────────────────────────────────────
@@ -667,7 +701,9 @@ export default function App() {
     setPinnedResults(null)
     setPinnedSourcePath(null)
     setSubtreeDupPath(null)
+    setOverlayBackStack([])
     setListPendingDetail('')
+    setOverlayNotice('')
     setListActionStack([])
     setSelectedHosts(new Set(hosts.map(h => h.host)))
     setExpandedPaths(new Set())
@@ -747,9 +783,11 @@ export default function App() {
     setPinnedResults(null)
     setPinnedSourcePath(null)
     setSubtreeDupPath(null)
+    setOverlayBackStack([])
     setHighlightedPaths(new Set())
     setMatchedDirPaths(new Set())
     setListPendingDetail('')
+    setOverlayNotice('')
     setListActionStack([])
   }, [])
 
@@ -769,6 +807,34 @@ export default function App() {
       return next.slice(-20)
     })
   }, [dirQuery, filenameQuery, hashQuery, sortBy, sortDir, onlyDups, minDupSize, categoryFilter])
+
+  const pushOverlayState = useCallback((reason = 'overlay_action') => {
+    setOverlayBackStack(prev => {
+      const next = [...prev, {
+        reason,
+        pinnedResults,
+        pinnedSourcePath,
+        subtreeDupPath,
+        hashQuery,
+        highlightedPaths: Array.from(highlightedPaths || []),
+      }]
+      return next.slice(-12)
+    })
+  }, [pinnedResults, pinnedSourcePath, subtreeDupPath, hashQuery, highlightedPaths])
+
+  const popOverlayState = useCallback(() => {
+    setOverlayBackStack(prev => {
+      if (prev.length === 0) return prev
+      const last = prev[prev.length - 1]
+      setPinnedResults(last.pinnedResults || null)
+      setPinnedSourcePath(last.pinnedSourcePath || null)
+      setSubtreeDupPath(last.subtreeDupPath || null)
+      setHashQuery(last.hashQuery || '')
+      setHighlightedPaths(new Set(last.highlightedPaths || []))
+      setOverlayNotice('')
+      return prev.slice(0, -1)
+    })
+  }, [])
 
   const popListState = useCallback(() => {
     setListActionStack(prev => {
@@ -840,35 +906,135 @@ export default function App() {
     }
   }, [])
 
-  // ── Handle "1 extra copy" click → find dup hash and open hash overlay ──────
+  // ── Handle dup-hash click in hash column (file row vs dir row) ─────────────
   const handleDupHashClick = useCallback(async (fullPath, entry) => {
+    // Directory rows use selected-host subtree-scoped duplicate-hash results.
+    if (entry.entry_type === 'dir') {
+      try {
+        const hostsCsv = [...selectedHosts].join(',')
+        if (!hostsCsv) return
+        const categoriesCsv = categoryFilter.size > 0 ? [...categoryFilter].join(',') : ''
+        const drive = activeDrive || ''
+        const data = await api.duplicatesBySubtreeHashes(
+          hostsCsv,
+          fullPath,
+          minDupSizeRef.current,
+          'subtree',
+          categoriesCsv,
+          2000,
+          drive,
+        )
+        if (data?.status === 'pending') {
+          setOverlayNotice(data.detail || 'Duplicate index is still building')
+          return
+        }
+        const rows = Array.isArray(data) ? data : []
+        if (rows.length === 0) {
+          setOverlayNotice('No duplicate hashes matched selected hosts for this directory at current min size')
+          return
+        }
+        setOverlayNotice('')
+        setOverlayBackStack([])
+        setHighlightedPaths(new Set(rows.map(f => (f.path_display || '').toLowerCase())))
+        setSubtreeDupPath(fullPath)
+        setPinnedResults(rows)
+        setHashQuery('')
+        return
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('dir dup-hash click failed', err)
+        setOverlayNotice('Could not load duplicate hashes for this directory')
+        return
+      }
+    }
+
+    // File rows: prefer direct hash lookup (works in overlays too).
+    if (entry.hash) {
+      try {
+        if (pinnedResults !== null) pushOverlayState('file_dup_click')
+        if (viewMode === 'list') pushListState('dup_hash_click')
+        const files = await api.files({ hash: entry.hash, limit: 5000, lite: 1 })
+        setOverlayNotice('')
+        setHighlightedPaths(new Set((files || []).map(f => (f.path_display || '').toLowerCase())))
+        setPinnedSourcePath((entry.path_display || fullPath || '').toLowerCase())
+        setSubtreeDupPath(null)
+        setPinnedResults(files || [])
+        setHashQuery(entry.hash)
+        return
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('file dup-hash direct lookup failed', err)
+        setOverlayNotice('Could not load duplicate copies for this file')
+        return
+      }
+    }
+
+    // Fallback for rows missing hash: probe subtree on one host.
     const host = entry.presentHosts?.[0]
     if (!host) return
     const drive = hostDrive(host)
     try {
       const result = await api.dupHash(fullPath, host, minDupSizeRef.current, drive)
       if (result?.hash) {
+        if (pinnedResults !== null) pushOverlayState('file_dup_click')
         if (viewMode === 'list') pushListState('dup_hash_click')
-        // Find the specific files in this subtree with that hash so we can highlight them
-        const inDir = await api.files({ hash: result.hash, path_prefix: fullPath, host, limit: 50, lite: 1 })
-        setHighlightedPaths(new Set(inDir.map(f => (f.path_display || '').toLowerCase())))
+        const allCopies = await api.files({ hash: result.hash, limit: 5000, lite: 1 })
+        const inDir = await api.files({ hash: result.hash, path_prefix: fullPath, host, limit: 5000, lite: 1 })
+        setPinnedSourcePath((entry.path_display || fullPath || '').toLowerCase())
+        setSubtreeDupPath(null)
+        setPinnedResults(allCopies || [])
+        setHighlightedPaths(new Set((inDir || []).map(f => (f.path_display || '').toLowerCase())))
         setHashQuery(result.hash)
       }
-    } catch (_) {}
-  }, [hostDrive, viewMode, pushListState])
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('file dup-hash click failed', err)
+      setOverlayNotice('Could not load duplicate copies for this file')
+    }
+  }, [hostDrive, viewMode, pushListState, selectedHosts, categoryFilter, activeDrive, pinnedResults, pushOverlayState])
 
-  // ── Handle subtree dup arrow → show all dups in subtree grouped by hash ──
+  // ── Handle subtree list icon → show context for subtree-seeded dup hashes ──
   const handleDupSubtreeClick = useCallback(async (fullPath, entry) => {
-    const host = entry.presentHosts?.[0]
-    if (!host) return
-    const drive = hostDrive(host)
     try {
-      const data = await api.subtreeDups(host, fullPath, minDupSizeRef.current, 1000, drive)
-      setHighlightedPaths(new Set())
+      const hostsCsv = [...selectedHosts].join(',')
+      if (!hostsCsv) return
+      const categoriesCsv = categoryFilter.size > 0 ? [...categoryFilter].join(',') : ''
+      const drive = activeDrive || ''
+      const data = await api.duplicatesBySubtreeHashes(
+        hostsCsv,
+        fullPath,
+        minDupSizeRef.current,
+        'context',
+        categoriesCsv,
+        3000,
+        drive,
+      )
+      if (data?.status === 'pending') {
+        setOverlayNotice(data.detail || 'Duplicate index is still building')
+        return
+      }
+      const rows = Array.isArray(data) ? data : []
+      if (rows.length === 0) {
+        setOverlayNotice('No duplicate hashes matched selected hosts for this directory at current min size')
+        return
+      }
+      setOverlayNotice('')
+      setOverlayBackStack([])
+      setHighlightedPaths(
+        new Set(
+          rows
+            .filter(r => r.in_subtree)
+            .map(r => (r.path_display || '').toLowerCase()),
+        ),
+      )
       setSubtreeDupPath(fullPath)
-      setPinnedResults(data)
-    } catch (_) {}
-  }, [hostDrive])
+      setPinnedResults(rows)
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('subtree context click failed', err)
+      setOverlayNotice('Could not load duplicate context for this directory')
+    }
+  }, [selectedHosts, categoryFilter, activeDrive])
 
   // ── Handle type badge click → toggle category filter ─────────────────────
   const handleTypeClick = useCallback((category) => {
@@ -1037,7 +1203,11 @@ export default function App() {
 
   // Clear highlighted paths whenever the results overlay closes
   useEffect(() => {
-    if (activeResults === null) setHighlightedPaths(new Set())
+    if (activeResults === null) {
+      setHighlightedPaths(new Set())
+      setOverlayNotice('')
+      setOverlayBackStack([])
+    }
   }, [activeResults])
 
   // ── Search result rows ────────────────────────────────────────────────────
@@ -1045,6 +1215,7 @@ export default function App() {
     if (!activeResults) return null
     const converted = activeResults.map(fe => fileEntryToRow(fe))
     const isPinnedCopiesMode = pinnedResults !== null && !subtreeDupPath && !!pinnedSourcePath
+    const isPinnedOverlayMode = pinnedResults !== null
 
     // Keep search/overlay results host-scoped to current selection.
     // Without this, hash overlays can leak rows from unselected hosts.
@@ -1072,6 +1243,26 @@ export default function App() {
     let filtered = categoryFilter.size > 0
       ? hostFiltered.filter(r => categoryFilter.has(r.entry.file_category))
       : hostFiltered
+
+    // In pinned overlay modes, keep header search boxes useful by filtering the
+    // active overlay rows client-side as the user types.
+    if (isPinnedOverlayMode) {
+      const fNeedle = filenameQuery.trim().toLowerCase()
+      if (fNeedle) {
+        filtered = filtered.filter(r => (r.entry.filename || '').toLowerCase().includes(fNeedle))
+      }
+
+      const hNeedle = hashQuery.trim().toLowerCase()
+      if (hNeedle) {
+        filtered = filtered.filter(r => (r.entry.hash || '').toLowerCase().includes(hNeedle))
+      }
+
+      const dNeedle = dirQuery.trim().toLowerCase()
+      if (dNeedle) {
+        filtered = filtered.filter(r => (r.entry.path_display || '').toLowerCase().includes(dNeedle))
+      }
+    }
+
     if (minDupSize > 0) {
       filtered = filtered.filter(r => {
         const isDup = r.entry.dup_count > 0 || hasSelectedOtherHost(r.entry.other_hosts, selectedHosts)
@@ -1134,7 +1325,22 @@ export default function App() {
       return grouped
     }
     return sortFileEntries(filtered, sortBy, sortDir)
-  }, [activeResults, isHashResultsMode, subtreeDupPath, pinnedSourcePath, categoryFilter, minDupSize, onlyDups, selectedHosts, sortBy, sortDir])
+  }, [
+    activeResults,
+    isHashResultsMode,
+    subtreeDupPath,
+    pinnedSourcePath,
+    pinnedResults,
+    categoryFilter,
+    minDupSize,
+    onlyDups,
+    selectedHosts,
+    sortBy,
+    sortDir,
+    filenameQuery,
+    hashQuery,
+    dirQuery,
+  ])
 
   // ── Unfiltered tree rows — used for available categories so the type picker
   //    doesn't collapse while multi-selecting.  Skip in search mode since
@@ -1159,11 +1365,21 @@ export default function App() {
       })
     }
     if (onlyDups) {
-      // Strict pass: dirs with extra copies, files with dup participation.
+      if (treeMetricsRefreshing) {
+        const contextParents = new Set([currentPath, ...effectiveExpanded])
+        filtered = filtered.filter(row => {
+          if (row.entry.entry_type === 'dir') {
+            return contextParents.has(row.parentPath) || contextParents.has(row.fullPath)
+          }
+          return contextParents.has(row.parentPath)
+        })
+        return filtered
+      }
+
+      // Strict pass: dirs with duplicate hashes in subtree; files with dup participation.
       const strictRows = filtered.filter(row => {
         if (row.entry.entry_type === 'dir') {
-          const extraCopies = Math.max(0, (row.entry.dup_count || 0) - (row.entry.dup_hash_count || 0))
-          return extraCopies > 0 || hasSelectedOtherHost(row.entry.other_hosts, selectedHosts)
+          return (row.entry.dup_hash_count || 0) > 0
         }
         return row.entry.dup_count > 0 || hasSelectedOtherHost(row.entry.other_hosts, selectedHosts)
       })
@@ -1200,7 +1416,7 @@ export default function App() {
         if (!parentActive) return
         const parentVisible = effectiveExpanded.has(row.parentPath) || isChildOfRoot
         if (!parentVisible) return
-        if ((row.entry.dup_count || 0) > 0 || hasSelectedOtherHost(row.entry.other_hosts, selectedHosts)) {
+        if ((row.entry.dup_hash_count || 0) > 0) {
           keepPaths.add(row.fullPath)
           activeParents.add(row.fullPath)
         }
@@ -1211,17 +1427,16 @@ export default function App() {
       // expanded kept dir has ALL children still at dup_count=0 &&
       // dup_hash_count=0, assume metrics are in-flight and temporarily show
       // all child dirs to avoid an empty-expanded-dir flash.
-      const childDirsByParent = new Map()
+      const childRowsByParent = new Map()
       filtered.forEach(row => {
-        if (row.entry.entry_type !== 'dir') return
         if (keepPaths.has(row.fullPath)) return
-        let list = childDirsByParent.get(row.parentPath)
-        if (!list) { list = []; childDirsByParent.set(row.parentPath, list) }
+        let list = childRowsByParent.get(row.parentPath)
+        if (!list) { list = []; childRowsByParent.set(row.parentPath, list) }
         list.push(row)
       })
       for (const dirPath of keepPaths) {
         if (!(effectiveExpanded.has(dirPath) || dirPath === currentPath)) continue
-        const ch = childDirsByParent.get(dirPath)
+        const ch = childRowsByParent.get(dirPath)
         if (!ch || ch.length === 0) continue
         // Check ALL children of this parent (not just un-kept dirs) for zero metrics
         const allChildren = filtered.filter(c => c.parentPath === dirPath)
@@ -1229,14 +1444,29 @@ export default function App() {
           (c.entry.dup_count || 0) !== 0 || (c.entry.dup_hash_count || 0) !== 0
         )
         if (!metricsLoaded) {
+          // Preserve full visible branch (dirs + files) while metrics are in flight
+          // so changing min dup size does not appear to collapse navigation state.
           ch.forEach(c => keepPaths.add(c.fullPath))
         }
+      }
+
+      // Preserve current expansion context only while dup metrics are actively
+      // refreshing (e.g. after min-size changes). Outside refresh windows,
+      // strict only-dups filtering should apply normally.
+      if (treeMetricsRefreshing) {
+        const contextParents = new Set([currentPath, ...effectiveExpanded])
+        filtered.forEach(row => {
+          if (row.entry.entry_type !== 'dir') return
+          if (contextParents.has(row.parentPath) || contextParents.has(row.fullPath)) {
+            keepPaths.add(row.fullPath)
+          }
+        })
       }
 
       filtered = filtered.filter(row => keepPaths.has(row.fullPath))
     }
     return filtered
-  }, [allTreeRows, categoryFilter, minDupSize, onlyDups, selectedHosts, currentPath, effectiveExpanded])
+  }, [allTreeRows, categoryFilter, minDupSize, onlyDups, selectedHosts, currentPath, effectiveExpanded, treeMetricsRefreshing])
 
   const listRows = useMemo(() => {
     const base = listItems.map(fe => fileEntryToRow(fe))
@@ -1395,19 +1625,30 @@ export default function App() {
         : 'all copies of file'
       return {
         label,
-        clear: () => { setPinnedResults(null); setPinnedSourcePath(null); setSubtreeDupPath(null) },
+        clear: () => {
+          if (overlayBackStack.length > 0) {
+            popOverlayState()
+            return
+          }
+          setPinnedResults(null)
+          setPinnedSourcePath(null)
+          setSubtreeDupPath(null)
+          setHashQuery('')
+          setOverlayNotice('')
+          setOverlayBackStack([])
+        },
       }
     }
     if (filenameResults !== null) return {
       label: `filename: "${filenameQuery}"`,
-      clear: () => { setFilenameQuery('') },
+      clear: () => { setFilenameQuery(''); setOverlayNotice('') },
     }
     if (hashResults !== null) return {
       label: `hash: ${hashQuery}`,
-      clear: () => { setHashQuery('') },
+      clear: () => { setHashQuery(''); setOverlayNotice('') },
     }
     return null
-  }, [pinnedResults, subtreeDupPath, filenameResults, filenameQuery, hashResults, hashQuery])
+  }, [pinnedResults, subtreeDupPath, filenameResults, filenameQuery, hashResults, hashQuery, overlayBackStack.length, popOverlayState])
 
   const listBackBanner = useMemo(() => {
     if (viewMode !== 'list') return null
@@ -1449,6 +1690,7 @@ export default function App() {
         visibleColumns={visibleColumns}
         setVisibleColumns={setVisibleColumns}
         onReset={reset}
+        apiPendingCount={apiPendingCount}
       />
 
       <div className="max-w-screen-2xl mx-auto px-4">
@@ -1489,6 +1731,12 @@ export default function App() {
         {viewMode === 'list' && listPendingDetail && (
           <div className="mb-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
             {listPendingDetail}
+          </div>
+        )}
+
+        {overlayNotice && (
+          <div className="mb-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+            {overlayNotice}
           </div>
         )}
 

@@ -63,6 +63,7 @@ export default function DupSizeFilter({ value, onChange, label = 'Min dup size' 
     <div className="relative shrink-0" ref={ref}>
       <button
         onClick={() => setOpen(o => !o)}
+        title={label}
         className={`
           text-sm px-2.5 py-1.5
           bg-white border rounded-lg cursor-pointer
@@ -71,7 +72,7 @@ export default function DupSizeFilter({ value, onChange, label = 'Min dup size' 
           ${value > 0 ? 'border-blue-300 text-blue-600' : 'border-slate-200 text-slate-600'}
         `}
       >
-        {label}
+        {value > 0 ? `≥ ${formatBytes(value)}` : label}
       </button>
 
       {open && (

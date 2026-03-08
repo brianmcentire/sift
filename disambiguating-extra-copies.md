@@ -1,3 +1,51 @@
+# Tree Duplicate Semantics (Current)
+
+This section is the current source of truth for duplicate-related labels and click behavior in Tree View.
+
+## Terms
+
+- **Duplicate hash**: a hash with more than one copy in the selected-host scope (respecting min dup size).
+- **Subtree seed hash set** for directory `C`: duplicate hashes that have at least one member at `C` or below.
+- **Scoped view**: results constrained to a subtree path.
+- **Context view**: results across selected hosts, seeded by subtree membership.
+
+## Directory row metric and label
+
+- Display on directory rows: `X uniq dup hashes`.
+- `X` means: number of distinct duplicate hashes in the subtree seed hash set for that row.
+- This is presence/navigation information, not removable-copy math.
+
+## Click actions in Tree View
+
+Two adjacent controls intentionally do different jobs:
+
+1. **Click `X uniq dup hashes` (text link) → Scoped duplicate-hash view**
+   - Show results grouped by hash.
+   - Include only duplicate hashes from selected hosts that have at least one member in clicked subtree.
+   - Show only members at clicked subtree path or below.
+
+2. **Click list icon (`☰`) → Context duplicate-hash view**
+   - Start from the same subtree seed hash set.
+   - Show results grouped by hash.
+   - Include all members for those hashes across selected hosts (not path-filtered).
+   - Highlight members inside clicked subtree (blue), so local relevance remains clear.
+
+## Host scope and filtering rules
+
+- Duplicate eligibility is always computed over selected hosts.
+- `min dup size` is part of hash eligibility.
+- Hashes are grouped/displayed by hash identity; member rows follow the selected action scope.
+
+## UX guardrails
+
+- Avoid copy labels on directory rows (`extra copies` is retired for directories).
+- Keep semantics stable even when selected hosts include machines that do not contain that path.
+- Host badges on directory rows should represent path presence and avoid implying path existence where none exists.
+
+---
+
+#deprecated
+
 # Only-Dups Tree Filter: Navigation and Labeling Semantics
 
 This document captures the finalized UX semantics for the "Only dups" tree filter and associated labels, superseding prior drafts.

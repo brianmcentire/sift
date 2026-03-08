@@ -29,6 +29,7 @@ export default function Header({
   visibleColumns,
   setVisibleColumns,
   onReset,
+  apiPendingCount,
 }) {
   const isTree = viewMode === 'tree'
 
@@ -116,15 +117,31 @@ export default function Header({
           </button>
         </div>
 
-        {/* Bottom row: host chips */}
+        {/* Bottom row: host chips + API activity */}
         {hosts.length > 0 && (
-          <div className="mt-2">
-            <HostChips
-              hosts={hosts}
-              selectedHosts={selectedHosts}
-              setSelectedHosts={setSelectedHosts}
-              hostColorMap={hostColorMap}
-            />
+          <div className="mt-2 flex items-center justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <HostChips
+                hosts={hosts}
+                selectedHosts={selectedHosts}
+                setSelectedHosts={setSelectedHosts}
+                hostColorMap={hostColorMap}
+              />
+            </div>
+
+            <div className="shrink-0 flex items-center gap-2 text-[11px] text-slate-500">
+              <span>API</span>
+              {apiPendingCount > 0 ? (
+                <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-blue-700 font-medium">
+                  <span className="h-2 w-2 rounded-full bg-blue-500" />
+                  {apiPendingCount}
+                </span>
+              ) : (
+                <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-emerald-700 font-medium">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                </span>
+              )}
+            </div>
           </div>
         )}
       </div>

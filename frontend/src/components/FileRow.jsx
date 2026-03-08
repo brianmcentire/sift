@@ -63,7 +63,7 @@ const CELL_RENDERERS = {
                 ? e => { e.stopPropagation(); onDupHashClick(fullPath, entry) }
                 : undefined}
             >
-              {dirDupCount} uniq dup set{dirDupCount !== 1 ? 's' : ''}
+              {dirDupCount} uniq dup hash{dirDupCount !== 1 ? 'es' : ''}
             </span>
             {onDupSubtreeClick && (
               <span
@@ -95,7 +95,7 @@ const CELL_RENDERERS = {
   hosts: ({ entry, allHostsSet, hostColorMap }) => (
     <td key="hosts" className="py-1.5">
       <div className="flex items-center gap-1 flex-wrap">
-        {[...allHostsSet].map(h => (
+        {[...allHostsSet].sort((a, b) => a.localeCompare(b)).map(h => (
           <HostBadge key={h} host={h} hostColorMap={hostColorMap} />
         ))}
       </div>
@@ -144,7 +144,12 @@ export default function FileRow({
     otherHostList.length > 0
   )
   const isHardLinked = !isDir && Boolean(entry.is_hard_linked)
-  const allHostsSet = new Set([...(entry.presentHosts || []), ...otherHostList])
+  const presentHostsSorted = (entry.presentHosts || [])
+    .filter(h => selectedHosts.has(h))
+    .sort((a, b) => a.localeCompare(b))
+  const allHostsSet = isDir
+    ? new Set(presentHostsSorted)
+    : new Set([...presentHostsSorted, ...otherHostList])
 
   // Extra copies = files in dup groups minus the distinct dup groups
   const hashSetCount = isDir

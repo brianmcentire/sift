@@ -269,7 +269,7 @@ def _maybe_refresh_host_stats(host: str) -> None:
     ).start()
 
 
-app = FastAPI(title="sift", version="0.9.0", lifespan=lifespan)
+app = FastAPI(title="sift", version="0.9.2", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
@@ -1014,6 +1014,180 @@ def duplicates_in_subtree(
             mtime=r[8],
             last_seen_at=r[9],
             other_hosts=None,
+            in_subtree=True,
+        )
+        for r in rows
+    ]
+
+
+@app.get("/files/duplicates-by-subtree-hashes", response_model=list[FileEntry])
+def duplicates_by_subtree_hashes(
+    hosts: str = Query(..., description="Comma-separated selected hosts"),
+    path_prefix: str = Query(...),
+    drive: str = Query(""),
+    min_size: int = Query(0, ge=0),
+    scope: str = Query("subtree", pattern="^(subtree|context)$"),
+    categories: str = Query("", description="Comma-separated categories filter"),
+    limit: int = Query(2000, ge=1, le=10000),
+):
+    req_start = time.monotonic()
+    prefix = path_prefix.lower().rstrip("/")
+    lower_bound = prefix + "/"
+    upper_bound = prefix + "0"
+
+    host_list = [h.strip() for h in hosts.split(",") if h.strip()]
+    if not host_list:
+        raise HTTPException(status_code=400, detail="hosts is required")
+    host_list = list(dict.fromkeys(host_list))
+    category_list = [c.strip() for c in categories.split(",") if c.strip()]
+
+    # Strict freshness gate: avoid expensive live fallback under lock.
+    key_params = [f"host_hash_stats:{h}" for h in host_list]
+    ph = ", ".join(["?" for _ in key_params])
+    meta_rows = db.query(
+        f"SELECT key, status FROM aggregate_meta WHERE key IN ({ph})",
+        key_params,
+    )
+    meta_by_key = {str(r[0]): str(r[1]) for r in meta_rows}
+    all_fresh = all(meta_by_key.get(k) == "fresh" for k in key_params)
+    if not all_fresh:
+        _log_perf(
+            "/files/duplicates-by-subtree-hashes",
+            req_start,
+            hosts=len(host_list),
+            scope=scope,
+            result="pending",
+        )
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "pending",
+                "detail": "Duplicate index is still building",
+            },
+        )
+
+    host_ph = ", ".join(["?" for _ in host_list])
+    seed_cat_clause = ""
+    row_cat_clause = ""
+    seed_drive_clause = ""
+    row_drive_clause = ""
+    if category_list:
+        cat_ph = ", ".join(["?" for _ in category_list])
+        seed_cat_clause = f" AND f.file_category IN ({cat_ph})"
+        row_cat_clause = f" AND f.file_category IN ({cat_ph})"
+
+    # Subtree seed should honor clicked drive when provided. Context result rows
+    # intentionally do not force drive so users can see all copies for seeded hashes.
+    if drive:
+        seed_drive_clause = " AND f.drive = ?"
+        if scope == "subtree":
+            row_drive_clause = " AND f.drive = ?"
+
+    scoped_filter = ""
+    if scope == "subtree":
+        scoped_filter = " AND ((f.path >= ? AND f.path < ?) OR f.path = ?)"
+
+    sql = f"""
+    WITH selected_dupe_hashes AS (
+        SELECT hash, SUM(copy_count_effective) AS copies, MAX(size_bytes) AS size_bytes
+        FROM host_hash_stats
+        WHERE host IN ({host_ph}) AND hash IS NOT NULL
+        GROUP BY hash
+        HAVING SUM(copy_count_effective) > 1
+           AND COALESCE(MAX(size_bytes), 0) >= ?
+    ),
+    seed_hashes AS (
+        SELECT DISTINCT f.hash
+        FROM files f
+        INNER JOIN selected_dupe_hashes sdh ON sdh.hash = f.hash
+        WHERE f.host IN ({host_ph})
+          {seed_drive_clause}
+          AND ((f.path >= ? AND f.path < ?) OR f.path = ?)
+          {seed_cat_clause}
+    )
+    SELECT
+        f.host,
+        f.drive,
+        f.path_display,
+        f.filename,
+        f.ext,
+        f.file_category,
+        f.size_bytes,
+        f.hash,
+        f.mtime,
+        f.last_seen_at,
+        (
+            SELECT STRING_AGG(DISTINCT hhs.host, ',' ORDER BY hhs.host)
+            FROM host_hash_stats hhs
+            WHERE hhs.hash = f.hash
+              AND hhs.host IN ({host_ph})
+              AND hhs.host != f.host
+        ) AS other_hosts,
+        COALESCE(sdh.copies, 0) AS dup_count,
+        CASE WHEN ((f.path >= ? AND f.path < ?) OR f.path = ?) THEN TRUE ELSE FALSE END AS in_subtree
+    FROM files f
+    INNER JOIN seed_hashes sh ON sh.hash = f.hash
+    INNER JOIN selected_dupe_hashes sdh ON sdh.hash = f.hash
+    WHERE f.host IN ({host_ph})
+      {row_drive_clause}
+      {row_cat_clause}
+      {scoped_filter}
+    ORDER BY LOWER(f.hash), LOWER(f.path)
+    LIMIT ?
+    """
+
+    params: list = [
+        *host_list,
+        min_size,
+        *host_list,
+    ]
+    if drive:
+        params.append(drive)
+    params.extend(
+        [
+            lower_bound,
+            upper_bound,
+            prefix,
+            *category_list,
+            *host_list,
+            lower_bound,
+            upper_bound,
+            prefix,
+            *host_list,
+            *category_list,
+        ]
+    )
+    if drive and scope == "subtree":
+        params.append(drive)
+    if scope == "subtree":
+        params.extend([lower_bound, upper_bound, prefix])
+    params.append(limit)
+
+    rows = db.query(sql, params)
+    _log_perf(
+        "/files/duplicates-by-subtree-hashes",
+        req_start,
+        hosts=len(host_list),
+        scope=scope,
+        categories=len(category_list),
+        min_size=min_size,
+        rows=len(rows),
+    )
+    return [
+        FileEntry(
+            host=r[0],
+            drive=r[1],
+            path_display=r[2],
+            filename=r[3],
+            ext=r[4],
+            file_category=r[5],
+            size_bytes=r[6],
+            hash=r[7],
+            mtime=r[8],
+            last_seen_at=r[9],
+            other_hosts=r[10],
+            dup_count=r[11] or 0,
+            in_subtree=bool(r[12]),
         )
         for r in rows
     ]

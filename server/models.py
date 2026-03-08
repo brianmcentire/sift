@@ -160,6 +160,7 @@ class FileEntry(BaseModel):
     last_seen_at: Optional[datetime] = None
     other_hosts: Optional[str] = None
     dup_count: int = 0
+    in_subtree: bool = False
 
 
 class FilePageResponse(BaseModel):
