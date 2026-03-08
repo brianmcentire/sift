@@ -112,6 +112,7 @@ from server.models import (
     DuplicateSet,
     FileEntry,
     FilePageResponse,
+    DuplicateHashCountResponse,
     FileRecord,
     HostEntry,
     LsEntry,
@@ -1193,6 +1194,92 @@ def duplicates_by_subtree_hashes(
     ]
 
 
+@app.get(
+    "/files/duplicates-by-subtree-hashes/count",
+    response_model=DuplicateHashCountResponse,
+)
+def duplicates_by_subtree_hashes_count(
+    hosts: str = Query(..., description="Comma-separated selected hosts"),
+    path_prefix: str = Query(...),
+    drive: str = Query(""),
+    min_size: int = Query(0, ge=0),
+    categories: str = Query("", description="Comma-separated categories filter"),
+):
+    req_start = time.monotonic()
+    prefix = path_prefix.lower().rstrip("/")
+    lower_bound = prefix + "/"
+    upper_bound = prefix + "0"
+
+    host_list = [h.strip() for h in hosts.split(",") if h.strip()]
+    if not host_list:
+        raise HTTPException(status_code=400, detail="hosts is required")
+    host_list = list(dict.fromkeys(host_list))
+    category_list = [c.strip() for c in categories.split(",") if c.strip()]
+
+    key_params = [f"host_hash_stats:{h}" for h in host_list]
+    ph = ", ".join(["?" for _ in key_params])
+    meta_rows = db.query(
+        f"SELECT key, status FROM aggregate_meta WHERE key IN ({ph})",
+        key_params,
+    )
+    meta_by_key = {str(r[0]): str(r[1]) for r in meta_rows}
+    all_fresh = all(meta_by_key.get(k) == "fresh" for k in key_params)
+    if not all_fresh:
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "pending",
+                "detail": "Duplicate index is still building",
+            },
+        )
+
+    host_ph = ", ".join(["?" for _ in host_list])
+    cat_clause = ""
+    if category_list:
+        cat_ph = ", ".join(["?" for _ in category_list])
+        cat_clause = f" AND f.file_category IN ({cat_ph})"
+    drive_clause = ""
+    if drive:
+        drive_clause = " AND f.drive = ?"
+
+    sql = f"""
+    WITH selected_dupe_hashes AS (
+        SELECT hash
+        FROM host_hash_stats
+        WHERE host IN ({host_ph}) AND hash IS NOT NULL
+        GROUP BY hash
+        HAVING SUM(copy_count_effective) > 1
+           AND COALESCE(MAX(size_bytes), 0) >= ?
+    ),
+    seed_hashes AS (
+        SELECT DISTINCT f.hash
+        FROM files f
+        INNER JOIN selected_dupe_hashes sdh ON sdh.hash = f.hash
+        WHERE f.host IN ({host_ph})
+          {drive_clause}
+          AND ((f.path >= ? AND f.path < ?) OR f.path = ?)
+          {cat_clause}
+    )
+    SELECT COUNT(*) FROM seed_hashes
+    """
+    params: list = [*host_list, min_size, *host_list]
+    if drive:
+        params.append(drive)
+    params.extend([lower_bound, upper_bound, prefix, *category_list])
+
+    row = db.query_one(sql, params)
+    count = int(row[0]) if row and row[0] is not None else 0
+    _log_perf(
+        "/files/duplicates-by-subtree-hashes/count",
+        req_start,
+        hosts=len(host_list),
+        min_size=min_size,
+        categories=len(category_list),
+        count=count,
+    )
+    return DuplicateHashCountResponse(uniq_hash_count=count)
+
+
 @app.get("/files/dup-ancestor-dirs")
 def dup_ancestor_dirs(
     host: str = Query(...),
@@ -1581,6 +1668,7 @@ def tree_children(
 def tree_dup_metrics(
     path: str = "/",
     host: str = "",
+    hosts: str = "",
     drive: str = Query(""),
     depth: int = Query(1, ge=1),
     min_size: int = Query(0, ge=0),
@@ -1591,6 +1679,134 @@ def tree_dup_metrics(
     lower_bound = prefix + "/"
     upper_bound = prefix + "0"
     seg_list = [s.strip() for s in segments if s.strip()]
+    host_list = [h.strip() for h in hosts.split(",") if h.strip()]
+    host_list = list(dict.fromkeys(host_list))
+
+    if host_list:
+        hosts_key = ",".join(host_list)
+        seg_cache = "\0".join(sorted(seg_list)) if seg_list else ""
+        cache_key = ("hosts", hosts_key, drive, prefix, depth, min_size, seg_cache)
+        cached = _cache_get(_tree_dup_metrics_cache, cache_key)
+        if cached is not None:
+            return cached
+
+        key_params = [f"host_hash_stats:{h}" for h in host_list]
+        ph = ", ".join(["?" for _ in key_params])
+        meta_rows = db.query(
+            f"SELECT key, status FROM aggregate_meta WHERE key IN ({ph})",
+            key_params,
+        )
+        meta_by_key = {str(r[0]): str(r[1]) for r in meta_rows}
+        all_fresh = all(meta_by_key.get(k) == "fresh" for k in key_params)
+        if not all_fresh:
+            response = TreeDupMetricsResponse(
+                metrics={}, aggregated_at=None, data_freshness="stale"
+            )
+            _cache_set(_tree_dup_metrics_cache, cache_key, response)
+            return response
+
+        split_idx = prefix.count("/") + depth + 1
+        host_ph = ", ".join(["?" for _ in host_list])
+        seg_clause = ""
+        seg_params: list = []
+        if seg_list:
+            placeholders = ", ".join(["?" for _ in seg_list])
+            seg_clause = (
+                f" AND SPLIT_PART(f.path, '/', {split_idx}) IN ({placeholders})"
+            )
+            seg_params = seg_list
+
+        sql = f"""
+        WITH scoped AS (
+            SELECT
+                SPLIT_PART(f.path, '/', {split_idx}) AS segment,
+                f.host,
+                f.hash,
+                f.size_bytes
+            FROM files f
+            WHERE f.host IN ({host_ph})
+              AND f.drive = ?
+              AND ((f.path >= ? AND f.path < ?) OR f.path = ?)
+              AND SPLIT_PART(f.path, '/', {split_idx}) != ''
+              AND f.hash IS NOT NULL
+              {seg_clause}
+        ),
+        selected_dupe_hashes AS (
+            SELECT hash
+            FROM host_hash_stats
+            WHERE host IN ({host_ph}) AND hash IS NOT NULL
+            GROUP BY hash
+            HAVING SUM(copy_count_effective) > 1
+               AND COALESCE(MAX(size_bytes), 0) >= ?
+        ),
+        seg_totals AS (
+            SELECT segment,
+                   COUNT(*) AS file_count,
+                   SUM(COALESCE(size_bytes, 0)) AS total_bytes
+            FROM scoped
+            GROUP BY segment
+        ),
+        seg_dups AS (
+            SELECT s.segment,
+                   COUNT(*) AS dup_count,
+                   COUNT(DISTINCT s.hash) AS dup_hash_count,
+                   STRING_AGG(DISTINCT s.host, ',' ORDER BY s.host) AS other_hosts
+            FROM scoped s
+            INNER JOIN selected_dupe_hashes d ON d.hash = s.hash
+            GROUP BY s.segment
+        )
+        SELECT
+            st.segment,
+            COALESCE(sd.dup_count, 0) AS dup_count,
+            COALESCE(sd.dup_hash_count, 0) AS dup_hash_count,
+            sd.other_hosts,
+            FALSE AS is_hard_linked,
+            st.file_count,
+            st.total_bytes
+        FROM seg_totals st
+        LEFT JOIN seg_dups sd ON sd.segment = st.segment
+        """
+        params: list = [
+            *host_list,
+            drive,
+            lower_bound,
+            upper_bound,
+            prefix,
+            *seg_params,
+            *host_list,
+            min_size,
+        ]
+        rows = db.query(sql, params)
+        metrics = {
+            r[0]: TreeDupMetric(
+                dup_count=r[1] or 0,
+                dup_hash_count=r[2] or 0,
+                other_hosts=r[3],
+                is_hard_linked=bool(r[4]),
+                file_count=r[5],
+                total_bytes=r[6],
+            )
+            for r in rows
+        }
+        response = TreeDupMetricsResponse(
+            metrics=metrics, aggregated_at=None, data_freshness="fresh"
+        )
+        _cache_set(_tree_dup_metrics_cache, cache_key, response)
+        _log_perf(
+            "/tree/dup-metrics",
+            req_start,
+            host="*",
+            hosts=len(host_list),
+            path=prefix or "/",
+            depth=depth,
+            min_size=min_size,
+            segments="yes" if segments else "no",
+            rows=len(metrics),
+            cache="miss",
+            source="agg_hosts",
+        )
+        return response
+
     seg_cache = "\0".join(sorted(seg_list)) if seg_list else ""
     cache_key = (host, drive, prefix, depth, min_size, seg_cache)
     cached = _cache_get(_tree_dup_metrics_cache, cache_key)

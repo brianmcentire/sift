@@ -80,6 +80,87 @@ class TestTreeChildren:
 
 
 class TestTreeDupMetrics:
+    def test_hosts_scope_counts_selected_host_duplicates(self, client):
+        insert_files(
+            [
+                make_file(
+                    host="mac",
+                    path="/mnt/a.bin",
+                    filename="a.bin",
+                    hash=HASH_A,
+                    size=20,
+                ),
+                make_file(
+                    host="unraid",
+                    path="/mnt/b.bin",
+                    filename="b.bin",
+                    hash=HASH_A,
+                    size=20,
+                ),
+                make_file(
+                    host="pi", path="/mnt/c.bin", filename="c.bin", hash=HASH_A, size=20
+                ),
+            ]
+        )
+        db_module.refresh_host_hash_stats("mac")
+        db_module.refresh_host_hash_stats("unraid")
+        db_module.refresh_host_hash_stats("pi")
+        db_module.set_aggregate_meta("host_hash_stats:mac", "fresh")
+        db_module.set_aggregate_meta("host_hash_stats:unraid", "fresh")
+        db_module.set_aggregate_meta("host_hash_stats:pi", "fresh")
+
+        resp = client.get(
+            "/tree/dup-metrics",
+            params={
+                "path": "/",
+                "hosts": "mac,unraid",
+                "segments": ["mnt"],
+                "min_size": 0,
+            },
+        )
+        assert resp.status_code == 200
+        metrics = resp.json()["metrics"]
+        assert metrics["mnt"]["dup_hash_count"] == 1
+        assert metrics["mnt"]["dup_count"] == 2
+
+    def test_hosts_scope_returns_stale_when_any_host_not_fresh(self, client):
+        insert_files(
+            [
+                make_file(
+                    host="mac",
+                    path="/mnt/a.bin",
+                    filename="a.bin",
+                    hash=HASH_A,
+                    size=20,
+                ),
+                make_file(
+                    host="unraid",
+                    path="/mnt/b.bin",
+                    filename="b.bin",
+                    hash=HASH_A,
+                    size=20,
+                ),
+            ]
+        )
+        db_module.refresh_host_hash_stats("mac")
+        db_module.refresh_host_hash_stats("unraid")
+        db_module.set_aggregate_meta("host_hash_stats:mac", "fresh")
+        db_module.set_aggregate_meta("host_hash_stats:unraid", "building")
+
+        resp = client.get(
+            "/tree/dup-metrics",
+            params={
+                "path": "/",
+                "hosts": "mac,unraid",
+                "segments": ["mnt"],
+                "min_size": 0,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["data_freshness"] == "stale"
+        assert data["metrics"] == {}
+
     def test_returns_dup_metrics_for_same_host_duplicates(self, client):
         insert_files(
             [

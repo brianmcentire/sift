@@ -74,9 +74,10 @@ export const api = {
     limit: query.limit ?? 200,
     cursor: query.cursor,
   }, options),
-  treeDupMetrics: (path, host, minSize = 0, segments = [], drive = '', options = {}) => get('/tree/dup-metrics', {
+  treeDupMetrics: (path, host, minSize = 0, segments = [], drive = '', options = {}, hosts = '') => get('/tree/dup-metrics', {
     path,
     host,
+    hosts: hosts || undefined,
     drive,
     depth: 1,
     min_size: minSize,
@@ -94,6 +95,14 @@ export const api = {
       scope,
       categories,
       limit,
+    }, options),
+  duplicatesBySubtreeHashesCount: (hosts, pathPrefix, minSize = 0, categories = '', drive = '', options = {}) =>
+    get('/files/duplicates-by-subtree-hashes/count', {
+      hosts,
+      drive,
+      path_prefix: pathPrefix,
+      min_size: minSize,
+      categories,
     }, options),
   dupDirAncestors: (host, pathPrefix, minSize = 0, maxPaths = 500, drive = '') =>
     get('/files/dup-ancestor-dirs', { host, drive, path_prefix: pathPrefix, min_size: minSize, max_paths: maxPaths }),

@@ -178,8 +178,8 @@ export function mergeEntries(hostDataMap, selectedHosts) {
       // Preserve null for dirs until dup-metrics enrichment provides real values
       if (entry.file_count != null) m.file_count = (m.file_count || 0) + entry.file_count
       if (entry.total_bytes != null) m.total_bytes = (m.total_bytes || 0) + entry.total_bytes
-      m.dup_count += entry.dup_count || 0
-      m.dup_hash_count += entry.dup_hash_count || 0
+      m.dup_count = Math.max(m.dup_count || 0, entry.dup_count || 0)
+      m.dup_hash_count = Math.max(m.dup_hash_count || 0, entry.dup_hash_count || 0)
 
       // Use the first non-null values for display fields
       if (entry.segment_display) m.segment_display = entry.segment_display

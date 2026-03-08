@@ -13,6 +13,63 @@ from tests.server.conftest import (
 
 
 class TestDuplicatesBySubtreeHashes:
+    def test_count_endpoint_returns_unique_seed_hash_count(self, client):
+        insert_files(
+            [
+                make_file(
+                    host="pc",
+                    drive="C",
+                    path="/a/one.bin",
+                    filename="one.bin",
+                    hash=HASH_A,
+                    size=200,
+                ),
+                make_file(
+                    host="pc",
+                    drive="C",
+                    path="/b/two.bin",
+                    filename="two.bin",
+                    hash=HASH_A,
+                    size=200,
+                ),
+                make_file(
+                    host="nas",
+                    drive="",
+                    path="/mnt/one.bin",
+                    filename="one.bin",
+                    hash=HASH_A,
+                    size=200,
+                ),
+                make_file(
+                    host="pc",
+                    drive="C",
+                    path="/a/three.bin",
+                    filename="three.bin",
+                    hash=HASH_B,
+                    size=200,
+                ),
+                make_file(
+                    host="nas",
+                    drive="",
+                    path="/mnt/three.bin",
+                    filename="three.bin",
+                    hash=HASH_B,
+                    size=200,
+                ),
+            ]
+        )
+        db_module.refresh_host_hash_stats("pc")
+        db_module.refresh_host_hash_stats("nas")
+        db_module.set_aggregate_meta("host_hash_stats:pc", "fresh")
+        db_module.set_aggregate_meta("host_hash_stats:nas", "fresh")
+
+        resp = client.get(
+            "/files/duplicates-by-subtree-hashes/count",
+            params={"hosts": "pc,nas", "drive": "C", "path_prefix": "/", "min_size": 0},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["uniq_hash_count"] == 2
+
     def test_subtree_scope_returns_only_subtree_members(self, client):
         insert_files(
             [

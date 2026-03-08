@@ -77,6 +77,7 @@ export default function App() {
   const [listActionStack, setListActionStack] = useState([])
   const [overlayBackStack, setOverlayBackStack] = useState([])
   const [treeMetricsRefreshing, setTreeMetricsRefreshing] = useState(false)
+  const [driveDupHashCounts, setDriveDupHashCounts] = useState({})
   const listFetchControllerRef = useRef(null)
   const listCursorRef = useRef(null)
 
@@ -91,6 +92,14 @@ export default function App() {
     () => hosts.filter(h => selectedHosts.has(h.host)),
     [hosts, selectedHosts],
   )
+
+  const availableDrives = useMemo(() => {
+    const s = new Set()
+    activeHosts.forEach(h => {
+      if (Array.isArray(h.drives)) h.drives.forEach(d => s.add(d))
+    })
+    return [...s].sort()
+  }, [activeHosts])
 
   // ── Drive helpers ───────────────────────────────────────────────────────
   // For a host, determine the effective drive letter to use in API calls.
@@ -234,6 +243,51 @@ export default function App() {
 
   useEffect(() => subscribeInFlightCount(setApiPendingCount), [])
 
+  useEffect(() => {
+    if (viewMode !== 'tree') return
+    if (availableDrives.length === 0) {
+      setDriveDupHashCounts({})
+      return
+    }
+
+    const hostsCsv = [...selectedHosts].join(',')
+    if (!hostsCsv) {
+      setDriveDupHashCounts({})
+      return
+    }
+
+    const categoriesCsv = categoryFilter.size > 0 ? [...categoryFilter].join(',') : ''
+    let cancelled = false
+    const next = {}
+
+    const run = async () => {
+      await Promise.all(
+        availableDrives.map(async (d) => {
+          try {
+            const res = await api.duplicatesBySubtreeHashesCount(
+              hostsCsv,
+              '/',
+              minDupSize,
+              categoriesCsv,
+              d,
+            )
+            if (!cancelled) {
+              next[d] = Number(res?.uniq_hash_count || 0)
+            }
+          } catch {
+            if (!cancelled) next[d] = 0
+          }
+        }),
+      )
+      if (!cancelled) setDriveDupHashCounts(next)
+    }
+    run()
+
+    return () => {
+      cancelled = true
+    }
+  }, [viewMode, availableDrives, selectedHosts, minDupSize, categoryFilter])
+
   // ── Sync onlyDupsRef + clear auto-expanded on toggle off ──────────────
   useEffect(() => {
     onlyDupsRef.current = onlyDups
@@ -362,7 +416,49 @@ export default function App() {
 
     if (metricsTargets.length === 0) return
 
-    const metricPromises = metricsTargets.map(target => {
+    const hostNames = [...new Set(hostList.map(h => h.host).filter(Boolean))]
+    const selectedHostNames = [...new Set([...selectedHosts].filter(Boolean))]
+    const useHostSetMetrics = selectedHostNames.length > 1
+
+    let metricPromises = []
+    if (useHostSetMetrics) {
+      metricsTargets.forEach(target => dupMetricsInFlightRef.current.add(target.metricKey))
+      const unionMissing = [...new Set(metricsTargets.flatMap(t => t.missing))]
+      const hostsCsv = selectedHostNames.join(',')
+      const driveForSet = forceDrive !== undefined ? forceDrive : (metricsTargets[0]?.drive || hostDrive(hostNames[0]))
+      const p = api.treeDupMetrics(path, '', minAtRequest, unionMissing, driveForSet, {}, hostsCsv)
+        .then(data => {
+          if (minDupSizeRef.current !== minAtRequest) return
+          const metrics = data?.metrics || {}
+          metricsTargets.forEach(target => {
+            const existing = cacheRef.current.get(target.key) || []
+            const merged = existing.map(entry => {
+              const m = metrics[entry.segment]
+              if (!m) return entry
+              return {
+                ...entry,
+                dup_count: m.dup_count ?? 0,
+                dup_hash_count: m.dup_hash_count ?? 0,
+                other_hosts: m.other_hosts ?? null,
+                is_hard_linked: Boolean(m.is_hard_linked),
+                ...(m.file_count != null ? { file_count: m.file_count } : {}),
+                ...(m.total_bytes != null ? { total_bytes: m.total_bytes } : {}),
+              }
+            })
+            cacheRef.current.set(target.key, merged)
+            const loaded = dupMetricSegmentsRef.current.get(target.metricKey) || new Set()
+            target.missing.forEach(seg => loaded.add(seg))
+            dupMetricSegmentsRef.current.set(target.metricKey, loaded)
+          })
+          setMetadataVersion(v => v + 1)
+        })
+        .catch(() => {})
+        .finally(() => {
+          metricsTargets.forEach(target => dupMetricsInFlightRef.current.delete(target.metricKey))
+        })
+      metricPromises = [p]
+    } else {
+      metricPromises = metricsTargets.map(target => {
       const { host, drive, key, metricKey, missing } = target
       dupMetricsInFlightRef.current.add(metricKey)
       return api.treeDupMetrics(path, host, minAtRequest, missing, drive)
@@ -393,12 +489,13 @@ export default function App() {
         .finally(() => {
           dupMetricsInFlightRef.current.delete(metricKey)
         })
-    })
+      })
+    }
 
     if (awaitDupMetrics) {
       await Promise.allSettled(metricPromises)
     }
-  }, [hostDrive])
+  }, [hostDrive, selectedHosts])
 
   // Keep user context on min dup size changes: refresh metrics for visible
   // paths (current path + expanded dirs) instead of resetting expansion state.
@@ -914,10 +1011,12 @@ export default function App() {
         const hostsCsv = [...selectedHosts].join(',')
         if (!hostsCsv) return
         const categoriesCsv = categoryFilter.size > 0 ? [...categoryFilter].join(',') : ''
-        const drive = activeDrive || ''
+        const isDriveNode = Boolean(entry.isDriveNode) || String(fullPath || '').startsWith('__drive__:')
+        const scopedPath = isDriveNode ? '/' : fullPath
+        const drive = isDriveNode ? (entry.driveLabel || activeDrive || '') : (activeDrive || '')
         const data = await api.duplicatesBySubtreeHashes(
           hostsCsv,
-          fullPath,
+          scopedPath,
           minDupSizeRef.current,
           'subtree',
           categoriesCsv,
@@ -936,7 +1035,7 @@ export default function App() {
         setOverlayNotice('')
         setOverlayBackStack([])
         setHighlightedPaths(new Set(rows.map(f => (f.path_display || '').toLowerCase())))
-        setSubtreeDupPath(fullPath)
+        setSubtreeDupPath(scopedPath)
         setPinnedResults(rows)
         setHashQuery('')
         return
@@ -999,10 +1098,12 @@ export default function App() {
       const hostsCsv = [...selectedHosts].join(',')
       if (!hostsCsv) return
       const categoriesCsv = categoryFilter.size > 0 ? [...categoryFilter].join(',') : ''
-      const drive = activeDrive || ''
+      const isDriveNode = Boolean(entry?.isDriveNode) || String(fullPath || '').startsWith('__drive__:')
+      const scopedPath = isDriveNode ? '/' : fullPath
+      const drive = isDriveNode ? (entry?.driveLabel || activeDrive || '') : (activeDrive || '')
       const data = await api.duplicatesBySubtreeHashes(
         hostsCsv,
-        fullPath,
+        scopedPath,
         minDupSizeRef.current,
         'context',
         categoriesCsv,
@@ -1027,7 +1128,7 @@ export default function App() {
             .map(r => (r.path_display || '').toLowerCase()),
         ),
       )
-      setSubtreeDupPath(fullPath)
+      setSubtreeDupPath(scopedPath)
       setPinnedResults(rows)
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -1106,11 +1207,11 @@ export default function App() {
                 if (e.total_bytes != null) driveEntry.total_bytes = (driveEntry.total_bytes || 0) + e.total_bytes
                 if (e.file_count != null) driveEntry.file_count = (driveEntry.file_count || 0) + e.file_count
                 driveEntry.dup_count += e.dup_count || 0
-                driveEntry.dup_hash_count += e.dup_hash_count || 0
               }
             }
           }
         })
+        driveEntry.dup_hash_count = Number(driveDupHashCounts[d] || 0)
         driveEntry.presentHosts = activeHosts
           .filter(h => h.drives && h.drives.includes(d))
           .map(h => h.host)
@@ -1165,7 +1266,7 @@ export default function App() {
 
     return rows
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hosts, selectedHosts, activeHosts, sortBy, sortDir, effectiveExpanded, structureVersion, metadataVersion, hasMultiDriveHost, hostDrive])
+  }, [hosts, selectedHosts, activeHosts, sortBy, sortDir, effectiveExpanded, structureVersion, metadataVersion, hasMultiDriveHost, hostDrive, driveDupHashCounts])
 
   // Helper for building rows within a specific drive context
   const buildRowsForDrive = useCallback((parentPath, depth, parentDisplayPath, drive) => {

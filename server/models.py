@@ -169,6 +169,10 @@ class FilePageResponse(BaseModel):
     has_more: bool = False
 
 
+class DuplicateHashCountResponse(BaseModel):
+    uniq_hash_count: int
+
+
 class HostEntry(BaseModel):
     host: str
     last_scan_at: Optional[datetime]
