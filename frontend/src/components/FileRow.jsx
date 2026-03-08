@@ -43,7 +43,7 @@ const CELL_RENDERERS = {
   ),
 
   hash: ({ entry, extraCopies, fullPath, onDupHashClick, onDupSubtreeClick, hashFilterActive }) => {
-    // For directories: show "uniq dup sets" (stable set count) instead of "extra copies" (intra-redundancy).
+    // For directories: show "uniq dup hashes" (stable set count) instead of "extra copies" (intra-redundancy).
     // This aligns with navigation visibility: if a dir is shown, it's because it leads to duplicate sets.
     const dirDupCount = entry.entry_type === 'dir' ? (entry.dup_hash_count || 0) : 0
     

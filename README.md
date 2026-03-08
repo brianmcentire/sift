@@ -237,10 +237,10 @@ Open `http://localhost:8765` (or your server address) after starting `sift serve
 
 ### Features
 
-- **Tree browser** — navigate your filesystem inventory with inline expand/collapse. Click a directory to expand it; click a file to see all copies of that file across all hosts.
+- **Tree browser - Front End UI** — navigate your filesystem inventory with inline expand/collapse. Click a directory to expand it; click a file to see all copies of that file across all hosts.
 - **Directory search** — type in the directory search box to expand the tree directly to matching directories, highlighted in blue. Non-matching ancestor directories are auto-expanded; matching dirs stay collapsed so you can open them at will. Hover any directory row to reveal a ⧉ button that copies its path to the clipboard.
 - **Duplicate highlighting** — amber rows are duplicate files (same hash, multiple copies). Orange rows are hard-linked files (same inode, excluded from dup counts).
-- **"Extra copies" on directories** — the hash column shows how many redundant file copies exist within a directory subtree. A directory with "3 extra copies" means 3 files could be removed while keeping one of each. Note that the number of extra copies is typically much larger than the number of duplicate sets — a "duplicate set" is one unique file that has copies, while "extra copies" counts every redundant instance. For example, if you have 2 duplicate sets — one photo with 4 copies and one document with 3 copies — that's 2 duplicate sets but 5 extra copies (3 + 2, keeping one of each).
+- **Directory duplicate hash metrics** — directory hash cells show `X uniq dup hashes` (distinct duplicate hash sets reachable under that subtree). Clicking the text shows subtree-scoped duplicate members; clicking the list icon (`☰`) shows context results (all selected-host copies for those seeded hashes), with in-subtree rows highlighted.
 - **Cross-host host badges** — each file row shows which hosts it exists on, color-coded per host.
 - **Search** — filename search (glob-style, `*` wildcards), hash search (prefix match), and directory name search (tree expansion to matches).
 - **← Back navigation** — when viewing file copies or hash search results, a ← Back button returns to the tree view.
@@ -294,8 +294,6 @@ That's it. No other files are created, modified, or deleted. There are no `--for
 
 `sift upgrade` reinstalls the sift package itself via pip. It does not touch your files or the database.
 
-**Disclaimer:** This is alpha software. It comes with no warranty, no guarantee of fitness for any purpose, and no promise that your files will be any safer or better organized after using it. Use at your own risk.
-
 ## Building a Standalone Agent Binary
 
 For systems where installing Python packages isn't an option:
@@ -306,14 +304,13 @@ make dist-agent
 
 Requires Docker. Produces `dist/sift-linux-amd64`. Copy it to the target machine and run it directly — no Python, pip, or anything else required.
 
+## Road Map
+- [ ] `sift comm` — compare inventory between two hosts
+- [ ] `sift dups` — duplicate analysis (top wasted space, by category, host intersection/difference)
+- [ ] `sift shell` — REPL with `cd`/`ls`/`find` against the inventory
+
+**Disclaimer:** This is alpha software. It comes with no warranty, no guarantee of fitness for any purpose, and no promise better organized after using it. Use at your own risk.
+
 ## Contributing
 
 This is a personal project shared for the community's use. Issues and PRs may not receive responses. Feedback is welcome; please don't expect timely replies or merges.
-
-## Roadmap
-
-- [x] React web UI
-- [ ] `sift dups` — duplicate analysis (top wasted space, by category, host intersection/difference)
-- [ ] `sift shell` — REPL with `cd`/`ls`/`find` against the inventory
-- [ ] Windows agent testing
-- [ ] `sift diff` — compare inventory between two hosts

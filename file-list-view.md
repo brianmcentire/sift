@@ -104,7 +104,7 @@ To avoid regressions and preserve existing successful flows, search semantics ar
   - Directory search is a list filter via `path_contains` (match anywhere in path).
   - Filename and hash boxes are native list filters with paged server queries.
 
-- **Duplicate click overlays** (`extra copies`, `uniq dup sets`)
+- **Duplicate click overlays** (`extra copies`, `uniq dup hashes`)
   - Keep scoped overlay semantics intact.
   - Do not force generic List View filtering semantics onto these overlays.
   - Preserve current guardrails that prevent valid duplicate click-through rows from being hidden.
@@ -368,7 +368,7 @@ Cover:
 - Verify load-more appends rows and preserves order.
 - Verify `onlyDups + minDupSize + selectedHosts` interactions match expected semantics.
 - Verify debounced typing updates list in real time and cancels stale in-flight requests.
-- Verify duplicate overlays (`extra copies`, `uniq dup sets`) keep current behavior.
+- Verify duplicate overlays (`extra copies`, `uniq dup hashes`) keep current behavior.
 - Verify same-host duplicate rows highlight correctly in List View.
 - Verify List View intentionally has no dedicated path column in v1 (filename-focused presentation only).
 
