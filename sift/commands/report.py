@@ -14,9 +14,9 @@ def _fmt_int(n: int) -> str:
     return f"{int(n):,}"
 
 
-def _fmt_percent(value: float) -> str:
+def _fmt_percent(value: float, trim: bool = True) -> str:
     text = f"{value:.1f}"
-    if text.endswith(".0"):
+    if trim and text.endswith(".0"):
         text = text[:-2]
     return f"{text}%"
 
@@ -69,9 +69,14 @@ def _print_table(
         print("  ".join(_fmt(row[i], i) for i in range(len(headers))))
 
 
-def _progress(step: int, total: int, label: str, elapsed: float) -> None:
+def _progress_start(step: int, total: int, label: str) -> None:
     dots = "." * max(1, 44 - len(label))
-    print(f"Building report: [{step}/{total}] {label} {dots} done ({elapsed:.1f}s)")
+    print(f"Building report: [{step}/{total}] {label} {dots}", end="", flush=True)
+
+
+def _progress_done(step: int, total: int, label: str, elapsed: float) -> None:
+    del step, total, label
+    print(f" done ({elapsed:.1f}s)")
 
 
 def _fetch(path: str, params: dict | None = None) -> dict:
@@ -93,37 +98,60 @@ def cmd_report(args) -> None:
 
     total_steps = 7
 
+    label = "inventory totals"
+    _progress_start(1, total_steps, label)
     t0 = time.monotonic()
     inventory = _fetch("/stats/report/inventory")
     hosts_payload = client.get("/hosts")
     host_names = sorted(
-        [str(h.get("host") or "") for h in hosts_payload if h.get("host")]
+        [str(h.get("host") or "") for h in hosts_payload if h.get("host")],
+        key=lambda h: h.lower(),
     )
-    _progress(1, total_steps, "inventory totals", time.monotonic() - t0)
+    _progress_done(1, total_steps, label, time.monotonic() - t0)
 
+    label = "duplicate aggregates"
+    _progress_start(2, total_steps, label)
     t0 = time.monotonic()
     dup = _fetch("/stats/report/duplicates")
-    _progress(2, total_steps, "duplicate aggregates", time.monotonic() - t0)
+    _progress_done(2, total_steps, label, time.monotonic() - t0)
 
+    label = "host-only extra copies"
+    _progress_start(3, total_steps, label)
     t0 = time.monotonic()
-    host_rows = sorted(dup.get("host_only_rows") or [], key=lambda r: r.get("host", ""))
-    _progress(3, total_steps, "host-only extra copies", time.monotonic() - t0)
+    host_rows = sorted(
+        dup.get("host_only_rows") or [],
+        key=lambda r: (
+            -int(r.get("extra_bytes") or 0),
+            str(r.get("host") or "").lower(),
+        ),
+    )
+    _progress_done(3, total_steps, label, time.monotonic() - t0)
 
+    label = "cross-host (3+ copies, 2+ hosts)"
+    _progress_start(4, total_steps, label)
     t0 = time.monotonic()
     cross = dup.get("cross_host_summary") or {}
-    _progress(4, total_steps, "cross-host (3+ copies, 2+ hosts)", time.monotonic() - t0)
+    _progress_done(4, total_steps, label, time.monotonic() - t0)
 
+    label = "tombstone pressure"
+    _progress_start(5, total_steps, label)
     t0 = time.monotonic()
     tomb = _fetch("/stats/report/tombstones")
-    _progress(5, total_steps, "tombstone pressure", time.monotonic() - t0)
+    _progress_done(5, total_steps, label, time.monotonic() - t0)
 
+    label = "file-size distribution"
+    _progress_start(6, total_steps, label)
     t0 = time.monotonic()
-    clusters = _fetch("/stats/report/clusters", params={"k": 10, "fast": "true"})
-    _progress(6, total_steps, "file-size clustering (k=10)", time.monotonic() - t0)
+    size_distribution = _fetch(
+        "/stats/report/size-distribution", params={"fast": "true"}
+    )
+    _progress_done(6, total_steps, label, time.monotonic() - t0)
 
+    label = "top duplicate opportunities"
+    _progress_start(7, total_steps, label)
     t0 = time.monotonic()
     top = dup.get("top_opportunities") or []
-    _progress(7, total_steps, "top duplicate opportunities", time.monotonic() - t0)
+    _progress_done(7, total_steps, label, time.monotonic() - t0)
 
     print()
     _print_section("Inventory Summary")
@@ -151,13 +179,13 @@ def cmd_report(args) -> None:
     _print_kv(
         [
             ("uniq dup hashes", _fmt_int(int(g.get("uniq_dup_hashes") or 0))),
-            ("extra copies (same scope)", _fmt_int(int(g.get("extra_copies") or 0))),
+            ("extra copies", _fmt_int(int(g.get("extra_copies") or 0))),
             (
-                "extra bytes (same scope)",
+                "extra bytes",
                 _fmt_bytes(int(g.get("extra_bytes") or 0)),
             ),
             (
-                "gross duplicate bytes (same scope)",
+                "total duplicate bytes",
                 _fmt_bytes(int(g.get("gross_duplicate_bytes") or 0)),
             ),
         ]
@@ -175,7 +203,7 @@ def cmd_report(args) -> None:
                 str(row.get("host") or ""),
                 _fmt_int(int(row.get("uniq_dup_hashes") or 0)),
                 _fmt_int(int(row.get("extra_copies") or 0)),
-                f"{_fmt_bytes(extra_b)} ({_fmt_percent(pct)})",
+                f"{_fmt_bytes(extra_b)} ({_fmt_percent(pct, trim=False)})",
             ]
         )
     _print_table(
@@ -185,7 +213,7 @@ def cmd_report(args) -> None:
     )
     print()
 
-    _print_section("Cross-Host Redundancy Focus")
+    _print_section("Cross-Host Extra Copies")
     print("criteria: >=3 total copies and present on >=2 hosts")
     print()
     _print_kv(
@@ -198,10 +226,10 @@ def cmd_report(args) -> None:
                 "qualifying file copies",
                 _fmt_int(int(cross.get("qualifying_file_copies") or 0)),
             ),
-            ("extra copies in scope", _fmt_int(int(cross.get("extra_copies") or 0))),
-            ("extra bytes in scope", _fmt_bytes(int(cross.get("extra_bytes") or 0))),
+            ("extra copies", _fmt_int(int(cross.get("extra_copies") or 0))),
+            ("extra bytes", _fmt_bytes(int(cross.get("extra_bytes") or 0))),
             (
-                "gross duplicate bytes in scope",
+                "total duplicate bytes",
                 _fmt_bytes(int(cross.get("gross_duplicate_bytes") or 0)),
             ),
         ]
@@ -241,25 +269,24 @@ def cmd_report(args) -> None:
     )
     print()
 
-    _print_section("File-Size Clusters (Data-Driven, k=10)")
-    cluster_rows = []
-    for c in clusters.get("clusters") or []:
-        cluster_rows.append(
+    _print_section("File Size Distribution")
+    size_rows = []
+    for row in size_distribution.get("buckets") or []:
+        size_rows.append(
             [
-                str(c.get("name") or ""),
-                _fmt_bytes(int(c.get("median_size_bytes") or 0)),
-                _fmt_int(int(c.get("files") or 0)),
-                _fmt_percent(float(c.get("pct_of_files") or 0.0)),
+                str(row.get("bucket") or ""),
+                _fmt_int(int(row.get("files") or 0)),
+                _fmt_percent(float(row.get("pct_of_files") or 0.0), trim=False),
             ]
         )
     _print_table(
-        ["cluster", "median size", "files", "pct of files"],
-        cluster_rows,
-        right_align={2, 3},
+        ["bucket", "files", "pct"],
+        size_rows,
+        right_align={0, 1, 2},
     )
     print()
 
-    _print_section("Top Duplicate Opportunities (Ranked by Extra Bytes)")
+    _print_section("Top Duplicate Opportunities")
     top_rows = []
     for row in top:
         top_rows.append(

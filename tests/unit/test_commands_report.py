@@ -65,21 +65,17 @@ def _payload(path: str):
             "top_host": "alpha",
             "top_host_rows": 10,
         }
-    if path == "/stats/report/clusters":
+    if path == "/stats/report/size-distribution":
         return {
-            "k_target": 10,
-            "k_used": 2,
             "total_files": 1000,
-            "clusters": [
+            "buckets": [
                 {
-                    "name": "C1",
-                    "median_size_bytes": 0,
+                    "bucket": "10 KB",
                     "files": 20,
                     "pct_of_files": 2.0,
                 },
                 {
-                    "name": "C2",
-                    "median_size_bytes": 1024,
+                    "bucket": "100 KB",
                     "files": 980,
                     "pct_of_files": 98.0,
                 },
@@ -102,18 +98,24 @@ def test_report_output_progress_and_alignment(monkeypatch, capsys):
     out = capsys.readouterr().out
 
     assert "Building report: [1/7]" in out
+    assert "starting" not in out
+    assert "done (" in out
     assert "Building report: [7/7]" in out
     assert "Inventory Summary" in out
     assert "Host-Only Extra Copies" in out
+    assert "File Size Distribution" in out
     assert "Top Duplicate Opportunities" in out
 
-    alpha_pos = out.find("alpha")
-    zeta_pos = out.find("zeta")
+    host_section = out.split("Host-Only Extra Copies", 1)[1].split(
+        "Cross-Host Extra Copies", 1
+    )[0]
+    alpha_pos = host_section.find("alpha")
+    zeta_pos = host_section.find("zeta")
     assert alpha_pos != -1 and zeta_pos != -1
-    assert alpha_pos < zeta_pos
+    assert zeta_pos < alpha_pos
 
     assert "2%" in out
-    assert "2.0%" not in out
+    assert "2.0%" in out
 
 
 def test_report_pending_exits_with_error(monkeypatch, capsys):

@@ -9,8 +9,7 @@ import threading
 import time
 from datetime import datetime
 from contextlib import asynccontextmanager
-from typing import Optional, Sequence
-import math
+from typing import Optional
 
 import json
 
@@ -47,6 +46,11 @@ def _log_perf(endpoint: str, start: float, **fields) -> None:
 
 _query_cache_lock = threading.Lock()
 _QUERY_CACHE_TTL = int(os.environ.get("SIFT_QUERY_CACHE_TTL", "300"))
+_REPORT_SIZE_DISTRIBUTION_CACHE_TTL = int(
+    os.environ.get(
+        "SIFT_REPORT_SIZE_DISTRIBUTION_CACHE_TTL", str(_QUERY_CACHE_TTL * 10)
+    )
+)
 _QUERY_CACHE_MAX = int(os.environ.get("SIFT_QUERY_CACHE_MAX", "2000"))
 _ls_cache: dict[tuple, tuple] = {}
 _directories_cache: dict[tuple, tuple] = {}
@@ -54,7 +58,7 @@ _tree_children_cache: dict[tuple, tuple] = {}
 _tree_dup_metrics_cache: dict[tuple, tuple] = {}
 _stats_overview_cache: dict[tuple, tuple] = {}
 _hosts_cache: dict[tuple, tuple] = {}
-_report_clusters_cache: dict[tuple, tuple] = {}
+_report_size_distribution_cache: dict[tuple, tuple] = {}
 
 
 _MAINTENANCE_ENABLED = _env_flag("SIFT_MAINTENANCE_ENABLED", "0")
@@ -69,14 +73,15 @@ _maintenance_lock = threading.Lock()
 _last_api_activity = time.monotonic()
 
 
-def _cache_get(cache: dict, key: tuple):
+def _cache_get(cache: dict, key: tuple, ttl_sec: int | None = None):
     now = time.monotonic()
+    ttl = _QUERY_CACHE_TTL if ttl_sec is None else max(0, int(ttl_sec))
     with _query_cache_lock:
         item = cache.get(key)
         if item is None:
             return None
         value, ts = item
-        if now - ts > _QUERY_CACHE_TTL:
+        if now - ts > ttl:
             cache.pop(key, None)
             return None
         return value
@@ -106,20 +111,20 @@ def _invalidate_query_caches() -> None:
         _tree_dup_metrics_cache.clear()
         _stats_overview_cache.clear()
         _hosts_cache.clear()
-        _report_clusters_cache.clear()
+        _report_size_distribution_cache.clear()
 
 
 from server import db
 from server.models import (
     DuplicateLocation,
     DuplicateSet,
-    ReportClusterRow,
-    ReportClustersResponse,
     ReportCrossHostSummary,
     ReportDuplicatesResponse,
     ReportGlobalDuplicateSummary,
     ReportHostOnlyRow,
     ReportInventoryResponse,
+    ReportSizeBucketRow,
+    ReportSizeDistributionResponse,
     ReportTombstonesResponse,
     ReportTopOpportunity,
     FileEntry,
@@ -2898,99 +2903,14 @@ def _report_require_fresh_host_hash_stats(hosts: list[str]) -> JSONResponse | No
     )
 
 
-def _weighted_quantile(
-    values: Sequence[float], weights: Sequence[int], q: float
-) -> float:
-    if not values:
-        return 0.0
-    total = float(sum(weights))
-    if total <= 0:
-        return values[0]
-    target = total * min(max(q, 0.0), 1.0)
-    running = 0.0
-    for v, w in zip(values, weights):
-        running += float(w)
-        if running >= target:
-            return v
-    return values[-1]
-
-
-def _kmeans_log1p_weighted(
-    points: list[tuple[int, int]], k_target: int = 10
-) -> list[dict]:
-    if not points:
-        return []
-    sorted_points = sorted((int(s), int(c)) for s, c in points if c > 0)
-    if not sorted_points:
-        return []
-
-    sizes = [p[0] for p in sorted_points]
-    weights = [p[1] for p in sorted_points]
-    logs = [math.log10(float(s) + 1.0) for s in sizes]
-    k = max(1, min(k_target, len(sorted_points)))
-
-    centers = [
-        _weighted_quantile(logs, weights, (i + 0.5) / float(k)) for i in range(k)
-    ]
-
-    max_iter = 40
-    assignments = [0 for _ in logs]
-    for _ in range(max_iter):
-        if k == 1:
-            new_assignments = [0 for _ in logs]
-        else:
-            mids = [(centers[i] + centers[i + 1]) / 2.0 for i in range(k - 1)]
-            new_assignments = []
-            for lv in logs:
-                idx = 0
-                while idx < len(mids) and lv > mids[idx]:
-                    idx += 1
-                new_assignments.append(idx)
-
-        new_centers = centers[:]
-        for ci in range(k):
-            num = 0.0
-            den = 0.0
-            for li, cluster_i in enumerate(new_assignments):
-                if cluster_i != ci:
-                    continue
-                w = float(weights[li])
-                num += logs[li] * w
-                den += w
-            if den > 0:
-                new_centers[ci] = num / den
-
-        delta = (
-            max(abs(a - b) for a, b in zip(new_centers, centers)) if centers else 0.0
-        )
-        centers = new_centers
-        assignments = new_assignments
-        if delta < 1e-6:
-            break
-
-    cluster_rows: list[dict] = []
-    total_files = int(sum(weights))
-    for ci in range(k):
-        members = [i for i, cluster_i in enumerate(assignments) if cluster_i == ci]
-        if not members:
-            continue
-        c_sizes = [sizes[i] for i in members]
-        c_weights = [weights[i] for i in members]
-        c_total = int(sum(c_weights))
-        median_size = int(round(_weighted_quantile(c_sizes, c_weights, 0.5)))
-        pct = (float(c_total) / float(total_files) * 100.0) if total_files > 0 else 0.0
-        cluster_rows.append(
-            {
-                "median_size_bytes": median_size,
-                "files": c_total,
-                "pct_of_files": pct,
-            }
-        )
-
-    cluster_rows.sort(key=lambda r: (r["median_size_bytes"], r["files"]))
-    for i, row in enumerate(cluster_rows, start=1):
-        row["name"] = f"C{i}"
-    return cluster_rows
+_SIZE_100_KB = 100 * 1024
+_SIZE_1_MB = 1024 * 1024
+_SIZE_10_MB = 10 * 1024 * 1024
+_SIZE_100_MB = 100 * 1024 * 1024
+_SIZE_1_GB = 1024 * 1024 * 1024
+_SIZE_10_GB = 10 * 1024 * 1024 * 1024
+_SIZE_100_GB = 100 * 1024 * 1024 * 1024
+_SIZE_1_TB = 1024 * 1024 * 1024 * 1024
 
 
 @app.get("/debug/query")
@@ -3278,7 +3198,7 @@ def stats_report_inventory():
 @app.get("/stats/report/duplicates", response_model=ReportDuplicatesResponse)
 def stats_report_duplicates(
     min_size: int = Query(0, ge=0),
-    top_limit: int = Query(5, ge=1, le=50),
+    top_limit: int = Query(10, ge=1, le=50),
 ):
     dup_hosts_rows = db.query(
         "SELECT host FROM host_stats WHERE total_files > 0 ORDER BY host"
@@ -3543,37 +3463,86 @@ def stats_report_tombstones():
     )
 
 
-@app.get("/stats/report/clusters", response_model=ReportClustersResponse)
-def stats_report_clusters(
-    k: int = Query(10, ge=1, le=25),
-    fast: bool = Query(False),
-):
+@app.get(
+    "/stats/report/size-distribution", response_model=ReportSizeDistributionResponse
+)
+def stats_report_size_distribution(fast: bool = Query(False)):
     if fast:
-        cache_key = ("report_clusters", k)
-        cached = _cache_get(_report_clusters_cache, cache_key)
+        cache_key = ("report_size_distribution",)
+        cached = _cache_get(
+            _report_size_distribution_cache,
+            cache_key,
+            ttl_sec=_REPORT_SIZE_DISTRIBUTION_CACHE_TTL,
+        )
         if cached is not None:
             return cached
 
-    with db.operation_context("report clusters: size distribution"):
-        rows = db.query(
+    with db.operation_context("report size distribution: magnitude buckets"):
+        row = db.query_one(
             """
-        SELECT COALESCE(size_bytes, 0) AS size_bytes, COUNT(*) AS files
-        FROM files
-        GROUP BY COALESCE(size_bytes, 0)
-        ORDER BY size_bytes
-        """
+            SELECT
+                COUNT(*) AS total_files,
+                SUM(CASE WHEN COALESCE(size_bytes, 0) < ? THEN 1 ELSE 0 END) AS b10kb,
+                SUM(CASE WHEN COALESCE(size_bytes, 0) >= ? AND COALESCE(size_bytes, 0) < ? THEN 1 ELSE 0 END) AS b100kb,
+                SUM(CASE WHEN COALESCE(size_bytes, 0) >= ? AND COALESCE(size_bytes, 0) < ? THEN 1 ELSE 0 END) AS b1mb,
+                SUM(CASE WHEN COALESCE(size_bytes, 0) >= ? AND COALESCE(size_bytes, 0) < ? THEN 1 ELSE 0 END) AS b10mb,
+                SUM(CASE WHEN COALESCE(size_bytes, 0) >= ? AND COALESCE(size_bytes, 0) < ? THEN 1 ELSE 0 END) AS b100mb,
+                SUM(CASE WHEN COALESCE(size_bytes, 0) >= ? AND COALESCE(size_bytes, 0) < ? THEN 1 ELSE 0 END) AS b1gb,
+                SUM(CASE WHEN COALESCE(size_bytes, 0) >= ? AND COALESCE(size_bytes, 0) < ? THEN 1 ELSE 0 END) AS b10gb,
+                SUM(CASE WHEN COALESCE(size_bytes, 0) >= ? AND COALESCE(size_bytes, 0) < ? THEN 1 ELSE 0 END) AS b100gb,
+                SUM(CASE WHEN COALESCE(size_bytes, 0) >= ? THEN 1 ELSE 0 END) AS b1tb
+            FROM files
+            """,
+            [
+                _SIZE_100_KB,
+                _SIZE_100_KB,
+                _SIZE_1_MB,
+                _SIZE_1_MB,
+                _SIZE_10_MB,
+                _SIZE_10_MB,
+                _SIZE_100_MB,
+                _SIZE_100_MB,
+                _SIZE_1_GB,
+                _SIZE_1_GB,
+                _SIZE_10_GB,
+                _SIZE_10_GB,
+                _SIZE_100_GB,
+                _SIZE_100_GB,
+                _SIZE_1_TB,
+                _SIZE_1_TB,
+            ],
         )
-    points = [(int(r[0] or 0), int(r[1] or 0)) for r in rows]
-    cluster_rows = _kmeans_log1p_weighted(points, k_target=k)
-    total_files = sum(int(r[1] or 0) for r in rows)
-    response = ReportClustersResponse(
-        k_target=k,
-        k_used=len(cluster_rows),
+
+    total_files = int(row[0] or 0) if row else 0
+    counts = [int(v or 0) for v in (row[1:] if row else [])]
+    labels = [
+        "10 KB",
+        "100 KB",
+        "1 MB",
+        "10 MB",
+        "100 MB",
+        "1 GB",
+        "10 GB",
+        "100 GB",
+        "1+ TB",
+    ]
+    bucket_rows = []
+    for label, count in zip(labels, counts):
+        pct = (float(count) / float(total_files) * 100.0) if total_files > 0 else 0.0
+        bucket_rows.append(
+            ReportSizeBucketRow(bucket=label, files=count, pct_of_files=pct)
+        )
+
+    response = ReportSizeDistributionResponse(
         total_files=total_files,
-        clusters=[ReportClusterRow(**r) for r in cluster_rows],
+        buckets=bucket_rows,
     )
     if fast:
-        _cache_set(_report_clusters_cache, ("report_clusters", k), response)
+        _cache_set(
+            _report_size_distribution_cache,
+            ("report_size_distribution",),
+            response,
+        )
     return response
 
 

@@ -1,7 +1,6 @@
 """Tests for report-focused stats endpoints."""
 
 import server.db as db_module
-import server.main as main_module
 from tests.server.conftest import (
     HASH_A,
     HASH_B,
@@ -27,6 +26,7 @@ def test_report_duplicates_returns_pending_when_aggregates_not_fresh(client):
             make_file(host="mac", path="/b.txt", filename="b.txt", hash=HASH_A),
         ]
     )
+    db_module.set_aggregate_meta("host_hash_stats:mac", "stale")
 
     resp = client.get("/stats/report/duplicates")
     assert resp.status_code == 202
@@ -144,28 +144,27 @@ def test_report_tombstones_summary(client):
     assert body["top_host_rows"] == 1
 
 
-def test_report_clusters_shape_and_deterministic(client):
+def test_report_size_distribution_buckets(client):
     insert_files(
         [
             make_file(path="/a", filename="a", size=0, hash=HASH_A),
-            make_file(path="/b", filename="b", size=0, hash=HASH_B),
-            make_file(path="/c", filename="c", size=100, hash=HASH_C),
-            make_file(path="/d", filename="d", size=100, hash=HASH_D),
-            make_file(path="/e", filename="e", size=10000, hash=HASH_E),
+            make_file(path="/b", filename="b", size=1024 * 90, hash=HASH_B),
+            make_file(path="/c", filename="c", size=1024 * 120, hash=HASH_C),
+            make_file(path="/d", filename="d", size=2 * 1024 * 1024, hash=HASH_D),
+            make_file(
+                path="/e", filename="e", size=15 * 1024 * 1024 * 1024, hash=HASH_E
+            ),
         ]
     )
-    r1 = client.get("/stats/report/clusters", params={"k": 3})
-    r2 = client.get("/stats/report/clusters", params={"k": 3})
-    assert r1.status_code == 200
-    assert r1.json() == r2.json()
-    body = r1.json()
-    assert body["k_target"] == 3
-    assert 1 <= body["k_used"] <= 3
+    resp = client.get("/stats/report/size-distribution")
+    assert resp.status_code == 200
+    body = resp.json()
     assert body["total_files"] == 5
-    assert sum(int(c["files"]) for c in body["clusters"]) == 5
-    assert [c["name"] for c in body["clusters"]] == [
-        f"C{i}" for i in range(1, len(body["clusters"]) + 1)
-    ]
+    by_bucket = {r["bucket"]: int(r["files"]) for r in body["buckets"]}
+    assert by_bucket["10 KB"] == 2
+    assert by_bucket["100 KB"] == 1
+    assert by_bucket["1 MB"] == 1
+    assert by_bucket["10 GB"] == 1
 
 
 def test_timeout_error_payload_includes_endpoint_and_operation(client, monkeypatch):
@@ -188,7 +187,7 @@ def test_timeout_error_payload_includes_endpoint_and_operation(client, monkeypat
     assert body["operation"] == "report inventory: host totals"
 
 
-def test_report_clusters_fast_uses_cache(client, monkeypatch):
+def test_report_size_distribution_fast_uses_cache(client, monkeypatch):
     insert_files(
         [
             make_file(path="/a", filename="a", size=1, hash=HASH_A),
@@ -197,16 +196,16 @@ def test_report_clusters_fast_uses_cache(client, monkeypatch):
     )
 
     calls = {"n": 0}
-    real = main_module._kmeans_log1p_weighted
+    real = db_module.query_one
 
-    def wrapped(points, k_target=10):
+    def wrapped(sql, params=None):
         calls["n"] += 1
-        return real(points, k_target=k_target)
+        return real(sql, params)
 
-    monkeypatch.setattr(main_module, "_kmeans_log1p_weighted", wrapped)
+    monkeypatch.setattr(db_module, "query_one", wrapped)
 
-    r1 = client.get("/stats/report/clusters", params={"k": 3, "fast": True})
-    r2 = client.get("/stats/report/clusters", params={"k": 3, "fast": True})
+    r1 = client.get("/stats/report/size-distribution", params={"fast": True})
+    r2 = client.get("/stats/report/size-distribution", params={"fast": True})
     assert r1.status_code == 200
     assert r2.status_code == 200
     assert calls["n"] == 1

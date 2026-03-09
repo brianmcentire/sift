@@ -266,15 +266,12 @@ class ReportTombstonesResponse(BaseModel):
     top_host_rows: int = 0
 
 
-class ReportClusterRow(BaseModel):
-    name: str
-    median_size_bytes: int
+class ReportSizeBucketRow(BaseModel):
+    bucket: str
     files: int
     pct_of_files: float
 
 
-class ReportClustersResponse(BaseModel):
-    k_target: int
-    k_used: int
+class ReportSizeDistributionResponse(BaseModel):
     total_files: int
-    clusters: list[ReportClusterRow]
+    buckets: list[ReportSizeBucketRow]

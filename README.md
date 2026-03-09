@@ -227,7 +227,7 @@ Server overview: all known hosts, last scan time, file counts, and duplicate sta
 Builds a single all-host report from datastore aggregates and trim-eligibility rules.
 Includes inventory totals, duplicate summaries (`uniq dup hashes`, `extra copies`,
 `extra bytes`), host-only extra-copy table, cross-host redundancy focus, tombstone
-pressure, file-size clusters (`k=10`), and top duplicate opportunities.
+pressure, file size distribution buckets, and top duplicate opportunities.
 
 ```
 sift report
