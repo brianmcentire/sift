@@ -287,7 +287,7 @@ def _maybe_refresh_host_stats(host: str) -> None:
     ).start()
 
 
-app = FastAPI(title="sift", version="0.9.2", lifespan=lifespan)
+app = FastAPI(title="sift", version="0.9.3", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 

@@ -37,6 +37,11 @@ def _print_section(title: str) -> None:
     print("-" * len(title))
 
 
+def _section_gap() -> None:
+    print()
+    print()
+
+
 def _print_kv(rows: list[tuple[str, str]]) -> None:
     if not rows:
         return
@@ -94,7 +99,7 @@ def cmd_report(args) -> None:
     print()
     print(f"sift server: {get_server_url()}")
     print(f"sift {get_version()}  ·  report scope: all hosts in datastore")
-    print()
+    _section_gap()
 
     total_steps = 7
 
@@ -109,14 +114,22 @@ def cmd_report(args) -> None:
     )
     _progress_done(1, total_steps, label, time.monotonic() - t0)
 
-    label = "duplicate aggregates"
+    label = "file-size distribution"
     _progress_start(2, total_steps, label)
     t0 = time.monotonic()
-    dup = _fetch("/stats/report/duplicates")
+    size_distribution = _fetch(
+        "/stats/report/size-distribution", params={"fast": "true"}
+    )
     _progress_done(2, total_steps, label, time.monotonic() - t0)
 
-    label = "host-only extra copies"
+    label = "duplicate aggregates"
     _progress_start(3, total_steps, label)
+    t0 = time.monotonic()
+    dup = _fetch("/stats/report/duplicates")
+    _progress_done(3, total_steps, label, time.monotonic() - t0)
+
+    label = "host-only extra copies"
+    _progress_start(4, total_steps, label)
     t0 = time.monotonic()
     host_rows = sorted(
         dup.get("host_only_rows") or [],
@@ -125,26 +138,18 @@ def cmd_report(args) -> None:
             str(r.get("host") or "").lower(),
         ),
     )
-    _progress_done(3, total_steps, label, time.monotonic() - t0)
-
-    label = "cross-host (3+ copies, 2+ hosts)"
-    _progress_start(4, total_steps, label)
-    t0 = time.monotonic()
-    cross = dup.get("cross_host_summary") or {}
     _progress_done(4, total_steps, label, time.monotonic() - t0)
 
-    label = "tombstone pressure"
+    label = "cross-host (3+ copies, 2+ hosts)"
     _progress_start(5, total_steps, label)
     t0 = time.monotonic()
-    tomb = _fetch("/stats/report/tombstones")
+    cross = dup.get("cross_host_summary") or {}
     _progress_done(5, total_steps, label, time.monotonic() - t0)
 
-    label = "file-size distribution"
+    label = "tombstone pressure"
     _progress_start(6, total_steps, label)
     t0 = time.monotonic()
-    size_distribution = _fetch(
-        "/stats/report/size-distribution", params={"fast": "true"}
-    )
+    tomb = _fetch("/stats/report/tombstones")
     _progress_done(6, total_steps, label, time.monotonic() - t0)
 
     label = "top duplicate opportunities"
@@ -153,14 +158,15 @@ def cmd_report(args) -> None:
     top = dup.get("top_opportunities") or []
     _progress_done(7, total_steps, label, time.monotonic() - t0)
 
-    print()
+    _section_gap()
     _print_section("Inventory Summary")
     total_files = int(inventory.get("total_file_rows") or 0)
     zero_files = int(inventory.get("zero_byte_files") or 0)
     zero_pct = (100.0 * zero_files / total_files) if total_files > 0 else 0.0
-    hosts_value = _fmt_int(int(inventory.get("hosts_in_datastore") or 0))
-    if 0 < len(host_names) <= 5:
-        hosts_value = ", ".join(host_names)
+    host_count = int(inventory.get("hosts_in_datastore") or 0)
+    hosts_value = _fmt_int(host_count)
+    if 0 < host_count <= 5 and host_names:
+        hosts_value = f"{hosts_value} -- {', '.join(host_names)}"
     _print_kv(
         [
             ("hosts in datastore", hosts_value),
@@ -169,72 +175,24 @@ def cmd_report(args) -> None:
             ("zero-byte files", f"{_fmt_int(zero_files)} ({_fmt_percent(zero_pct)})"),
         ]
     )
-    print()
+    _section_gap()
 
-    g = dup.get("global_summary") or {}
-    _print_section("Duplicate Summary (Global Criteria)")
-    print("criteria: extra copies from intra-host duplicates + cross-host duplicates")
-    print("          with >=3 total copies across >=2 hosts")
-    print()
-    _print_kv(
-        [
-            ("uniq dup hashes", _fmt_int(int(g.get("uniq_dup_hashes") or 0))),
-            ("extra copies", _fmt_int(int(g.get("extra_copies") or 0))),
-            (
-                "extra bytes",
-                _fmt_bytes(int(g.get("extra_bytes") or 0)),
-            ),
-            (
-                "total duplicate bytes",
-                _fmt_bytes(int(g.get("gross_duplicate_bytes") or 0)),
-            ),
-        ]
-    )
-    print()
-
-    _print_section("Host-Only Extra Copies")
-    host_table = []
-    for row in host_rows:
-        total_b = int(row.get("host_total_bytes") or 0)
-        extra_b = int(row.get("extra_bytes") or 0)
-        pct = (100.0 * extra_b / total_b) if total_b > 0 else 0.0
-        host_table.append(
+    _print_section("File Size Distribution")
+    size_rows = []
+    for row in size_distribution.get("buckets") or []:
+        size_rows.append(
             [
-                str(row.get("host") or ""),
-                _fmt_int(int(row.get("uniq_dup_hashes") or 0)),
-                _fmt_int(int(row.get("extra_copies") or 0)),
-                f"{_fmt_bytes(extra_b)} ({_fmt_percent(pct, trim=False)})",
+                str(row.get("bucket") or ""),
+                _fmt_int(int(row.get("files") or 0)),
+                _fmt_percent(float(row.get("pct_of_files") or 0.0), trim=False),
             ]
         )
     _print_table(
-        ["host", "uniq dup hashes", "extra copies", "extra bytes (%)"],
-        host_table,
-        right_align={1, 2, 3},
+        ["bucket", "files", "pct"],
+        size_rows,
+        right_align={0, 1, 2},
     )
-    print()
-
-    _print_section("Cross-Host Extra Copies")
-    print("criteria: >=3 total copies and present on >=2 hosts")
-    print()
-    _print_kv(
-        [
-            (
-                "qualifying uniq dup hashes",
-                _fmt_int(int(cross.get("qualifying_uniq_dup_hashes") or 0)),
-            ),
-            (
-                "qualifying file copies",
-                _fmt_int(int(cross.get("qualifying_file_copies") or 0)),
-            ),
-            ("extra copies", _fmt_int(int(cross.get("extra_copies") or 0))),
-            ("extra bytes", _fmt_bytes(int(cross.get("extra_bytes") or 0))),
-            (
-                "total duplicate bytes",
-                _fmt_bytes(int(cross.get("gross_duplicate_bytes") or 0)),
-            ),
-        ]
-    )
-    print()
+    _section_gap()
 
     _print_section("Tombstone Pressure")
     print("definition: rows currently eligible for `sift trim --deleted` under")
@@ -267,24 +225,72 @@ def cmd_report(args) -> None:
             ("top host by tombstone files", top_host_label),
         ]
     )
-    print()
+    _section_gap()
 
-    _print_section("File Size Distribution")
-    size_rows = []
-    for row in size_distribution.get("buckets") or []:
-        size_rows.append(
+    g = dup.get("global_summary") or {}
+    _print_section("Duplicate Summary (Global Criteria)")
+    print("criteria: extra copies from intra-host duplicates + cross-host duplicates")
+    print("          with >=3 total copies across >=2 hosts")
+    print()
+    _print_kv(
+        [
+            ("uniq dup hashes", _fmt_int(int(g.get("uniq_dup_hashes") or 0))),
+            ("extra copies", _fmt_int(int(g.get("extra_copies") or 0))),
+            (
+                "extra bytes",
+                _fmt_bytes(int(g.get("extra_bytes") or 0)),
+            ),
+            (
+                "total duplicate bytes",
+                _fmt_bytes(int(g.get("gross_duplicate_bytes") or 0)),
+            ),
+        ]
+    )
+    _section_gap()
+
+    _print_section("Host-Only Extra Copies")
+    host_table = []
+    for row in host_rows:
+        total_b = int(row.get("host_total_bytes") or 0)
+        extra_b = int(row.get("extra_bytes") or 0)
+        pct = (100.0 * extra_b / total_b) if total_b > 0 else 0.0
+        host_table.append(
             [
-                str(row.get("bucket") or ""),
-                _fmt_int(int(row.get("files") or 0)),
-                _fmt_percent(float(row.get("pct_of_files") or 0.0), trim=False),
+                str(row.get("host") or ""),
+                _fmt_int(int(row.get("uniq_dup_hashes") or 0)),
+                _fmt_int(int(row.get("extra_copies") or 0)),
+                f"{_fmt_bytes(extra_b)} ({_fmt_percent(pct, trim=False)})",
             ]
         )
     _print_table(
-        ["bucket", "files", "pct"],
-        size_rows,
-        right_align={0, 1, 2},
+        ["host", "uniq dup hashes", "extra copies", "extra bytes (%)"],
+        host_table,
+        right_align={1, 2, 3},
     )
+    _section_gap()
+
+    _print_section("Cross-Host Extra Copies")
+    print("criteria: >=3 total copies and present on >=2 hosts")
     print()
+    _print_kv(
+        [
+            (
+                "qualifying uniq dup hashes",
+                _fmt_int(int(cross.get("qualifying_uniq_dup_hashes") or 0)),
+            ),
+            (
+                "qualifying file copies",
+                _fmt_int(int(cross.get("qualifying_file_copies") or 0)),
+            ),
+            ("extra copies", _fmt_int(int(cross.get("extra_copies") or 0))),
+            ("extra bytes", _fmt_bytes(int(cross.get("extra_bytes") or 0))),
+            (
+                "total duplicate bytes",
+                _fmt_bytes(int(cross.get("gross_duplicate_bytes") or 0)),
+            ),
+        ]
+    )
+    _section_gap()
 
     _print_section("Top Duplicate Opportunities")
     top_rows = []
@@ -304,3 +310,4 @@ def cmd_report(args) -> None:
         top_rows,
         right_align={0, 1, 2, 3},
     )
+    print()
