@@ -145,6 +145,7 @@ sift ls -lh ~/Documents                 # browse with sizes
 sift find / -name "*.pdf" -duplicates   # find duplicate PDFs
 sift du -h --by-category ~             # disk usage by file type
 sift status                             # overview of all hosts
+sift report                             # all-host datastore report
 ```
 
 Then open `http://localhost:8765` in a browser for the web UI.
@@ -220,6 +221,17 @@ sift du --host unraid /mnt/user
 ### `sift status`
 
 Server overview: all known hosts, last scan time, file counts, and duplicate statistics.
+
+### `sift report`
+
+Builds a single all-host report from datastore aggregates and trim-eligibility rules.
+Includes inventory totals, duplicate summaries (`uniq dup hashes`, `extra copies`,
+`extra bytes`), host-only extra-copy table, cross-host redundancy focus, tombstone
+pressure, file-size clusters (`k=10`), and top duplicate opportunities.
+
+```
+sift report
+```
 
 ### `sift server`
 

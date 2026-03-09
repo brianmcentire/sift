@@ -9,7 +9,8 @@ import threading
 import time
 from datetime import datetime
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, Sequence
+import math
 
 import json
 
@@ -53,6 +54,7 @@ _tree_children_cache: dict[tuple, tuple] = {}
 _tree_dup_metrics_cache: dict[tuple, tuple] = {}
 _stats_overview_cache: dict[tuple, tuple] = {}
 _hosts_cache: dict[tuple, tuple] = {}
+_report_clusters_cache: dict[tuple, tuple] = {}
 
 
 _MAINTENANCE_ENABLED = _env_flag("SIFT_MAINTENANCE_ENABLED", "0")
@@ -104,12 +106,22 @@ def _invalidate_query_caches() -> None:
         _tree_dup_metrics_cache.clear()
         _stats_overview_cache.clear()
         _hosts_cache.clear()
+        _report_clusters_cache.clear()
 
 
 from server import db
 from server.models import (
     DuplicateLocation,
     DuplicateSet,
+    ReportClusterRow,
+    ReportClustersResponse,
+    ReportCrossHostSummary,
+    ReportDuplicatesResponse,
+    ReportGlobalDuplicateSummary,
+    ReportHostOnlyRow,
+    ReportInventoryResponse,
+    ReportTombstonesResponse,
+    ReportTopOpportunity,
     FileEntry,
     FilePageResponse,
     DuplicateHashCountResponse,
@@ -393,9 +405,13 @@ async def log_requests(request: Request, call_next):
     global _last_api_activity
     received = datetime.now().strftime("%H:%M:%S")
     start = time.monotonic()
-    response = await call_next(request)
-    elapsed = time.monotonic() - start
     path = request.url.path
+    token = db.push_request_context(f"{request.method} {path}")
+    try:
+        response = await call_next(request)
+    finally:
+        db.pop_request_context(token)
+    elapsed = time.monotonic() - start
     # Skip static asset noise
     if path.startswith("/assets/") or path == "/favicon.ico":
         return response
@@ -421,6 +437,20 @@ async def log_requests(request: Request, call_next):
             "%s %s %d — %.3fs", request.method, path, response.status_code, elapsed
         )
     return response
+
+
+@app.exception_handler(db.DBTimeoutError)
+async def db_timeout_handler(request: Request, exc: db.DBTimeoutError):
+    logger.warning(
+        "db-timeout type=%s endpoint=%s operation=%s timeout=%.1fs sql=%s",
+        exc.timeout_type,
+        exc.endpoint,
+        exc.operation,
+        exc.timeout_sec,
+        exc.sql,
+    )
+    status_code = 503 if exc.timeout_type == "lock_wait" else 504
+    return JSONResponse(status_code=status_code, content=exc.to_dict())
 
 
 # Static frontend is mounted AFTER all API routes (see bottom of file)
@@ -2835,6 +2865,134 @@ def list_hosts():
 # TTL is controlled by SIFT_QUERY_CACHE_TTL.
 
 
+def _report_all_hosts_in_datastore() -> list[str]:
+    rows = db.query(
+        """
+        WITH all_hosts AS (
+            SELECT host FROM host_stats
+            UNION
+            SELECT DISTINCT host FROM scan_runs
+        )
+        SELECT host FROM all_hosts ORDER BY host
+        """
+    )
+    return [str(r[0]) for r in rows]
+
+
+def _report_require_fresh_host_hash_stats(hosts: list[str]) -> JSONResponse | None:
+    if not hosts:
+        return None
+    key_params = [f"host_hash_stats:{h}" for h in hosts]
+    ph = ", ".join(["?" for _ in key_params])
+    meta_rows = db.query(
+        f"SELECT key, status FROM aggregate_meta WHERE key IN ({ph})",
+        key_params,
+    )
+    meta_by_key = {str(r[0]): str(r[1]) for r in meta_rows}
+    all_fresh = all(meta_by_key.get(k) == "fresh" for k in key_params)
+    if all_fresh:
+        return None
+    return JSONResponse(
+        status_code=202,
+        content={"status": "pending", "detail": "Duplicate index is still building"},
+    )
+
+
+def _weighted_quantile(
+    values: Sequence[float], weights: Sequence[int], q: float
+) -> float:
+    if not values:
+        return 0.0
+    total = float(sum(weights))
+    if total <= 0:
+        return values[0]
+    target = total * min(max(q, 0.0), 1.0)
+    running = 0.0
+    for v, w in zip(values, weights):
+        running += float(w)
+        if running >= target:
+            return v
+    return values[-1]
+
+
+def _kmeans_log1p_weighted(
+    points: list[tuple[int, int]], k_target: int = 10
+) -> list[dict]:
+    if not points:
+        return []
+    sorted_points = sorted((int(s), int(c)) for s, c in points if c > 0)
+    if not sorted_points:
+        return []
+
+    sizes = [p[0] for p in sorted_points]
+    weights = [p[1] for p in sorted_points]
+    logs = [math.log10(float(s) + 1.0) for s in sizes]
+    k = max(1, min(k_target, len(sorted_points)))
+
+    centers = [
+        _weighted_quantile(logs, weights, (i + 0.5) / float(k)) for i in range(k)
+    ]
+
+    max_iter = 40
+    assignments = [0 for _ in logs]
+    for _ in range(max_iter):
+        if k == 1:
+            new_assignments = [0 for _ in logs]
+        else:
+            mids = [(centers[i] + centers[i + 1]) / 2.0 for i in range(k - 1)]
+            new_assignments = []
+            for lv in logs:
+                idx = 0
+                while idx < len(mids) and lv > mids[idx]:
+                    idx += 1
+                new_assignments.append(idx)
+
+        new_centers = centers[:]
+        for ci in range(k):
+            num = 0.0
+            den = 0.0
+            for li, cluster_i in enumerate(new_assignments):
+                if cluster_i != ci:
+                    continue
+                w = float(weights[li])
+                num += logs[li] * w
+                den += w
+            if den > 0:
+                new_centers[ci] = num / den
+
+        delta = (
+            max(abs(a - b) for a, b in zip(new_centers, centers)) if centers else 0.0
+        )
+        centers = new_centers
+        assignments = new_assignments
+        if delta < 1e-6:
+            break
+
+    cluster_rows: list[dict] = []
+    total_files = int(sum(weights))
+    for ci in range(k):
+        members = [i for i, cluster_i in enumerate(assignments) if cluster_i == ci]
+        if not members:
+            continue
+        c_sizes = [sizes[i] for i in members]
+        c_weights = [weights[i] for i in members]
+        c_total = int(sum(c_weights))
+        median_size = int(round(_weighted_quantile(c_sizes, c_weights, 0.5)))
+        pct = (float(c_total) / float(total_files) * 100.0) if total_files > 0 else 0.0
+        cluster_rows.append(
+            {
+                "median_size_bytes": median_size,
+                "files": c_total,
+                "pct_of_files": pct,
+            }
+        )
+
+    cluster_rows.sort(key=lambda r: (r["median_size_bytes"], r["files"]))
+    for i, row in enumerate(cluster_rows, start=1):
+        row["name"] = f"C{i}"
+    return cluster_rows
+
+
 @app.get("/debug/query")
 def debug_query(sql: str = Query(...)):
     """Debug endpoint — run a read-only SQL query."""
@@ -3086,6 +3244,337 @@ def stats_overview(
         freshness=freshness,
     )
     return result
+
+
+@app.get("/stats/report/inventory", response_model=ReportInventoryResponse)
+def stats_report_inventory():
+    hosts = _report_all_hosts_in_datastore()
+    with db.operation_context("report inventory: host totals"):
+        totals_row = db.query_one(
+            """
+            SELECT
+                COALESCE(SUM(total_files), 0),
+                COALESCE(SUM(total_bytes), 0)
+            FROM host_stats
+            """
+        )
+    total_files = int(totals_row[0]) if totals_row and totals_row[0] is not None else 0
+    total_bytes = int(totals_row[1]) if totals_row and totals_row[1] is not None else 0
+
+    with db.operation_context("report inventory: zero-byte count"):
+        zero_row = db.query_one(
+            "SELECT COUNT(*) FROM files WHERE COALESCE(size_bytes, 0) = 0"
+        )
+    zero_files = int(zero_row[0]) if zero_row and zero_row[0] is not None else 0
+
+    return ReportInventoryResponse(
+        hosts_in_datastore=len(hosts),
+        total_file_rows=total_files,
+        total_bytes=total_bytes,
+        zero_byte_files=zero_files,
+    )
+
+
+@app.get("/stats/report/duplicates", response_model=ReportDuplicatesResponse)
+def stats_report_duplicates(
+    min_size: int = Query(0, ge=0),
+    top_limit: int = Query(5, ge=1, le=50),
+):
+    dup_hosts_rows = db.query(
+        "SELECT host FROM host_stats WHERE total_files > 0 ORDER BY host"
+    )
+    dup_hosts = [str(r[0]) for r in dup_hosts_rows]
+    pending = _report_require_fresh_host_hash_stats(dup_hosts)
+    if pending is not None:
+        return pending
+    if not dup_hosts:
+        empty_global = ReportGlobalDuplicateSummary(
+            uniq_dup_hashes=0,
+            extra_copies=0,
+            extra_bytes=0,
+            gross_duplicate_bytes=0,
+        )
+        empty_cross = ReportCrossHostSummary(
+            qualifying_uniq_dup_hashes=0,
+            qualifying_file_copies=0,
+            extra_copies=0,
+            extra_bytes=0,
+            gross_duplicate_bytes=0,
+        )
+        return ReportDuplicatesResponse(
+            global_summary=empty_global,
+            host_only_rows=[],
+            cross_host_summary=empty_cross,
+            top_opportunities=[],
+        )
+
+    host_ph = ", ".join(["?" for _ in dup_hosts])
+    scope_sql = f"""
+    WITH per_hash AS (
+        SELECT
+            hash,
+            SUM(copy_count_effective) AS total_copies,
+            SUM(CASE WHEN copy_count_effective > 0 THEN 1 ELSE 0 END) AS host_count_present,
+            MAX(size_bytes) AS size_bytes,
+            MAX(CASE WHEN copy_count_effective > 1 THEN 1 ELSE 0 END) AS has_intra
+        FROM host_hash_stats
+        WHERE host IN ({host_ph})
+          AND hash IS NOT NULL
+        GROUP BY hash
+    ),
+    scoped AS (
+        SELECT
+            hash,
+            total_copies,
+            host_count_present,
+            COALESCE(size_bytes, 0) AS size_bytes,
+            CASE
+                WHEN has_intra = 1 OR (total_copies >= 3 AND host_count_present >= 2)
+                THEN 1 ELSE 0
+            END AS in_scope,
+            CASE
+                WHEN total_copies >= 3 AND host_count_present >= 2
+                THEN 1 ELSE 0
+            END AS in_cross_scope
+        FROM per_hash
+        WHERE COALESCE(size_bytes, 0) >= ?
+    )
+    """
+
+    with db.operation_context("report duplicates: global and cross summaries"):
+        global_row = db.query_one(
+            scope_sql
+            + """
+            SELECT
+                COALESCE(COUNT(CASE WHEN in_scope = 1 THEN 1 END), 0),
+                COALESCE(SUM(CASE WHEN in_scope = 1 THEN total_copies - 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN in_scope = 1 THEN (total_copies - 1) * size_bytes ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN in_scope = 1 THEN total_copies * size_bytes ELSE 0 END), 0)
+            FROM scoped
+            """,
+            [*dup_hosts, min_size],
+        )
+        cross_row = db.query_one(
+            scope_sql
+            + """
+            SELECT
+                COALESCE(COUNT(CASE WHEN in_cross_scope = 1 THEN 1 END), 0),
+                COALESCE(SUM(CASE WHEN in_cross_scope = 1 THEN total_copies ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN in_cross_scope = 1 THEN total_copies - 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN in_cross_scope = 1 THEN (total_copies - 1) * size_bytes ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN in_cross_scope = 1 THEN total_copies * size_bytes ELSE 0 END), 0)
+            FROM scoped
+            """,
+            [*dup_hosts, min_size],
+        )
+
+    with db.operation_context("report duplicates: host-only table"):
+        host_rows = db.query(
+            f"""
+        SELECT
+            hs.host,
+            COALESCE(COUNT(CASE
+                WHEN h.copy_count_effective > 1 AND COALESCE(h.size_bytes, 0) >= ?
+                THEN 1
+            END), 0) AS uniq_dup_hashes,
+            COALESCE(SUM(CASE
+                WHEN h.copy_count_effective > 1 AND COALESCE(h.size_bytes, 0) >= ?
+                THEN h.copy_count_effective - 1
+                ELSE 0
+            END), 0) AS extra_copies,
+            COALESCE(SUM(CASE
+                WHEN h.copy_count_effective > 1 AND COALESCE(h.size_bytes, 0) >= ?
+                THEN (h.copy_count_effective - 1) * COALESCE(h.size_bytes, 0)
+                ELSE 0
+            END), 0) AS extra_bytes,
+            COALESCE(hs.total_bytes, 0) AS host_total_bytes
+        FROM host_stats hs
+        LEFT JOIN host_hash_stats h
+               ON h.host = hs.host
+        WHERE hs.host IN ({host_ph})
+        GROUP BY hs.host, hs.total_bytes
+        ORDER BY hs.host
+            """,
+            [min_size, min_size, min_size, *dup_hosts],
+        )
+
+    with db.operation_context("report duplicates: top opportunities"):
+        top_rows = db.query(
+            scope_sql
+            + f"""
+        , top_hashes AS (
+            SELECT
+                hash,
+                total_copies,
+                host_count_present,
+                size_bytes,
+                (total_copies - 1) * size_bytes AS extra_bytes
+            FROM scoped
+            WHERE in_scope = 1
+            ORDER BY extra_bytes DESC, total_copies DESC, hash ASC
+            LIMIT ?
+        ),
+        sample AS (
+            SELECT
+                f.hash,
+                MIN(COALESCE(f.file_category, 'other')) AS file_category,
+                MIN(COALESCE(f.filename, '')) AS sample_filename
+            FROM files f
+            INNER JOIN top_hashes t ON t.hash = f.hash
+            WHERE f.host IN ({host_ph})
+            GROUP BY f.hash
+        )
+        SELECT
+            t.extra_bytes,
+            t.total_copies,
+            t.host_count_present,
+            COALESCE(s.file_category, 'other') AS file_category,
+            COALESCE(s.sample_filename, '') AS sample_filename
+        FROM top_hashes t
+        LEFT JOIN sample s ON s.hash = t.hash
+        ORDER BY t.extra_bytes DESC, t.total_copies DESC
+            """,
+            [*dup_hosts, min_size, top_limit, *dup_hosts],
+        )
+
+    global_summary = ReportGlobalDuplicateSummary(
+        uniq_dup_hashes=int(global_row[0]) if global_row else 0,
+        extra_copies=int(global_row[1]) if global_row else 0,
+        extra_bytes=int(global_row[2]) if global_row else 0,
+        gross_duplicate_bytes=int(global_row[3]) if global_row else 0,
+    )
+    cross_summary = ReportCrossHostSummary(
+        qualifying_uniq_dup_hashes=int(cross_row[0]) if cross_row else 0,
+        qualifying_file_copies=int(cross_row[1]) if cross_row else 0,
+        extra_copies=int(cross_row[2]) if cross_row else 0,
+        extra_bytes=int(cross_row[3]) if cross_row else 0,
+        gross_duplicate_bytes=int(cross_row[4]) if cross_row else 0,
+    )
+    host_only_rows = [
+        ReportHostOnlyRow(
+            host=str(r[0]),
+            uniq_dup_hashes=int(r[1] or 0),
+            extra_copies=int(r[2] or 0),
+            extra_bytes=int(r[3] or 0),
+            host_total_bytes=int(r[4] or 0),
+        )
+        for r in host_rows
+    ]
+    top_opportunities = [
+        ReportTopOpportunity(
+            rank=i,
+            extra_bytes=int(r[0] or 0),
+            copies=int(r[1] or 0),
+            hosts=int(r[2] or 0),
+            file_category=str(r[3] or "other"),
+            sample_filename=str(r[4] or ""),
+        )
+        for i, r in enumerate(top_rows, start=1)
+    ]
+    return ReportDuplicatesResponse(
+        global_summary=global_summary,
+        host_only_rows=host_only_rows,
+        cross_host_summary=cross_summary,
+        top_opportunities=top_opportunities,
+    )
+
+
+@app.get("/stats/report/tombstones", response_model=ReportTombstonesResponse)
+def stats_report_tombstones():
+    hosts_in_datastore = len(_report_all_hosts_in_datastore())
+    with db.operation_context("report tombstones: eligibility summary"):
+        rows = db.query(
+            """
+        WITH covered AS (
+            SELECT
+                f.host,
+                f.drive,
+                f.path,
+                MAX(sr.started_at) AS latest_complete_started_at
+            FROM files f
+            JOIN scan_runs sr
+              ON sr.host = f.host
+             AND sr.drive = f.drive
+             AND sr.status = 'complete'
+             AND (f.path = sr.root_path OR f.path LIKE sr.root_path || '/%')
+            GROUP BY f.host, f.drive, f.path
+        ),
+        eligible AS (
+            SELECT
+                f.host,
+                COALESCE(f.size_bytes, 0) AS size_bytes
+            FROM files f
+            JOIN covered c
+              ON c.host = f.host
+             AND c.drive = f.drive
+             AND c.path = f.path
+            WHERE f.last_seen_at < c.latest_complete_started_at
+        )
+        SELECT
+            host,
+            COUNT(*) AS file_rows,
+            COALESCE(SUM(size_bytes), 0) AS total_bytes
+        FROM eligible
+        GROUP BY host
+        ORDER BY host
+            """
+        )
+    host_stats = [(str(r[0]), int(r[1] or 0), int(r[2] or 0)) for r in rows]
+    eligible_rows = sum(r[1] for r in host_stats)
+    eligible_bytes = sum(r[2] for r in host_stats)
+    hosts_with_pressure = [r[0] for r in host_stats if r[1] > 0]
+    hosts_with_pressure_count = len(hosts_with_pressure)
+
+    top_host = None
+    top_host_rows = 0
+    if host_stats:
+        top = sorted(host_stats, key=lambda x: (-x[1], x[0]))[0]
+        top_host = top[0]
+        top_host_rows = top[1]
+
+    return ReportTombstonesResponse(
+        eligible_tombstone_rows=eligible_rows,
+        eligible_tombstone_bytes=eligible_bytes,
+        hosts_with_pressure=hosts_with_pressure,
+        hosts_with_pressure_count=hosts_with_pressure_count,
+        hosts_in_datastore=hosts_in_datastore,
+        top_host=top_host,
+        top_host_rows=top_host_rows,
+    )
+
+
+@app.get("/stats/report/clusters", response_model=ReportClustersResponse)
+def stats_report_clusters(
+    k: int = Query(10, ge=1, le=25),
+    fast: bool = Query(False),
+):
+    if fast:
+        cache_key = ("report_clusters", k)
+        cached = _cache_get(_report_clusters_cache, cache_key)
+        if cached is not None:
+            return cached
+
+    with db.operation_context("report clusters: size distribution"):
+        rows = db.query(
+            """
+        SELECT COALESCE(size_bytes, 0) AS size_bytes, COUNT(*) AS files
+        FROM files
+        GROUP BY COALESCE(size_bytes, 0)
+        ORDER BY size_bytes
+        """
+        )
+    points = [(int(r[0] or 0), int(r[1] or 0)) for r in rows]
+    cluster_rows = _kmeans_log1p_weighted(points, k_target=k)
+    total_files = sum(int(r[1] or 0) for r in rows)
+    response = ReportClustersResponse(
+        k_target=k,
+        k_used=len(cluster_rows),
+        total_files=total_files,
+        clusters=[ReportClusterRow(**r) for r in cluster_rows],
+    )
+    if fast:
+        _cache_set(_report_clusters_cache, ("report_clusters", k), response)
+    return response
 
 
 @app.get("/stats/duplicates", response_model=list[DuplicateSet])

@@ -4,6 +4,8 @@ import logging
 import os
 import threading
 import time
+import contextvars
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -11,8 +13,138 @@ import duckdb
 
 logger = logging.getLogger("sift.db")
 
+
+_DB_LOCK_WAIT_TIMEOUT_SEC = float(os.environ.get("SIFT_DB_LOCK_WAIT_TIMEOUT_SEC", "0"))
+_DB_QUERY_TIMEOUT_SEC = float(os.environ.get("SIFT_DB_QUERY_TIMEOUT_SEC", "0"))
+
 _lock = threading.RLock()
 _conn: duckdb.DuckDBPyConnection | None = None
+
+
+class DBTimeoutError(RuntimeError):
+    def __init__(
+        self,
+        timeout_type: str,
+        timeout_sec: float,
+        endpoint: str,
+        operation: str,
+        detail: str,
+        sql: str,
+    ) -> None:
+        super().__init__(detail)
+        self.timeout_type = timeout_type
+        self.timeout_sec = timeout_sec
+        self.endpoint = endpoint
+        self.operation = operation
+        self.detail = detail
+        self.sql = sql
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": "timeout_enforced",
+            "type": self.timeout_type,
+            "endpoint": self.endpoint,
+            "operation": self.operation,
+            "timeout_sec": self.timeout_sec,
+            "sql": self.sql,
+            "detail": self.detail,
+        }
+
+
+_request_context: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
+    "sift_db_request_context",
+    default={"endpoint": "unknown", "operation": "unspecified"},
+)
+
+
+def push_request_context(endpoint: str) -> contextvars.Token:
+    return _request_context.set({"endpoint": endpoint, "operation": endpoint})
+
+
+def pop_request_context(token: contextvars.Token) -> None:
+    _request_context.reset(token)
+
+
+@contextmanager
+def operation_context(operation: str):
+    current = _request_context.get()
+    token = _request_context.set(
+        {"endpoint": current.get("endpoint", "unknown"), "operation": operation}
+    )
+    try:
+        yield
+    finally:
+        _request_context.reset(token)
+
+
+def _context_snapshot() -> tuple[str, str]:
+    ctx = _request_context.get()
+    return (ctx.get("endpoint", "unknown"), ctx.get("operation", "unspecified"))
+
+
+def _sql_snippet(sql: str) -> str:
+    text = " ".join(sql.split())
+    return text[:180]
+
+
+@contextmanager
+def _acquire_lock(sql: str):
+    start = time.monotonic()
+    if _DB_LOCK_WAIT_TIMEOUT_SEC <= 0:
+        _lock.acquire()
+        acquired = True
+    else:
+        acquired = _lock.acquire(timeout=_DB_LOCK_WAIT_TIMEOUT_SEC)
+    if not acquired:
+        endpoint, operation = _context_snapshot()
+        elapsed = time.monotonic() - start
+        raise DBTimeoutError(
+            timeout_type="lock_wait",
+            timeout_sec=_DB_LOCK_WAIT_TIMEOUT_SEC,
+            endpoint=endpoint,
+            operation=operation,
+            detail=f"Timed out waiting for DB lock after {elapsed:.1f}s",
+            sql=_sql_snippet(sql),
+        )
+    try:
+        yield
+    finally:
+        _lock.release()
+
+
+def _run_with_query_timeout(conn: duckdb.DuckDBPyConnection, sql: str, runner):
+    if _DB_QUERY_TIMEOUT_SEC <= 0:
+        return runner()
+
+    timed_out = threading.Event()
+
+    def _interrupt() -> None:
+        timed_out.set()
+        try:
+            conn.interrupt()
+        except Exception:
+            pass
+
+    timer = threading.Timer(_DB_QUERY_TIMEOUT_SEC, _interrupt)
+    timer.daemon = True
+    timer.start()
+    try:
+        return runner()
+    except Exception as exc:
+        if timed_out.is_set():
+            endpoint, operation = _context_snapshot()
+            raise DBTimeoutError(
+                timeout_type="query_runtime",
+                timeout_sec=_DB_QUERY_TIMEOUT_SEC,
+                endpoint=endpoint,
+                operation=operation,
+                detail="DuckDB query interrupted after timeout",
+                sql=_sql_snippet(sql),
+            ) from exc
+        raise
+    finally:
+        timer.cancel()
+
 
 SCHEMA_SQL = """
 CREATE SEQUENCE IF NOT EXISTS scan_run_id_seq START 1;
@@ -220,13 +352,13 @@ def _split_statements(sql: str) -> list[str]:
 
 def execute(sql: str, params: list[Any] | None = None) -> None:
     """Execute a write statement under the global lock."""
-    with _lock:
+    with _acquire_lock(sql):
         conn = get_connection()
         start = time.monotonic()
         if params:
-            conn.execute(sql, params)
+            _run_with_query_timeout(conn, sql, lambda: conn.execute(sql, params))
         else:
-            conn.execute(sql)
+            _run_with_query_timeout(conn, sql, lambda: conn.execute(sql))
         elapsed = time.monotonic() - start
         if elapsed > 1.0:
             param_str = f" params={params!r}" if params else ""
@@ -235,19 +367,25 @@ def execute(sql: str, params: list[Any] | None = None) -> None:
 
 def query(sql: str, params: list[Any] | None = None) -> list[tuple]:
     """Execute a SELECT and return all rows under the global lock."""
-    with _lock:
+    with _acquire_lock(sql):
         conn = get_connection()
         start = time.monotonic()
         if params:
-            result = conn.execute(sql, params)
+            result = _run_with_query_timeout(
+                conn, sql, lambda: conn.execute(sql, params)
+            )
         else:
-            result = conn.execute(sql)
+            result = _run_with_query_timeout(conn, sql, lambda: conn.execute(sql))
         rows = result.fetchall()
         elapsed = time.monotonic() - start
         if elapsed > 1.0:
             param_str = f" params={params!r}" if params else ""
             logger.warning(
-                "slow query (%.1fs, %d rows): %s%s", elapsed, len(rows), sql[:120], param_str
+                "slow query (%.1fs, %d rows): %s%s",
+                elapsed,
+                len(rows),
+                sql[:120],
+                param_str,
             )
         return rows
 
@@ -260,10 +398,10 @@ def query_one(sql: str, params: list[Any] | None = None) -> tuple | None:
 
 def executemany(sql: str, data: list[list[Any]]) -> None:
     """Execute a write statement for many rows under the global lock."""
-    with _lock:
+    with _acquire_lock(sql):
         conn = get_connection()
         start = time.monotonic()
-        conn.executemany(sql, data)
+        _run_with_query_timeout(conn, sql, lambda: conn.executemany(sql, data))
         elapsed = time.monotonic() - start
         if elapsed > 1.0:
             logger.warning(

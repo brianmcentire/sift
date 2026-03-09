@@ -208,3 +208,73 @@ class DuplicateSet(BaseModel):
     copy_count: int
     wasted_bytes: Optional[int]
     locations: list[DuplicateLocation]
+
+
+class ReportInventoryResponse(BaseModel):
+    hosts_in_datastore: int
+    total_file_rows: int
+    total_bytes: int
+    zero_byte_files: int
+
+
+class ReportGlobalDuplicateSummary(BaseModel):
+    uniq_dup_hashes: int
+    extra_copies: int
+    extra_bytes: int
+    gross_duplicate_bytes: int
+
+
+class ReportHostOnlyRow(BaseModel):
+    host: str
+    uniq_dup_hashes: int
+    extra_copies: int
+    extra_bytes: int
+    host_total_bytes: int
+
+
+class ReportCrossHostSummary(BaseModel):
+    qualifying_uniq_dup_hashes: int
+    qualifying_file_copies: int
+    extra_copies: int
+    extra_bytes: int
+    gross_duplicate_bytes: int
+
+
+class ReportTopOpportunity(BaseModel):
+    rank: int
+    extra_bytes: int
+    copies: int
+    hosts: int
+    file_category: str
+    sample_filename: str
+
+
+class ReportDuplicatesResponse(BaseModel):
+    global_summary: ReportGlobalDuplicateSummary
+    host_only_rows: list[ReportHostOnlyRow]
+    cross_host_summary: ReportCrossHostSummary
+    top_opportunities: list[ReportTopOpportunity]
+
+
+class ReportTombstonesResponse(BaseModel):
+    eligible_tombstone_rows: int
+    eligible_tombstone_bytes: int
+    hosts_with_pressure: list[str]
+    hosts_with_pressure_count: int
+    hosts_in_datastore: int
+    top_host: Optional[str] = None
+    top_host_rows: int = 0
+
+
+class ReportClusterRow(BaseModel):
+    name: str
+    median_size_bytes: int
+    files: int
+    pct_of_files: float
+
+
+class ReportClustersResponse(BaseModel):
+    k_target: int
+    k_used: int
+    total_files: int
+    clusters: list[ReportClusterRow]

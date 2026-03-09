@@ -257,6 +257,9 @@ def main() -> None:
         help="With --dry-run, list matching paths",
     )
 
+    # sift report
+    sub.add_parser("report", help="Show datastore report across all hosts")
+
     # sift config
     sub.add_parser("config", help="Configure the sift server URL")
 
@@ -298,6 +301,10 @@ def main() -> None:
             from sift.commands.trim import cmd_trim
 
             cmd_trim(args)
+        elif args.command == "report":
+            from sift.commands.report import cmd_report
+
+            cmd_report(args)
         elif args.command == "config":
             from sift.commands.config import cmd_config
 
