@@ -132,6 +132,7 @@ from server.models import (
     DuplicateHashCountResponse,
     FileRecord,
     HostEntry,
+    HostRootEntry,
     LsEntry,
     ScanRunCreate,
     ScanRunCreatedResponse,
@@ -752,6 +753,21 @@ def _trim_candidates_cte(body: TrimRequest) -> tuple[str, list]:
 
     base_where = " AND ".join(where)
 
+    if body.unsafe_not_seen_before is not None:
+        cutoff_ts = body.unsafe_not_seen_before.isoformat() + "T00:00:00+00:00"
+        sql = f"""
+            candidates AS (
+                SELECT f.host, f.drive, f.path
+                FROM files f
+                WHERE {base_where}
+                  AND (
+                      f.last_seen_at IS NULL
+                      OR epoch(f.last_seen_at) < epoch(CAST(? AS TIMESTAMPTZ))
+                  )
+            )
+        """
+        return sql, [*params, cutoff_ts]
+
     if not body.deleted_only:
         sql = f"""
             candidates AS (
@@ -795,6 +811,11 @@ def trim_files(body: TrimRequest):
         raise HTTPException(400, "limit must be between 1 and 100000")
     if body.offset < 0:
         raise HTTPException(400, "offset must be >= 0")
+    if body.deleted_only and body.unsafe_not_seen_before is not None:
+        raise HTTPException(
+            400,
+            "deleted_only and unsafe_not_seen_before cannot be combined",
+        )
 
     body.path_prefix = body.path_prefix.lower().rstrip("/")
     if body.path_prefix == ".":
@@ -2859,6 +2880,76 @@ def list_hosts():
     ]
     _cache_set(_hosts_cache, cache_key, result)
     return result
+
+
+def _root_covers(ancestor: str, candidate: str) -> bool:
+    if ancestor == candidate:
+        return True
+    if ancestor == "/":
+        return candidate.startswith("/")
+    return candidate.startswith(ancestor + "/")
+
+
+@app.get("/hosts/roots", response_model=list[HostRootEntry])
+def list_host_roots(host: Optional[str] = Query(None)):
+    params: list = []
+    where_parts = ["status = 'complete'"]
+    if host:
+        where_parts.append("host = ?")
+        params.append(host)
+    where = "WHERE " + " AND ".join(where_parts)
+
+    rows = db.query(
+        f"""
+        WITH complete_runs AS (
+            SELECT id, host, drive, root_path, root_path_display, started_at
+            FROM scan_runs
+            {where}
+        ),
+        latest_per_root AS (
+            SELECT
+                host,
+                drive,
+                root_path,
+                COALESCE(root_path_display, root_path) AS root_display,
+                started_at,
+                ROW_NUMBER() OVER (
+                    PARTITION BY host, drive, root_path
+                    ORDER BY started_at DESC, id DESC
+                ) AS rn
+            FROM complete_runs
+        )
+        SELECT host, drive, root_path, root_display, started_at
+        FROM latest_per_root
+        WHERE rn = 1
+        ORDER BY host, drive, LENGTH(root_path), root_path
+        """,
+        params,
+    )
+
+    grouped: dict[tuple[str, str], list[tuple[str, str, datetime]]] = {}
+    for r in rows:
+        grouped.setdefault((str(r[0]), str(r[1] or "")), []).append(
+            (str(r[2]), str(r[3]), r[4])
+        )
+
+    out: list[HostRootEntry] = []
+    for (h, drive), roots in sorted(grouped.items()):
+        selected: list[tuple[str, str, datetime]] = []
+        for root_path, root_display, started_at in roots:
+            if any(_root_covers(s[0], root_path) for s in selected):
+                continue
+            selected.append((root_path, root_display, started_at))
+        for root_path, root_display, started_at in selected:
+            out.append(
+                HostRootEntry(
+                    host=h,
+                    drive=drive,
+                    root_path=root_display,
+                    latest_complete_at=started_at,
+                )
+            )
+    return out
 
 
 # ---------------------------------------------------------------------------

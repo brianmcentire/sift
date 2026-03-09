@@ -25,7 +25,7 @@ from sift.exclusions import (
     is_volatile_active,
     is_windows_cloud_placeholder,
 )
-from sift.hash_utils import hash_file, needs_rehash
+from sift.hash_utils import hash_file_with_error, needs_rehash
 from sift.normalize import (
     get_source_os,
     local_hostname,
@@ -412,7 +412,9 @@ def cmd_scan(args) -> None:
     # 1. Register scan run
     # -----------------------------------------------------------------------
     if not quiet:
-        print(f"Registering scan run for {host}:{root_path_display}...", file=sys.stderr)
+        print(
+            f"Registering scan run for {host}:{root_path_display}...", file=sys.stderr
+        )
 
     stop_event = threading.Event()
     _progress_stop = threading.Event()
@@ -458,6 +460,8 @@ def cmd_scan(args) -> None:
     }
     upsert_records: list[dict] = []
     _upsert_lock = threading.Lock()
+    seen_paths: list[dict] = []  # guarded by _seen_lock
+    _seen_lock = threading.Lock()
 
     try:
         # -------------------------------------------------------------------
@@ -477,10 +481,14 @@ def cmd_scan(args) -> None:
                         entry = json.loads(line)
                         cache[entry[0]] = {"mtime": entry[1], "size_bytes": entry[2]}
                         if not quiet and len(cache) % 10_000 == 0:
-                            sys.stderr.write(f"\r\x1b[2KFetching file cache: {len(cache):,}")
+                            sys.stderr.write(
+                                f"\r\x1b[2KFetching file cache: {len(cache):,}"
+                            )
                             sys.stderr.flush()
             if not quiet:
-                sys.stderr.write(f"\r\x1b[2KFetching file cache: {len(cache):,} entries.\n")
+                sys.stderr.write(
+                    f"\r\x1b[2KFetching file cache: {len(cache):,} entries.\n"
+                )
                 sys.stderr.flush()
         except Exception as e:
             if not quiet:
@@ -491,8 +499,6 @@ def cmd_scan(args) -> None:
         # -------------------------------------------------------------------
         # 3. Walk
         # -------------------------------------------------------------------
-        seen_paths: list[dict] = []  # guarded by _seen_lock
-        _seen_lock = threading.Lock()
         # Maps (st_dev, st_ino) → hash for reusing hash across hard-linked paths.
         # Only populated when inode is non-zero (i.e., not Windows with st_ino=0).
         seen_inodes: dict[tuple[int, int], str] = {}
@@ -510,14 +516,17 @@ def cmd_scan(args) -> None:
         _error_log_path = os.path.expanduser("~/.sift-scan-errors.log")
         _error_log_fh = None
 
-        def _log_error(path: str) -> None:
+        def _log_error(path: str, reason: str | None = None) -> None:
             nonlocal _error_log_fh
             if _error_log_fh is None:
                 _error_log_fh = open(_error_log_path, "a")  # noqa: SIM115
                 _error_log_fh.write(
                     f"--- sift scan errors: {scan_start_iso} | host: {host} | root: {walk_root} ---\n"
                 )
-            _error_log_fh.write(path + "\n")
+            if reason:
+                _error_log_fh.write(f"{path}  |  {reason}\n")
+            else:
+                _error_log_fh.write(path + "\n")
 
         _stats_progress_interval = 1.0  # stats line refresh cadence
         _file_progress_interval = 0.10  # current-file line refresh cadence
@@ -1011,9 +1020,13 @@ def cmd_scan(args) -> None:
                             )
                             stats["files_hashed"] += 1
                         else:
-                            hash_val = hash_file(sp, chunk_size=chunk_size_bytes)
+                            hash_val, hash_err = hash_file_with_error(
+                                sp,
+                                chunk_size=chunk_size_bytes,
+                            )
                             if hash_val is None:
-                                msg = f"cannot read {raw_path}: permission denied"
+                                reason = hash_err or "read error"
+                                msg = f"cannot read {raw_path}: {reason}"
                                 if debug:
                                     print(f"\nsift: {msg}", file=sys.stderr)
                                     sys.exit(1)
@@ -1036,7 +1049,7 @@ def cmd_scan(args) -> None:
                                         device=device_val,
                                     )
                                 )
-                                _log_error(raw_path)
+                                _log_error(raw_path, reason)
                                 stats["read_errors"] += 1
                                 stats["files_skipped"] += 1
                             else:
@@ -1071,7 +1084,7 @@ def cmd_scan(args) -> None:
                             file=sys.stderr,
                         )
                         sys.exit(1)
-                    _log_error(raw_path)
+                    _log_error(raw_path, e.strerror)
                     stats["read_errors"] += 1
                 except OSError as e:
                     if debug:
@@ -1079,7 +1092,7 @@ def cmd_scan(args) -> None:
                             f"\nsift: error: {raw_path}: {e.strerror}", file=sys.stderr
                         )
                         sys.exit(1)
-                    _log_error(raw_path)
+                    _log_error(raw_path, e.strerror)
                     stats["read_errors"] += 1
 
                 stats["files_scanned"] += 1
@@ -1143,7 +1156,9 @@ def cmd_scan(args) -> None:
                 if not quiet:
                     n_batches = math.ceil(len(remaining_seen) / seen_batch_size)
                     done = math.ceil(sent_seen / seen_batch_size)
-                    sys.stderr.write(f"\r\x1b[2K  seen-path updates: {done}/{n_batches}")
+                    sys.stderr.write(
+                        f"\r\x1b[2K  seen-path updates: {done}/{n_batches}"
+                    )
                     sys.stderr.flush()
             if not quiet:
                 sys.stderr.write("\r\x1b[2K  seen-path updates: done.\n")
@@ -1183,27 +1198,28 @@ def cmd_scan(args) -> None:
         if debug:
             _dump_api_log("final")
         elapsed = time.time() - scan_start.timestamp()
-        err_suffix = (
-            f", {stats['read_errors']:,} read errors (see {_error_log_path})"
-            if stats["read_errors"]
-            else ""
-        )
         cached_str = (
             f", {stats['files_cached']:,} cached" if stats["files_cached"] else ""
-        )
-        net_str = (
-            f", {stats['network_mounts_skipped']:,} network mount(s) skipped"
-            if stats["network_mounts_skipped"]
-            else ""
         )
         print(
             f"\nScan complete: {stats['files_scanned']:,} files scanned, "
             f"{stats['files_hashed']:,} hashed{cached_str}, "
             f"{stats['files_skipped']:,} skipped, "
             f"{_format_size(stats['bytes_scanned'])} total, "
-            f"{_format_duration(elapsed)} elapsed{err_suffix}{net_str}",
+            f"{_format_duration(elapsed)} elapsed",
             file=sys.stderr,
         )
+        extras = []
+        if stats["read_errors"]:
+            extras.append(
+                f"{stats['read_errors']:,} read errors (see {_error_log_path})"
+            )
+        if stats["network_mounts_skipped"]:
+            extras.append(
+                f"{stats['network_mounts_skipped']:,} network mount(s) skipped"
+            )
+        if extras:
+            print("  " + ", ".join(extras), file=sys.stderr)
 
     except _ServerDown as e:
         stop_event.set()

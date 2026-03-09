@@ -199,6 +199,11 @@ def main() -> None:
     p_status.add_argument(
         "--stats", action="store_true", help="Include dup stats (slower)"
     )
+    p_status.add_argument(
+        "--showroots",
+        action="store_true",
+        help="Show effective complete scan roots per host",
+    )
 
     # sift trim
     p_trim = sub.add_parser("trim", help="Remove inventory rows from the datastore")
@@ -218,10 +223,17 @@ def main() -> None:
         action="store_true",
         help="Trim recursively under path (default: current directory only)",
     )
-    p_trim.add_argument(
+    trim_mode = p_trim.add_mutually_exclusive_group()
+    trim_mode.add_argument(
         "--deleted",
         action="store_true",
         help="Only trim stale tombstoned rows (requires covering complete scans). If no path is provided, defaults to -r /",
+    )
+    trim_mode.add_argument(
+        "--unsafe-delete-not-seen-since",
+        dest="unsafe_delete_not_seen_since",
+        default=None,
+        help="Unsafe: trim rows with last_seen_at before YYYYMMDD (no coverage checks)",
     )
     p_trim.add_argument(
         "--host",

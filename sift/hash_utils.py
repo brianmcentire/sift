@@ -1,10 +1,11 @@
 """SHA-256 hashing and rehash cache logic."""
+
 from __future__ import annotations
 
 import hashlib
 import math
 import os
-from typing import Optional
+from typing import Callable, Optional
 
 
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB default
@@ -13,7 +14,7 @@ _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB default
 def hash_file(
     path: str,
     chunk_size: int = _CHUNK_SIZE,
-    on_chunk: Optional[callable] = None,
+    on_chunk: Optional[Callable[[int], None]] = None,
 ) -> Optional[str]:
     """
     Compute SHA-256 hex digest of a file.
@@ -35,6 +36,34 @@ def hash_file(
         return None
     except OSError:
         return None
+
+
+def hash_file_with_error(
+    path: str,
+    chunk_size: int = _CHUNK_SIZE,
+    on_chunk: Optional[Callable[[int], None]] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    """Compute SHA-256 and return (hash_hex, error_message).
+
+    On success returns (digest, None). On failure returns (None, reason).
+    """
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                h.update(chunk)
+                if on_chunk:
+                    on_chunk(len(chunk))
+        return h.hexdigest(), None
+    except PermissionError as e:
+        msg = e.strerror or "permission denied"
+        return None, msg
+    except OSError as e:
+        msg = e.strerror or str(e)
+        return None, msg
 
 
 def needs_rehash(

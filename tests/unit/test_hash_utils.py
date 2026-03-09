@@ -1,10 +1,11 @@
 """Unit tests for sift.hash_utils."""
+
 import hashlib
 import math
 import os
 import tempfile
 import pytest
-from sift.hash_utils import hash_file, needs_rehash
+from sift.hash_utils import hash_file, hash_file_with_error, needs_rehash
 
 
 class TestHashFile:
@@ -76,13 +77,21 @@ class TestHashFile:
         finally:
             os.unlink(path)
 
+    def test_hash_file_with_error_returns_reason_for_missing_file(self):
+        digest, err = hash_file_with_error("/nonexistent/path/to/file.txt")
+        assert digest is None
+        assert isinstance(err, str)
+        assert err
+
 
 class TestNeedsRehash:
     def _make_stat(self, mtime: float, size: int):
         """Return a minimal stat_result-like object."""
+
         class FakeStat:
             st_mtime = mtime
             st_size = size
+
         return FakeStat()
 
     def test_no_cache_means_rehash(self):

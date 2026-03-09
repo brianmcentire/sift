@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -97,6 +97,7 @@ class TrimRequest(BaseModel):
     count_only: bool = False
     preview: bool = False
     offset: int = 0
+    unsafe_not_seen_before: Optional[date] = None
 
 
 class TrimResponse(BaseModel):
@@ -182,6 +183,13 @@ class HostEntry(BaseModel):
     total_hashed: int
     drives: list[str] = []
     is_scanning: bool = False
+
+
+class HostRootEntry(BaseModel):
+    host: str
+    drive: str = ""
+    root_path: str
+    latest_complete_at: Optional[datetime]
 
 
 class StatsOverview(BaseModel):

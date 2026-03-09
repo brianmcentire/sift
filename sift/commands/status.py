@@ -35,6 +35,7 @@ def cmd_status(args) -> None:
     print_server_info()
     filter_host = getattr(args, "host", None)
     show_stats = getattr(args, "stats", False)
+    show_roots = getattr(args, "showroots", False)
 
     try:
         hosts = client.get("/hosts")
@@ -57,9 +58,7 @@ def cmd_status(args) -> None:
     total_bytes = sum(h.get("total_bytes") or 0 for h in hosts)
 
     summary = (
-        f"{total_hosts} hosts  ·  "
-        f"{total_files:,} files  ·  "
-        f"{_human_size(total_bytes)}"
+        f"{total_hosts} hosts  ·  {total_files:,} files  ·  {_human_size(total_bytes)}"
     )
 
     if show_stats:
@@ -134,8 +133,67 @@ def cmd_status(args) -> None:
             )
         print()
 
-    # Host-focused status implies verbose so scan history context is shown.
-    verbose = bool(getattr(args, "verbose", False) or filter_host)
+    if show_roots:
+        try:
+            params = {"host": filter_host} if filter_host else None
+            roots = client.get("/hosts/roots", params=params)
+        except Exception as e:
+            print(f"sift: cannot fetch roots: {e}", file=sys.stderr)
+            roots = []
+
+        if roots:
+            root_rows = []
+            has_any_drive = False
+            for r in roots:
+                drive = r.get("drive") or ""
+                if drive:
+                    has_any_drive = True
+                root_rows.append(
+                    {
+                        "host": r.get("host") or "",
+                        "drive": drive,
+                        "root": r.get("root_path") or "",
+                        "latest": _fmt_dt(r.get("latest_complete_at")),
+                    }
+                )
+
+            host_w = max(len("host"), max(len(r["host"]) for r in root_rows))
+            latest_w = max(
+                len("latest complete"), max(len(r["latest"]) for r in root_rows)
+            )
+
+            print("  effective complete roots")
+            if has_any_drive:
+                drive_w = max(len("drive"), max(len(r["drive"]) for r in root_rows))
+                print(
+                    f"  {'host':<{host_w}}  {'drive':<{drive_w}}"
+                    f"  {'latest complete':<{latest_w}}  root"
+                )
+                print(
+                    f"  {'-' * host_w}  {'-' * drive_w}"
+                    f"  {'-' * len('latest complete'):<{latest_w}}  {'-' * len('root')}"
+                )
+                for r in root_rows:
+                    drive = r["drive"] or "-"
+                    print(
+                        f"  {r['host']:<{host_w}}  {drive:<{drive_w}}"
+                        f"  {r['latest']:<{latest_w}}  {r['root']}"
+                    )
+            else:
+                print(f"  {'host':<{host_w}}  {'latest complete':<{latest_w}}  root")
+                print(
+                    f"  {'-' * host_w}  {'-' * len('latest complete'):<{latest_w}}  {'-' * len('root')}"
+                )
+                for r in root_rows:
+                    print(
+                        f"  {r['host']:<{host_w}}  {r['latest']:<{latest_w}}  {r['root']}"
+                    )
+            print()
+        else:
+            print("  effective complete roots: none")
+            print()
+
+    verbose = bool(getattr(args, "verbose", False))
     if verbose and runs:
         print("recent scans")
         for r in runs:

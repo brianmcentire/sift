@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 from sift import client
 from sift.commands import print_server_info
@@ -71,6 +72,7 @@ def cmd_trim(args) -> None:
     debug = getattr(args, "debug", False)
     recursive = getattr(args, "recursive", False)
     deleted_only = getattr(args, "deleted", False)
+    unsafe_not_seen_since = getattr(args, "unsafe_delete_not_seen_since", None)
     batch_size = getattr(args, "batch_size", 5000)
     dry_run = getattr(args, "dry_run", False)
     verbose = getattr(args, "verbose", False)
@@ -92,13 +94,40 @@ def cmd_trim(args) -> None:
         path_prefix = normalize_query_path("/")
         recursive = True
 
+    if deleted_only and unsafe_not_seen_since:
+        print(
+            "sift: --deleted and --unsafe-delete-not-seen-since cannot be used together",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    unsafe_not_seen_before = None
+    if unsafe_not_seen_since:
+        try:
+            parsed = datetime.strptime(str(unsafe_not_seen_since), "%Y%m%d")
+            unsafe_not_seen_before = (
+                parsed.replace(tzinfo=timezone.utc).date().isoformat()
+            )
+        except ValueError:
+            print(
+                "sift: --unsafe-delete-not-seen-since must be YYYYMMDD",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
     if debug:
-        mode = "deleted" if deleted_only else "targeted"
+        mode = (
+            "unsafe-not-seen-since"
+            if unsafe_not_seen_before
+            else ("deleted" if deleted_only else "targeted")
+        )
         _debug(f"[trim] mode={mode}")
         _debug(f"[trim] host={host}")
         _debug(f"[trim] path={path_prefix or '/'}")
         _debug(f"[trim] recursive={recursive}")
         _debug(f"[trim] patterns={patterns or '[]'}")
+        if unsafe_not_seen_before:
+            _debug(f"[trim] unsafe_not_seen_before={unsafe_not_seen_before}")
         _debug(f"[trim] batch_size={batch_size}")
 
     payload = {
@@ -111,6 +140,7 @@ def cmd_trim(args) -> None:
         "count_only": True,
         "preview": False,
         "offset": 0,
+        "unsafe_not_seen_before": unsafe_not_seen_before,
     }
 
     try:
@@ -134,7 +164,11 @@ def cmd_trim(args) -> None:
         _debug(f"[trim] matched={total:,}")
 
     if dry_run:
-        mode_label = "deleted-only" if deleted_only else "targeted"
+        mode_label = (
+            "unsafe-age-based"
+            if unsafe_not_seen_before
+            else ("deleted-only" if deleted_only else "targeted")
+        )
         print(
             f"Dry run: {total:,} inventory entr{'y' if total == 1 else 'ies'}"
             f" would be trimmed ({mode_label}) on host '{host}' under {path_prefix or '/'}.",
@@ -174,7 +208,11 @@ def cmd_trim(args) -> None:
         return
 
     if not getattr(args, "quiet", False):
-        mode_label = "deleted-only" if deleted_only else "targeted"
+        mode_label = (
+            "unsafe-age-based"
+            if unsafe_not_seen_before
+            else ("deleted-only" if deleted_only else "targeted")
+        )
         print(
             f"Trimming {total:,} inventory entr{'y' if total == 1 else 'ies'}"
             f" ({mode_label})...",

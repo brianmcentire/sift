@@ -202,6 +202,62 @@ class TestTrimDeletedOnly:
         assert resp.status_code == 200
         assert resp.json()["deleted"] == 0
 
+
+class TestTrimUnsafeNotSeenSince:
+    def test_unsafe_not_seen_before_deletes_without_scan_coverage(self, client):
+        insert_files(
+            [
+                make_file(path="/users/brian/stale.txt", filename="stale.txt"),
+                make_file(path="/users/brian/fresh.txt", filename="fresh.txt"),
+            ]
+        )
+        db_module.execute(
+            "UPDATE files SET last_seen_at = ? WHERE host = ? AND path = ?",
+            ["2026-03-08T23:59:59+00:00", "mac", "/users/brian/stale.txt"],
+        )
+        db_module.execute(
+            "UPDATE files SET last_seen_at = ? WHERE host = ? AND path = ?",
+            ["2026-03-09T00:00:00+00:00", "mac", "/users/brian/fresh.txt"],
+        )
+
+        resp = client.post(
+            "/trim",
+            json={
+                "host": "mac",
+                "path_prefix": "/users/brian",
+                "recursive": True,
+                "deleted_only": False,
+                "patterns": [],
+                "limit": 5000,
+                "count_only": False,
+                "unsafe_not_seen_before": "2026-03-09",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == 1
+
+        rows = client.get("/files", params={"host": "mac", "limit": 1000}).json()
+        names = {r["filename"] for r in rows}
+        assert names == {"fresh.txt"}
+
+    def test_unsafe_not_seen_before_conflicts_with_deleted_only(self, client):
+        insert_files([make_file(path="/users/brian/a.txt", filename="a.txt")])
+
+        resp = client.post(
+            "/trim",
+            json={
+                "host": "mac",
+                "path_prefix": "/users/brian",
+                "recursive": True,
+                "deleted_only": True,
+                "patterns": [],
+                "limit": 5000,
+                "count_only": False,
+                "unsafe_not_seen_before": "2026-03-09",
+            },
+        )
+        assert resp.status_code == 400
+
     def test_deleted_only_skips_rows_without_covering_complete_scan(self, client):
         old = "2025-01-01T00:00:00+00:00"
         complete_other_root = "2025-01-15T00:00:00+00:00"

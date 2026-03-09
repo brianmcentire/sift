@@ -99,7 +99,7 @@ def cmd_report(args) -> None:
     print()
     print(f"sift server: {get_server_url()}")
     print(f"sift {get_version()}  ·  report scope: all hosts in datastore")
-    _section_gap()
+    print()
 
     total_steps = 7
 
