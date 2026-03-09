@@ -41,6 +41,11 @@ def main() -> None:
         action="store_true",
         help="Suppress progress output (still prints final summary)",
     )
+    p_scan.add_argument(
+        "--null-hash-retry",
+        action="store_true",
+        help="Retry hashing unchanged files that currently have null hash in datastore",
+    )
     p_scan.add_argument("--yolo", action="store_true", help=argparse.SUPPRESS)
 
     # sift ls

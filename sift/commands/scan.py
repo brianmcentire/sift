@@ -339,6 +339,56 @@ def _dump_api_log(label: str = "") -> None:
         )
 
 
+def _prefetch_null_hash_retry_paths(
+    *,
+    host: str,
+    root_path: str,
+    drive: str,
+    quiet: bool,
+) -> set[str]:
+    """Fetch null-hash retry candidates without server contract changes."""
+    if drive:
+        # /files currently has no drive filter. Avoid over-broad lookups on
+        # multi-drive hosts when scanning a specific drive root.
+        if not quiet:
+            print(
+                "Null-hash retry prefetch skipped: drive-scoped lookup is not "
+                "available.",
+                file=sys.stderr,
+            )
+        return set()
+
+    limit = 1_000_000
+    if not quiet:
+        print("Prefetching null-hash retry candidates...", file=sys.stderr)
+
+    rows = client.get(
+        "/files",
+        params={
+            "host": host,
+            "path_prefix": root_path,
+            "lite": True,
+            "limit": limit,
+        },
+    )
+
+    retry_paths = {
+        str(r.get("path_display", "")).lower()
+        for r in rows
+        if r.get("hash") is None and str(r.get("path_display", ""))
+    }
+
+    if not quiet:
+        print(f"Null-hash retry candidates: {len(retry_paths):,}", file=sys.stderr)
+        if len(rows) >= limit:
+            print(
+                "Warning: null-hash prefetch reached result limit; some candidates "
+                "may be omitted.",
+                file=sys.stderr,
+            )
+    return retry_paths
+
+
 def cmd_scan(args) -> None:
     cfg = get_agent_config()
     source_os = get_source_os()
@@ -347,6 +397,7 @@ def cmd_scan(args) -> None:
     quiet = getattr(args, "quiet", False)
     one_filesystem = getattr(args, "one_filesystem", False)
     allow_unraid_disks = getattr(args, "yolo", False)
+    null_hash_retry = getattr(args, "null_hash_retry", False)
 
     if debug:
         enable_request_log()
@@ -462,8 +513,24 @@ def cmd_scan(args) -> None:
     _upsert_lock = threading.Lock()
     seen_paths: list[dict] = []  # guarded by _seen_lock
     _seen_lock = threading.Lock()
+    null_hash_retry_paths: set[str] = set()
 
     try:
+        if null_hash_retry:
+            try:
+                null_hash_retry_paths = _prefetch_null_hash_retry_paths(
+                    host=host,
+                    root_path=root_path,
+                    drive=drive,
+                    quiet=quiet,
+                )
+            except Exception as e:
+                print(
+                    f"sift: warning — null-hash retry prefetch failed: {e}",
+                    file=sys.stderr,
+                )
+                null_hash_retry_paths = set()
+
         # -------------------------------------------------------------------
         # 2. Fetch cache
         # -------------------------------------------------------------------
@@ -611,6 +678,7 @@ def cmd_scan(args) -> None:
                         f"  thread={threading.current_thread().name}"
                     )
                 return 0
+            sent = 0
             try:
                 if debug:
                     n_chunks = math.ceil(len(pending) / upsert_batch_size)
@@ -618,7 +686,6 @@ def cmd_scan(args) -> None:
                         f"[flush] {len(pending):,} records in {n_chunks} batch(es)"
                         f"  thread={threading.current_thread().name}"
                     )
-                sent = 0
                 for chunk in _chunks(pending, upsert_batch_size):
                     _flush_upsert(
                         chunk,
@@ -826,9 +893,16 @@ def cmd_scan(args) -> None:
                     stats["bytes_scanned"] += stat_result.st_size
                     display["current_file"] = _display_scan_path(raw_path, source_os)
 
+                    force_null_hash_retry = (
+                        bool(null_hash_retry_paths)
+                        and path_lower in null_hash_retry_paths
+                    )
+
                     # Cache check — if mtime+size unchanged, the DB record
                     # is already correct.  Just update last_seen_at.
-                    if not needs_rehash(stat_result, cached):
+                    if (not force_null_hash_retry) and (
+                        not needs_rehash(stat_result, cached)
+                    ):
                         _queue_seen({"drive": drive, "path": path_lower})
                         stats["files_cached"] += 1
                         stats["files_scanned"] += 1

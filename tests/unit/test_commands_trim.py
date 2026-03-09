@@ -34,11 +34,27 @@ def test_trim_unsafe_date_payload(monkeypatch, capsys):
 
     monkeypatch.setattr(trim_cmd, "print_server_info", lambda: None)
     monkeypatch.setattr(trim_cmd, "get_cli_config", lambda: {})
+    monkeypatch.setattr(
+        trim_cmd.client,
+        "get",
+        lambda path, params=None: [
+            {
+                "host": "mac",
+                "drive": "",
+                "root_path": "/Users/Brian",
+                "latest_complete_at": "2026-03-09T00:00:00+00:00",
+            }
+        ]
+        if path == "/hosts/roots"
+        else (_ for _ in ()).throw(AssertionError(path)),
+    )
     monkeypatch.setattr(trim_cmd.client, "post", fake_post)
 
-    trim_cmd.cmd_trim(_args(unsafe_delete_not_seen_since="20260309"))
+    trim_cmd.cmd_trim(_args(unsafe_delete_not_seen_since="20260309", targets=[]))
     assert seen_payloads
     assert seen_payloads[0]["unsafe_not_seen_before"] == "2026-03-09"
+    assert seen_payloads[0]["recursive"] is True
+    assert seen_payloads[0]["path_prefix"] == "/users/brian"
     assert "No matching inventory entries" in capsys.readouterr().err
 
 
@@ -51,3 +67,69 @@ def test_trim_unsafe_date_requires_yyyymmdd(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         trim_cmd.cmd_trim(_args(unsafe_delete_not_seen_since="2026-03-09"))
     assert exc.value.code == 2
+
+
+def test_trim_unsafe_date_uses_all_effective_roots(monkeypatch, capsys):
+    from sift.commands import trim as trim_cmd
+
+    calls = []
+
+    def fake_get(path, params=None):
+        assert path == "/hosts/roots"
+        assert params == {"host": "mac"}
+        return [
+            {"host": "mac", "drive": "", "root_path": "/Users/Brian"},
+            {"host": "mac", "drive": "", "root_path": "/Volumes/Archive"},
+        ]
+
+    def fake_post(path, payload, timeout=None):
+        del timeout
+        assert path == "/trim"
+        calls.append(payload.copy())
+        return {"matched": 0, "deleted": 0, "preview_paths": []}
+
+    monkeypatch.setattr(trim_cmd, "print_server_info", lambda: None)
+    monkeypatch.setattr(trim_cmd, "get_cli_config", lambda: {})
+    monkeypatch.setattr(trim_cmd.client, "get", fake_get)
+    monkeypatch.setattr(trim_cmd.client, "post", fake_post)
+
+    trim_cmd.cmd_trim(_args(unsafe_delete_not_seen_since="20260309", targets=[]))
+    got_paths = [p["path_prefix"] for p in calls]
+    assert got_paths == ["/users/brian", "/volumes/archive"]
+    err = capsys.readouterr().err
+    assert "No matching inventory entries" in err
+
+
+def test_trim_unsafe_date_respects_explicit_path(monkeypatch):
+    from sift.commands import trim as trim_cmd
+
+    seen_payloads = []
+
+    def fake_post(path, payload, timeout=None):
+        del timeout
+        assert path == "/trim"
+        seen_payloads.append(payload.copy())
+        return {"matched": 0, "deleted": 0, "preview_paths": []}
+
+    monkeypatch.setattr(trim_cmd, "print_server_info", lambda: None)
+    monkeypatch.setattr(trim_cmd, "get_cli_config", lambda: {})
+    monkeypatch.setattr(
+        trim_cmd.client,
+        "get",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("no roots lookup")
+        ),
+    )
+    monkeypatch.setattr(trim_cmd.client, "post", fake_post)
+
+    trim_cmd.cmd_trim(
+        _args(
+            unsafe_delete_not_seen_since="20260309",
+            path="/Users/Brian/Downloads",
+            targets=[],
+            recursive=False,
+        )
+    )
+    assert seen_payloads
+    assert seen_payloads[0]["path_prefix"] == "/users/brian/downloads"
+    assert seen_payloads[0]["recursive"] is True

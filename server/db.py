@@ -87,6 +87,25 @@ def _sql_snippet(sql: str) -> str:
     return text[:180]
 
 
+def _slow_log_context(sql: str, params: list[Any] | None, max_chars: int = 250) -> str:
+    sql_one_line = " ".join(sql.split())
+    parts = [sql_one_line]
+    if params:
+        preview = repr(params[:6])
+        parts.append(f"params_count={len(params)}")
+        if "IN (VALUES" in sql_one_line.upper() and len(params) >= 2:
+            # Common shape in trim/seen updates: first params are scalar values,
+            # remainder are tupled path keys, often (drive, path) pairs.
+            tuple_est = max((len(params) - 2) // 2, 0)
+            if tuple_est:
+                parts.append(f"value_tuples~{tuple_est}")
+        parts.append(f"params_preview={preview}")
+    out = " | ".join(parts)
+    if len(out) > max_chars:
+        return out[: max_chars - 3] + "..."
+    return out
+
+
 @contextmanager
 def _acquire_lock(sql: str):
     start = time.monotonic()
@@ -361,8 +380,11 @@ def execute(sql: str, params: list[Any] | None = None) -> None:
             _run_with_query_timeout(conn, sql, lambda: conn.execute(sql))
         elapsed = time.monotonic() - start
         if elapsed > 1.0:
-            param_str = f" params={params!r}" if params else ""
-            logger.warning("slow execute (%.1fs): %s%s", elapsed, sql[:120], param_str)
+            logger.warning(
+                "slow execute (%.1fs): %s",
+                elapsed,
+                _slow_log_context(sql, params),
+            )
 
 
 def query(sql: str, params: list[Any] | None = None) -> list[tuple]:
@@ -379,13 +401,11 @@ def query(sql: str, params: list[Any] | None = None) -> list[tuple]:
         rows = result.fetchall()
         elapsed = time.monotonic() - start
         if elapsed > 1.0:
-            param_str = f" params={params!r}" if params else ""
             logger.warning(
-                "slow query (%.1fs, %d rows): %s%s",
+                "slow query (%.1fs, %d rows): %s",
                 elapsed,
                 len(rows),
-                sql[:120],
-                param_str,
+                _slow_log_context(sql, params),
             )
         return rows
 
@@ -405,7 +425,10 @@ def executemany(sql: str, data: list[list[Any]]) -> None:
         elapsed = time.monotonic() - start
         if elapsed > 1.0:
             logger.warning(
-                "slow executemany (%.1fs, %d rows): %s", elapsed, len(data), sql[:120]
+                "slow executemany (%.1fs, %d rows): %s",
+                elapsed,
+                len(data),
+                _slow_log_context(sql, None),
             )
 
 

@@ -58,6 +58,18 @@ def _debug(msg: str) -> None:
     print(f"  {msg}", file=sys.stderr)
 
 
+def _normalize_root_for_trim(root_value: str) -> str:
+    root = str(root_value or "").strip().replace("\\", "/")
+    if len(root) >= 2 and root[1] == ":":
+        root = root[2:]
+    if not root:
+        root = "/"
+    if not root.startswith("/"):
+        root = "/" + root
+    root = root.lower().rstrip("/")
+    return root or "/"
+
+
 def cmd_trim(args) -> None:
     print_server_info()
     cli_cfg = get_cli_config()
@@ -115,6 +127,38 @@ def cmd_trim(args) -> None:
             )
             sys.exit(2)
 
+    scopes = [path_prefix]
+    if unsafe_not_seen_before:
+        # Unsafe age-based mode is always recursive.
+        recursive = True
+        if not has_explicit_path:
+            try:
+                roots_resp = client.get("/hosts/roots", params={"host": host})
+            except Exception as e:
+                print(
+                    f"sift: failed to resolve host roots for '{host}': {e}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+            roots = sorted(
+                {
+                    _normalize_root_for_trim(r.get("root_path") or "")
+                    for r in roots_resp
+                    if (r.get("host") or "") == host and (r.get("root_path") or "")
+                }
+            )
+            if not roots:
+                print(
+                    f"sift: no complete scan roots found for host '{host}'. "
+                    "Run a complete scan first or provide an explicit path.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            scopes = roots
+        else:
+            scopes = [path_prefix]
+
     if debug:
         mode = (
             "unsafe-not-seen-since"
@@ -124,32 +168,41 @@ def cmd_trim(args) -> None:
         _debug(f"[trim] mode={mode}")
         _debug(f"[trim] host={host}")
         _debug(f"[trim] path={path_prefix or '/'}")
+        if len(scopes) > 1:
+            _debug(f"[trim] scopes={scopes}")
         _debug(f"[trim] recursive={recursive}")
         _debug(f"[trim] patterns={patterns or '[]'}")
         if unsafe_not_seen_before:
             _debug(f"[trim] unsafe_not_seen_before={unsafe_not_seen_before}")
         _debug(f"[trim] batch_size={batch_size}")
 
-    payload = {
-        "host": host,
-        "path_prefix": path_prefix,
-        "recursive": recursive,
-        "deleted_only": deleted_only,
-        "patterns": patterns,
-        "limit": batch_size,
-        "count_only": True,
-        "preview": False,
-        "offset": 0,
-        "unsafe_not_seen_before": unsafe_not_seen_before,
-    }
+    def _base_payload(scope_path: str) -> dict:
+        return {
+            "host": host,
+            "path_prefix": scope_path,
+            "recursive": recursive,
+            "deleted_only": deleted_only,
+            "patterns": patterns,
+            "limit": batch_size,
+            "count_only": True,
+            "preview": False,
+            "offset": 0,
+            "unsafe_not_seen_before": unsafe_not_seen_before,
+        }
 
-    try:
-        count_resp = client.post("/trim", payload)
-    except Exception as e:
-        print(f"sift: trim count failed: {e}", file=sys.stderr)
-        sys.exit(1)
+    scope_totals: list[tuple[str, int]] = []
+    total = 0
+    for scope_path in scopes:
+        payload = _base_payload(scope_path)
+        try:
+            count_resp = client.post("/trim", payload)
+        except Exception as e:
+            print(f"sift: trim count failed: {e}", file=sys.stderr)
+            sys.exit(1)
+        matched = int(count_resp.get("matched", 0))
+        scope_totals.append((scope_path, matched))
+        total += matched
 
-    total = int(count_resp.get("matched", 0))
     if total == 0:
         print("No matching inventory entries to trim.", file=sys.stderr)
         if user_provided_host and not has_explicit_path and not deleted_only:
@@ -171,38 +224,50 @@ def cmd_trim(args) -> None:
         )
         print(
             f"Dry run: {total:,} inventory entr{'y' if total == 1 else 'ies'}"
-            f" would be trimmed ({mode_label}) on host '{host}' under {path_prefix or '/'}.",
+            f" would be trimmed ({mode_label}) on host '{host}'"
+            f" under {('multiple roots' if len(scopes) > 1 else (scopes[0] or '/'))}.",
             file=sys.stderr,
         )
+        if len(scopes) > 1:
+            print("Roots in scope:", file=sys.stderr)
+            for scope_path, scope_count in scope_totals:
+                print(f"  {scope_path}  ({scope_count:,})", file=sys.stderr)
         if verbose:
             shown = 0
-            page = 0
-            while shown < total:
-                page += 1
-                payload["preview"] = True
-                payload["offset"] = shown
-                try:
-                    preview_resp = client.post("/trim", payload)
-                except Exception as e:
-                    print(f"sift: trim dry-run preview failed: {e}", file=sys.stderr)
-                    sys.exit(1)
-                paths = preview_resp.get("preview_paths", []) or []
-                if not paths:
-                    break
-                if debug:
-                    _debug(
-                        f"[trim] preview_page={page} rows={len(paths)} offset={shown}"
-                    )
-                for p in paths:
+            for scope_path, scope_total in scope_totals:
+                scope_shown = 0
+                page = 0
+                while scope_shown < scope_total:
+                    page += 1
+                    payload = _base_payload(scope_path)
+                    payload["preview"] = True
+                    payload["offset"] = scope_shown
                     try:
-                        print(p)
-                    except BrokenPipeError:
+                        preview_resp = client.post("/trim", payload)
+                    except Exception as e:
+                        print(
+                            f"sift: trim dry-run preview failed: {e}", file=sys.stderr
+                        )
+                        sys.exit(1)
+                    paths = preview_resp.get("preview_paths", []) or []
+                    if not paths:
+                        break
+                    if debug:
+                        _debug(
+                            f"[trim] preview_page={page} rows={len(paths)}"
+                            f" offset={scope_shown} scope={scope_path}"
+                        )
+                    for p in paths:
                         try:
-                            sys.stdout.close()
-                        except Exception:
-                            pass
-                        return
-                shown += len(paths)
+                            print(p)
+                        except BrokenPipeError:
+                            try:
+                                sys.stdout.close()
+                            except Exception:
+                                pass
+                            return
+                    scope_shown += len(paths)
+                    shown += len(paths)
             if debug:
                 _debug(f"[trim] preview_shown={shown:,}/{total:,}")
         return
@@ -218,45 +283,54 @@ def cmd_trim(args) -> None:
             f" ({mode_label})...",
             file=sys.stderr,
         )
+        if len(scopes) > 1:
+            print("Roots in scope:", file=sys.stderr)
+            for scope_path, scope_count in scope_totals:
+                print(f"  {scope_path}  ({scope_count:,})", file=sys.stderr)
 
     start = time.time()
     deleted_total = 0
     batch_no = 0
 
-    while deleted_total < total:
-        batch_no += 1
-        payload["count_only"] = False
+    for scope_path, scope_total in scope_totals:
+        scope_deleted = 0
+        while scope_deleted < scope_total:
+            batch_no += 1
+            payload = _base_payload(scope_path)
+            payload["count_only"] = False
 
-        try:
-            resp = client.post("/trim", payload, timeout=(5, 120))
-        except Exception as e:
-            print(f"\nsift: trim failed: {e}", file=sys.stderr)
-            sys.exit(1)
+            try:
+                resp = client.post("/trim", payload, timeout=(5, 120))
+            except Exception as e:
+                print(f"\nsift: trim failed: {e}", file=sys.stderr)
+                sys.exit(1)
 
-        deleted = int(resp.get("deleted", 0))
-        matched_now = int(resp.get("matched", 0))
+            deleted = int(resp.get("deleted", 0))
+            matched_now = int(resp.get("matched", 0))
 
-        if deleted <= 0:
-            # Safety break: if the match set changed underneath us, stop cleanly.
-            break
+            if deleted <= 0:
+                # Safety break: if the match set changed underneath us, stop cleanly.
+                break
 
-        deleted_total += deleted
+            scope_deleted += deleted
+            deleted_total += deleted
 
-        if debug:
-            _debug(
-                f"[trim] batch={batch_no} deleted={deleted:,} "
-                f"deleted_total={deleted_total:,} matched_now={matched_now:,}"
-            )
+            if debug:
+                _debug(
+                    f"[trim] batch={batch_no} deleted={deleted:,} "
+                    f"deleted_total={deleted_total:,} matched_now={matched_now:,} "
+                    f"scope={scope_path}"
+                )
 
-        if not getattr(args, "quiet", False):
-            elapsed = max(time.time() - start, 0.001)
-            rate = deleted_total / elapsed
-            sys.stderr.write(
-                f"\rTrimmed {deleted_total:,}/{total:,} "
-                f"| {rate:,.0f} rows/s "
-                f"| {_fmt_duration(elapsed)} elapsed"
-            )
-            sys.stderr.flush()
+            if not getattr(args, "quiet", False):
+                elapsed = max(time.time() - start, 0.001)
+                rate = deleted_total / elapsed
+                sys.stderr.write(
+                    f"\rTrimmed {deleted_total:,}/{total:,} "
+                    f"| {rate:,.0f} rows/s "
+                    f"| {_fmt_duration(elapsed)} elapsed"
+                )
+                sys.stderr.flush()
 
     if not getattr(args, "quiet", False):
         sys.stderr.write("\n")
@@ -265,7 +339,8 @@ def cmd_trim(args) -> None:
     elapsed = time.time() - start
     print(
         f"Trim complete: {deleted_total:,} deleted"
-        f" from host '{host}' under {path_prefix or '/'}"
+        f" from host '{host}' under "
+        f"{('multiple roots' if len(scopes) > 1 else (scopes[0] or '/'))}"
         f" in {_fmt_duration(elapsed)}.",
         file=sys.stderr,
     )

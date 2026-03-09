@@ -450,6 +450,69 @@ Docker/Unraid is unaffected — the container runs in foreground as normal.
 mtime + size) for the scanned host/root as a single response. On large roots this can be 10MB+
 of JSON and cause a 30–60s apparent freeze before scanning begins.
 
+### Null-hash retry prefetch limitations (new)
+
+`sift scan --null-hash-retry` currently uses `GET /files` (no server contract changes) to
+prefetch candidate paths with `hash IS NULL` under the active host/root. This has two important
+limitations that should be addressed in future work:
+
+1. **Single-call cap risk**
+   - Current prefetch is a single call with a large `limit` (currently 1,000,000).
+   - If matching rows exceed the limit, only the first slice (ordered by path) is seen.
+   - Because `/files` currently has no offset/cursor, lower limits do **not** eventually cover
+     the full candidate set across runs; tail rows can be permanently missed.
+
+2. **Startup latency on large hosts**
+   - Example observed production behavior: one prefetch call returned ~849k rows and took ~13.6s.
+   - This is acceptable as an explicit opt-in mode, but should not become the default path.
+
+3. **Drive-scoped gap on multi-drive hosts**
+   - `/files` has host/path filters but no drive filter in the public contract.
+   - Client currently skips null-hash prefetch in drive-scoped scans to avoid over-broad retries.
+
+**Deferred improvements to consider:**
+
+- Add pagination to `/files` (`offset`/cursor) so client prefetch can walk the full set safely.
+- Add drive filter support to `/files` for precise Windows/multi-drive scoping.
+- Add a lightweight retry-hint field to cache endpoints (preferred long-term), avoiding heavyweight
+  prefetch entirely while keeping aggregate-first/lock-safe behavior.
+
+### Null-hash retry semantics (deferred target)
+
+**Conversation summary / intent:**
+
+- Current cache-driven scan logic can leave some `hash = NULL` rows un-retried when `mtime` and
+  `size` are unchanged, because cache payload lacks per-row null-hash/skip-reason context.
+- A temporary explicit mode (`--null-hash-retry`) was added client-side using `/files` prefetch,
+  but this is intentionally not the long-term architecture because of startup latency and limit
+  coverage constraints described above.
+
+**Desired long-term behavior:**
+
+- Re-attempt hashing for `hash IS NULL` rows **unless** the row was intentionally skipped.
+- Keep per-file decision lightweight in the hot scan loop (no expensive fallback queries).
+
+**Intentional skip reasons (current candidate set):**
+
+- `sparse_file`
+- `macos_dataless`
+- `windows_cloud_placeholder`
+- `volatile_active`
+- `recently_modified`
+
+**Retry-eligible null-hash reasons (examples):**
+
+- `permission_error`
+- generic read/I/O failures (transient conditions)
+- missing/legacy/null `skipped_reason` where null hash should be retried
+
+**Preferred API enhancement (future):**
+
+- Add a compact retry hint on cache endpoints (for example `retry_hash`), or equivalent metadata
+  that enables this rule without heavyweight client prefetch.
+- Ensure hint is derived from existing row fields (`hash`, `skipped_reason`) and keeps aggregate-
+  first/low-lock principles.
+
 **Partial mitigations already in place:**
 - Compact array-of-arrays response format (eliminates per-row JSON key overhead ~40% smaller)
 - UX: "Fetching file cache... N entries." message so the user knows what's happening

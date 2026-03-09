@@ -866,6 +866,26 @@ def trim_files(body: TrimRequest):
 
     if deleted > 0:
         db.refresh_host_stats(body.host)
+        db.set_aggregate_meta(
+            f"host_hash_stats:{body.host}",
+            "stale",
+            "Queued for refresh after trim",
+        )
+        db.set_aggregate_meta(
+            "hash_stats",
+            "stale",
+            "Queued for refresh after trim",
+        )
+        db.set_aggregate_meta(
+            "directory_index",
+            "stale",
+            "Queued for refresh after trim",
+        )
+        db.enqueue_maintenance_job(
+            "refresh_aggregates_for_host",
+            host=body.host,
+            priority=80,
+        )
         _invalidate_query_caches()
 
     return {"matched": matched, "deleted": deleted, "preview_paths": []}

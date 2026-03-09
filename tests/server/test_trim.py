@@ -258,6 +258,33 @@ class TestTrimUnsafeNotSeenSince:
         )
         assert resp.status_code == 400
 
+
+def test_trim_enqueues_aggregate_refresh_after_delete(client):
+    insert_files([make_file(path="/users/brian/old.txt", filename="old.txt")])
+
+    resp = client.post(
+        "/trim",
+        json={
+            "host": "mac",
+            "path_prefix": "/users/brian",
+            "recursive": True,
+            "deleted_only": False,
+            "patterns": [],
+            "limit": 5000,
+            "count_only": False,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] == 1
+
+    jobs = client.get("/maintenance/jobs", params={"limit": 20}).json()["jobs"]
+    assert any(
+        j["job_type"] == "refresh_aggregates_for_host"
+        and j["host"] == "mac"
+        and j["status"] == "pending"
+        for j in jobs
+    )
+
     def test_deleted_only_skips_rows_without_covering_complete_scan(self, client):
         old = "2025-01-01T00:00:00+00:00"
         complete_other_root = "2025-01-15T00:00:00+00:00"
