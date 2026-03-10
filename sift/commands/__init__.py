@@ -9,6 +9,33 @@ def _effective_hostname() -> str:
     return os.environ.get("SIFT_HOST") or get_cli_config().get("host") or local_hostname()
 
 
+def resolve_host(user_input: str) -> str:
+    """Resolve a user-supplied hostname to its canonical server-side spelling.
+
+    Handles:
+    - 'localhost' / '127.0.0.1' → local machine's short hostname
+    - Case-insensitive match against /hosts for canonical spelling
+    - Silent fallback to user_input if server is unreachable or host not found
+    """
+    normalized = user_input.strip()
+    if normalized.lower() in ("localhost", "127.0.0.1"):
+        normalized = local_hostname()
+
+    try:
+        from sift import client
+        hosts = client.get("/hosts")
+        canonical = next(
+            (h["host"] for h in hosts if h["host"].lower() == normalized.lower()),
+            None,
+        )
+        if canonical is not None:
+            return canonical
+    except Exception:
+        pass
+
+    return normalized
+
+
 def print_server_info() -> None:
     """Print version, server URL, and client hostname to stderr (TTY only)."""
     if sys.stderr.isatty():

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from sift import client
-from sift.commands import print_server_info
+from sift.commands import print_server_info, resolve_host
 from sift.config import get_cli_config
 from sift.normalize import local_hostname, normalize_query_path
 
@@ -79,12 +79,12 @@ def _parse_mtime(mtime_str: str) -> tuple[Optional[int], Optional[int]]:
 def cmd_find(args) -> None:
     print_server_info()
     cli_cfg = get_cli_config()
-    host = (
+    _user_host = (
         getattr(args, "host", None)
         or os.environ.get("SIFT_HOST")
         or cli_cfg.get("host")
-        or local_hostname()
     )
+    host = resolve_host(_user_host) if _user_host else local_hostname()
     all_hosts = getattr(args, "all_hosts", False)
 
     raw_path = getattr(args, "path", "/") or "/"

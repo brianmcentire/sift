@@ -1053,12 +1053,27 @@ export default function App() {
       }
     }
 
-    // File rows: prefer direct hash lookup (works in overlays too).
+    // File rows: selected-host, subtree-scoped lookup for clicked path.
     if (entry.hash) {
       try {
+        const hostsCsv = [...selectedHosts].join(',')
+        if (!hostsCsv) return
+        const categoriesCsv = categoryFilter.size > 0 ? [...categoryFilter].join(',') : ''
         if (pinnedResults !== null) pushOverlayState('file_dup_click')
         if (viewMode === 'list') pushListState('dup_hash_click')
-        const files = await api.files({ hash: entry.hash, limit: 5000, lite: 1 })
+        const files = await api.duplicatesBySubtreeHashes(
+          hostsCsv,
+          fullPath,
+          minDupSizeRef.current,
+          'subtree',
+          categoriesCsv,
+          5000,
+          activeDrive || '',
+        )
+        if (files?.status === 'pending') {
+          setOverlayNotice(files.detail || 'Duplicate index is still building')
+          return
+        }
         setOverlayNotice('')
         setHighlightedPaths(new Set((files || []).map(toResultPathKey)))
         setPinnedSourcePath((entry.path_display || fullPath || '').toLowerCase())
@@ -1097,6 +1112,25 @@ export default function App() {
       setOverlayNotice('Could not load duplicate copies for this file')
     }
   }, [hostDrive, viewMode, pushListState, selectedHosts, categoryFilter, activeDrive, pinnedResults, pushOverlayState, toResultPathKey])
+
+  const handleDupHashContextClick = useCallback(async (fullPath, entry) => {
+    if (!entry?.hash) return
+    try {
+      if (pinnedResults !== null) pushOverlayState('file_dup_click_context')
+      if (viewMode === 'list') pushListState('dup_hash_click_context')
+      const files = await api.files({ hash: entry.hash, limit: 5000, lite: 1 })
+      setOverlayNotice('')
+      setHighlightedPaths(new Set((files || []).map(toResultPathKey)))
+      setPinnedSourcePath((entry.path_display || fullPath || '').toLowerCase())
+      setSubtreeDupPath(null)
+      setPinnedResults(files || [])
+      setHashQuery(entry.hash)
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('file dup-hash context lookup failed', err)
+      setOverlayNotice('Could not load duplicate copies for this file')
+    }
+  }, [pinnedResults, pushOverlayState, viewMode, pushListState, toResultPathKey])
 
   // ── Handle subtree list icon → show context for subtree-seeded dup hashes ──
   const handleDupSubtreeClick = useCallback(async (fullPath, entry) => {
@@ -1863,6 +1897,7 @@ export default function App() {
           onTypeClick={handleTypeClick}
           onDupHashClick={handleDupHashClick}
           onDupSubtreeClick={handleDupSubtreeClick}
+          onDupHashContextClick={handleDupHashContextClick}
           onLoadMore={handleLoadMore}
           highlightedPaths={highlightedPaths}
           matchedDirPaths={matchedDirPaths}

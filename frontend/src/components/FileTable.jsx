@@ -35,6 +35,7 @@ export default function FileTable({
   onTypeClick,
   onDupHashClick,
   onDupSubtreeClick,
+  onDupHashContextClick,
   onLoadMore,
   highlightedPaths,
   matchedDirPaths,
@@ -200,6 +201,7 @@ export default function FileTable({
                   onTypeClick={onTypeClick}
                   onDupHashClick={onDupHashClick}
                   onDupSubtreeClick={onDupSubtreeClick}
+                  onDupHashContextClick={onDupHashContextClick}
                   highlightedPaths={highlightedPaths}
                   matchedDirPaths={matchedDirPaths}
                   hostColorMap={hostColorMap}

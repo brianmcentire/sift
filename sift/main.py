@@ -238,7 +238,7 @@ def main() -> None:
         "--unsafe-delete-not-seen-since",
         dest="unsafe_delete_not_seen_since",
         default=None,
-        help="Unsafe: trim rows with last_seen_at before YYYYMMDD (no coverage checks)",
+        help="Unsafe: trim rows with last_seen_at before YYYYMMDD, or use 'latest' per complete root scan date",
     )
     p_trim.add_argument(
         "--host",

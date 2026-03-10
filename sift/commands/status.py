@@ -7,6 +7,7 @@ from datetime import datetime
 
 from sift import client
 from sift.commands import print_config_hint, print_server_info
+from sift.normalize import local_hostname
 
 
 def _fmt_dt(dt_str: str | None) -> str:
@@ -44,8 +45,19 @@ def cmd_status(args) -> None:
         print_config_hint()
         sys.exit(1)
 
+    resolved_filter_host = filter_host
     if filter_host:
-        hosts = [h for h in hosts if h["host"] == filter_host]
+        _input = str(filter_host)
+        if _input.lower() in ("localhost", "127.0.0.1"):
+            _input = local_hostname()
+        needle = _input.lower()
+        canonical = next(
+            (h.get("host") for h in hosts if str(h.get("host", "")).lower() == needle),
+            None,
+        )
+        if canonical:
+            resolved_filter_host = canonical
+        hosts = [h for h in hosts if str(h.get("host", "")).lower() == needle]
     else:
         # Keep default status focused on currently indexed hosts.
         # Hosts that have been fully trimmed (0 files) still appear in -v
@@ -78,7 +90,7 @@ def cmd_status(args) -> None:
     try:
         run_params = {"limit": 50 if filter_host else 10}
         if filter_host:
-            run_params["host"] = filter_host
+            run_params["host"] = resolved_filter_host
         runs = client.get("/scan-runs", params=run_params)
     except Exception:
         runs = []
@@ -135,7 +147,7 @@ def cmd_status(args) -> None:
 
     if show_roots:
         try:
-            params = {"host": filter_host} if filter_host else None
+            params = {"host": resolved_filter_host} if filter_host else None
             roots = client.get("/hosts/roots", params=params)
         except Exception as e:
             print(f"sift: cannot fetch roots: {e}", file=sys.stderr)

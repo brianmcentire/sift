@@ -46,6 +46,18 @@ Directory rows expose two adjacent actions that intentionally differ:
 - Human meaning: "start from duplicates found in this folder tree, then show all copies of those duplicates across selected hosts."
 - Result set is not path-limited; rows include `in_subtree` to mark which copies are inside the clicked subtree.
 
+File rows also expose two adjacent actions that intentionally differ:
+
+1) Click `Y extra copies` text
+- Uses `/files/duplicates-by-subtree-hashes` with `scope=subtree` and `path_prefix` set to the clicked file path.
+- Human meaning: "show selected-host duplicate rows for this clicked file path context."
+- Result set is path-filtered to the clicked file path context and remains aligned with selected hosts/min size/category filters.
+
+2) Click list icon (`☰`)
+- Uses hash-based context lookup (`/files` by hash).
+- Human meaning: "show all files for this hash within the current active context filters."
+- Context includes current host selection, size floor, and category filter(s) when specified (otherwise all categories).
+
 ## API Contract Notes
 
 ### `GET /files/duplicates-by-subtree-hashes`

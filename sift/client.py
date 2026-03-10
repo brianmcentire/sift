@@ -1,12 +1,25 @@
 """Shared HTTP client with retry logic."""
+
 from __future__ import annotations
 
 import threading
 import time
 import traceback
+from importlib.util import find_spec
+import sys
+import warnings
 from typing import Any
 
-import requests
+_requests_charset_warning_seen = False
+with warnings.catch_warnings(record=True) as _requests_import_warnings:
+    warnings.simplefilter("always")
+    import requests
+
+for _w in _requests_import_warnings:
+    if "Unable to find acceptable character detection dependency" in str(_w.message):
+        _requests_charset_warning_seen = True
+        break
+
 from requests.adapters import HTTPAdapter
 
 from sift.config import get_server_url
@@ -18,6 +31,22 @@ from sift.config import get_server_url
 _request_log_enabled = False
 _request_log_lock = threading.Lock()
 _request_log: list[dict] = []
+_charset_dependency_check_done = False
+
+
+def _warn_if_requests_charset_dependency_missing() -> None:
+    global _charset_dependency_check_done
+    if _charset_dependency_check_done:
+        return
+    _charset_dependency_check_done = True
+    if _requests_charset_warning_seen or (
+        find_spec("charset_normalizer") is None and find_spec("chardet") is None
+    ):
+        print(
+            "sift: warning — requests charset detector dependency missing "
+            "(charset_normalizer/chardet).",
+            file=sys.stderr,
+        )
 
 
 def enable_request_log() -> None:
@@ -57,6 +86,7 @@ def dump_request_log() -> list[dict]:
 def _make_session() -> requests.Session:
     # No urllib3-level retries — scan.py's _post_with_retry handles retry/backoff,
     # and urllib3 retrying internally would silently multiply timeouts (5× per call).
+    _warn_if_requests_charset_dependency_missing()
     session = requests.Session()
     adapter = HTTPAdapter()
     session.mount("http://", adapter)
@@ -105,6 +135,8 @@ def patch(path: str, data: Any) -> Any:
 def get_stream(path: str, params: dict | None = None) -> requests.Response:
     """Return a streaming Response. Caller should use as a context manager."""
     _log_request("GET(stream)", path)
-    resp = _get_session().get(api_url(path), params=params, timeout=(5, 120), stream=True)
+    resp = _get_session().get(
+        api_url(path), params=params, timeout=(5, 120), stream=True
+    )
     resp.raise_for_status()
     return resp

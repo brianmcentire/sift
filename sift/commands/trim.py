@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timezone
 
 from sift import client
-from sift.commands import print_server_info
+from sift.commands import print_server_info, resolve_host
 from sift.config import get_cli_config
 from sift.normalize import local_hostname, normalize_query_path
 
@@ -70,16 +70,34 @@ def _normalize_root_for_trim(root_value: str) -> str:
     return root or "/"
 
 
+def _root_covers(ancestor: str, candidate: str) -> bool:
+    if ancestor == candidate:
+        return True
+    if ancestor == "/":
+        return candidate.startswith("/")
+    return candidate.startswith(ancestor + "/")
+
+
+def _latest_iso_date(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return dt.date().isoformat()
+
+
 def cmd_trim(args) -> None:
     print_server_info()
     cli_cfg = get_cli_config()
 
-    host = (
+    _user_host = (
         getattr(args, "host", None)
         or os.environ.get("SIFT_HOST")
         or cli_cfg.get("host")
-        or local_hostname()
     )
+    host = resolve_host(_user_host) if _user_host else local_hostname()
     user_provided_host = bool(getattr(args, "host", None))
     debug = getattr(args, "debug", False)
     recursive = getattr(args, "recursive", False)
@@ -113,8 +131,9 @@ def cmd_trim(args) -> None:
         )
         sys.exit(2)
 
+    unsafe_mode_latest = str(unsafe_not_seen_since).strip().lower() == "latest"
     unsafe_not_seen_before = None
-    if unsafe_not_seen_since:
+    if unsafe_not_seen_since and not unsafe_mode_latest:
         try:
             parsed = datetime.strptime(str(unsafe_not_seen_since), "%Y%m%d")
             unsafe_not_seen_before = (
@@ -122,16 +141,19 @@ def cmd_trim(args) -> None:
             )
         except ValueError:
             print(
-                "sift: --unsafe-delete-not-seen-since must be YYYYMMDD",
+                "sift: --unsafe-delete-not-seen-since must be YYYYMMDD or 'latest'",
                 file=sys.stderr,
             )
             sys.exit(2)
 
-    scopes = [path_prefix]
-    if unsafe_not_seen_before:
+    scope_cutoffs: list[tuple[str, str | None]] = [
+        (path_prefix, unsafe_not_seen_before)
+    ]
+    if unsafe_not_seen_since:
         # Unsafe age-based mode is always recursive.
         recursive = True
-        if not has_explicit_path:
+        roots: list[tuple[str, str | None]] = []
+        if unsafe_mode_latest or not has_explicit_path:
             try:
                 roots_resp = client.get("/hosts/roots", params={"host": host})
             except Exception as e:
@@ -141,13 +163,12 @@ def cmd_trim(args) -> None:
                 )
                 sys.exit(1)
 
-            roots = sorted(
-                {
-                    _normalize_root_for_trim(r.get("root_path") or "")
-                    for r in roots_resp
-                    if (r.get("host") or "") == host and (r.get("root_path") or "")
-                }
-            )
+            for r in roots_resp:
+                if (r.get("host") or "") != host:
+                    continue
+                root_norm = _normalize_root_for_trim(r.get("root_path") or "")
+                roots.append((root_norm, _latest_iso_date(r.get("latest_complete_at"))))
+
             if not roots:
                 print(
                     f"sift: no complete scan roots found for host '{host}'. "
@@ -155,14 +176,55 @@ def cmd_trim(args) -> None:
                     file=sys.stderr,
                 )
                 sys.exit(1)
-            scopes = roots
+
+        if unsafe_mode_latest:
+            if not has_explicit_path:
+                # Apply to all effective roots with their own latest complete date.
+                by_root = {}
+                for root_norm, latest_date in roots:
+                    by_root[root_norm] = latest_date
+                missing = [rp for rp, dt in by_root.items() if not dt]
+                if missing:
+                    print(
+                        "sift: latest root scan timestamp missing for: "
+                        + ", ".join(sorted(missing)),
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                scope_cutoffs = sorted((rp, dt) for rp, dt in by_root.items())
+            else:
+                # Explicit path: use covering root's latest date (most specific).
+                covering = [
+                    (rp, dt) for rp, dt in roots if _root_covers(rp, path_prefix)
+                ]
+                if not covering:
+                    print(
+                        f"sift: path {path_prefix} is not covered by any complete scan root for host '{host}'.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                covering.sort(key=lambda x: len(x[0]), reverse=True)
+                selected_root, selected_date = covering[0]
+                if not selected_date:
+                    print(
+                        f"sift: latest complete scan date missing for covering root {selected_root}.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                scope_cutoffs = [(path_prefix, selected_date)]
         else:
-            scopes = [path_prefix]
+            if not has_explicit_path:
+                unique_roots = sorted({rp for rp, _ in roots})
+                scope_cutoffs = [(rp, unsafe_not_seen_before) for rp in unique_roots]
+            else:
+                scope_cutoffs = [(path_prefix, unsafe_not_seen_before)]
+
+    scopes = [p for p, _ in scope_cutoffs]
 
     if debug:
         mode = (
             "unsafe-not-seen-since"
-            if unsafe_not_seen_before
+            if unsafe_not_seen_since
             else ("deleted" if deleted_only else "targeted")
         )
         _debug(f"[trim] mode={mode}")
@@ -172,11 +234,15 @@ def cmd_trim(args) -> None:
             _debug(f"[trim] scopes={scopes}")
         _debug(f"[trim] recursive={recursive}")
         _debug(f"[trim] patterns={patterns or '[]'}")
-        if unsafe_not_seen_before:
-            _debug(f"[trim] unsafe_not_seen_before={unsafe_not_seen_before}")
+        if unsafe_not_seen_since:
+            if unsafe_mode_latest:
+                _debug("[trim] unsafe_not_seen_before=latest (per-root)")
+            else:
+                _debug(f"[trim] unsafe_not_seen_before={unsafe_not_seen_before}")
+            _debug(f"[trim] scope_cutoffs={scope_cutoffs}")
         _debug(f"[trim] batch_size={batch_size}")
 
-    def _base_payload(scope_path: str) -> dict:
+    def _base_payload(scope_path: str, cutoff_date: str | None) -> dict:
         return {
             "host": host,
             "path_prefix": scope_path,
@@ -187,25 +253,30 @@ def cmd_trim(args) -> None:
             "count_only": True,
             "preview": False,
             "offset": 0,
-            "unsafe_not_seen_before": unsafe_not_seen_before,
+            "unsafe_not_seen_before": cutoff_date,
         }
 
-    scope_totals: list[tuple[str, int]] = []
+    scope_totals: list[tuple[str, str | None, int]] = []
     total = 0
-    for scope_path in scopes:
-        payload = _base_payload(scope_path)
+    for scope_path, cutoff_date in scope_cutoffs:
+        payload = _base_payload(scope_path, cutoff_date)
         try:
             count_resp = client.post("/trim", payload)
         except Exception as e:
             print(f"sift: trim count failed: {e}", file=sys.stderr)
             sys.exit(1)
         matched = int(count_resp.get("matched", 0))
-        scope_totals.append((scope_path, matched))
+        scope_totals.append((scope_path, cutoff_date, matched))
         total += matched
 
     if total == 0:
         print("No matching inventory entries to trim.", file=sys.stderr)
-        if user_provided_host and not has_explicit_path and not deleted_only:
+        if (
+            user_provided_host
+            and not has_explicit_path
+            and not deleted_only
+            and not unsafe_not_seen_since
+        ):
             print(
                 f"Hint: default scope is current directory ({path_prefix or '/'}). "
                 f"For host-wide trim on '{host}', use: sift trim -r / --host {host}",
@@ -219,7 +290,7 @@ def cmd_trim(args) -> None:
     if dry_run:
         mode_label = (
             "unsafe-age-based"
-            if unsafe_not_seen_before
+            if unsafe_not_seen_since
             else ("deleted-only" if deleted_only else "targeted")
         )
         print(
@@ -230,16 +301,20 @@ def cmd_trim(args) -> None:
         )
         if len(scopes) > 1:
             print("Roots in scope:", file=sys.stderr)
-            for scope_path, scope_count in scope_totals:
-                print(f"  {scope_path}  ({scope_count:,})", file=sys.stderr)
+            for scope_path, cutoff_date, scope_count in scope_totals:
+                cutoff_txt = f"  cutoff<{cutoff_date}" if cutoff_date else ""
+                print(
+                    f"  {scope_path}  ({scope_count:,}){cutoff_txt}",
+                    file=sys.stderr,
+                )
         if verbose:
             shown = 0
-            for scope_path, scope_total in scope_totals:
+            for scope_path, cutoff_date, scope_total in scope_totals:
                 scope_shown = 0
                 page = 0
                 while scope_shown < scope_total:
                     page += 1
-                    payload = _base_payload(scope_path)
+                    payload = _base_payload(scope_path, cutoff_date)
                     payload["preview"] = True
                     payload["offset"] = scope_shown
                     try:
@@ -275,7 +350,7 @@ def cmd_trim(args) -> None:
     if not getattr(args, "quiet", False):
         mode_label = (
             "unsafe-age-based"
-            if unsafe_not_seen_before
+            if unsafe_not_seen_since
             else ("deleted-only" if deleted_only else "targeted")
         )
         print(
@@ -285,18 +360,22 @@ def cmd_trim(args) -> None:
         )
         if len(scopes) > 1:
             print("Roots in scope:", file=sys.stderr)
-            for scope_path, scope_count in scope_totals:
-                print(f"  {scope_path}  ({scope_count:,})", file=sys.stderr)
+            for scope_path, cutoff_date, scope_count in scope_totals:
+                cutoff_txt = f"  cutoff<{cutoff_date}" if cutoff_date else ""
+                print(
+                    f"  {scope_path}  ({scope_count:,}){cutoff_txt}",
+                    file=sys.stderr,
+                )
 
     start = time.time()
     deleted_total = 0
     batch_no = 0
 
-    for scope_path, scope_total in scope_totals:
+    for scope_path, cutoff_date, scope_total in scope_totals:
         scope_deleted = 0
         while scope_deleted < scope_total:
             batch_no += 1
-            payload = _base_payload(scope_path)
+            payload = _base_payload(scope_path, cutoff_date)
             payload["count_only"] = False
 
             try:

@@ -358,6 +358,9 @@ def _prefetch_null_hash_retry_paths(
             )
         return set()
 
+    # Temporary cap: keep this aligned with server /files Query(le=1_000_000).
+    # Long-term fix should be paginated/cursor-based prefetch (or server-provided
+    # retry hint) in a future refactor.
     limit = 1_000_000
     if not quiet:
         print("Prefetching null-hash retry candidates...", file=sys.stderr)
