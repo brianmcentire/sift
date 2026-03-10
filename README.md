@@ -258,10 +258,10 @@ Open `http://localhost:8765` (or your server address) after starting `sift serve
 - **← Back navigation** — when viewing file copies or hash search results, a ← Back button returns to the tree view.
 - **Filters** (all combinable):
   - **All files / Only dups** — toggle to show only duplicate rows and the directories that contain them
-  - **Min dup size** — ignore duplicates below a size threshold (0 B, 1 KB, 1 MB, 100 MB, 1 GB, or custom with unit parsing)
+  - **Min size** — hide files below a size threshold (0 B, 1 KB, 1 MB, 100 MB, 1 GB, or custom with unit parsing)
   - **File type** — multi-select by category (images, video, audio, docs, code, archives, other)
   - **Host chips** — show/hide specific hosts from the merged view
-- **Stats bar** — live counts of total files, total size, hosts, duplicate sets, and wasted space. Updates when min dup size or file type filters are applied; shows `(filtered)` when the dup stats reflect active filters rather than the full inventory.
+- **Stats bar** — live counts of total files, total size, hosts, duplicate sets, and wasted space. Updates when min size or file type filters are applied; shows `(filtered)` when the dup stats reflect active filters rather than the full inventory.
 - **Column toggle** — show/hide size, date, last seen, type, hash, and host columns.
 
 ## Configuration

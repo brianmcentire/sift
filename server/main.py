@@ -1482,6 +1482,7 @@ def ls_files(
         WHERE f.host = ?
           AND f.drive = ?
           AND (f.path LIKE ? OR f.path = ?)
+          AND COALESCE(f.size_bytes, 0) >= ?
     )
     SELECT
         s.segment,
@@ -1512,8 +1513,8 @@ def ls_files(
     ORDER BY ANY_VALUE(s.entry_type) ASC, s.segment
     """
 
-    # param order: hard_linked host, dupes host, dupes min_size, scoped host+drive, path LIKE, path =, join host
-    params = [host, host, min_size, host, drive, prefix + "/%", prefix, host]
+    # param order: hard_linked host, dupes host, dupes min_size, scoped host+drive+path+min_size, join host
+    params = [host, host, min_size, host, drive, prefix + "/%", prefix, min_size, host]
     rows = db.query(sql, params)
     _log_perf(
         "/files/ls",
@@ -1807,6 +1808,7 @@ def tree_dup_metrics(
               AND ((f.path >= ? AND f.path < ?) OR f.path = ?)
               AND SPLIT_PART(f.path, '/', {split_idx}) != ''
               AND f.hash IS NOT NULL
+              AND COALESCE(f.size_bytes, 0) >= ?
               {seg_clause}
         ),
         selected_dupe_hashes AS (
@@ -1850,6 +1852,7 @@ def tree_dup_metrics(
             lower_bound,
             upper_bound,
             prefix,
+            min_size,
             *seg_params,
             *host_list,
             min_size,
@@ -1994,6 +1997,7 @@ def tree_dup_metrics(
                   AND f.drive = ?
                   AND ((f.path >= ? AND f.path < ?) OR f.path = ?)
                   AND f.hash IS NOT NULL
+                  AND COALESCE(f.size_bytes, 0) >= ?
                   {scoped_seg_clause}
                 GROUP BY SPLIT_PART(f.path, '/', {split_idx}), f.hash
             ),
@@ -2033,6 +2037,7 @@ def tree_dup_metrics(
                 lower_bound,
                 upper_bound,
                 prefix,
+                min_size,
                 *seg_params,
                 host,
                 host,
@@ -2103,6 +2108,7 @@ def tree_dup_metrics(
               AND f.drive = ?
               AND ((f.path >= ? AND f.path < ?) OR f.path = ?)
               AND f.hash IS NOT NULL
+              AND COALESCE(f.size_bytes, 0) >= ?
               {scoped_seg_clause}
             GROUP BY SPLIT_PART(f.path, '/', {split_idx}), f.hash
         ),
@@ -2146,6 +2152,7 @@ def tree_dup_metrics(
             lower_bound,
             upper_bound,
             prefix,
+            min_size,
             *seg_params,
             host,
             min_size,
@@ -2198,6 +2205,7 @@ def tree_dup_metrics(
               AND f.drive = ?
               AND ((f.path >= ? AND f.path < ?) OR f.path = ?)
               AND f.hash IS NOT NULL
+              AND COALESCE(f.size_bytes, 0) >= ?
               {scoped_seg_clause}
             GROUP BY SPLIT_PART(f.path, '/', {split_idx}), f.hash
         ),
@@ -2242,6 +2250,7 @@ def tree_dup_metrics(
             lower_bound,
             upper_bound,
             prefix,
+            min_size,
             *seg_params,
             host,
             min_size,

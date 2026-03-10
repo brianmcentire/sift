@@ -21,8 +21,7 @@ If other docs conflict, this doc and tested code behavior win.
 
 - Duplicate hash: a hash with more than one effective copy in selected hosts, honoring size threshold.
 - Subtree seed hash set for directory `P`: duplicate hashes with at least one member at `P` or below.
-- Size threshold: backend `min_size`; UI currently labels this as "min dup size" in some places.
-  - Semantics are intentionally phrased so a future UI rename to "min size" does not change this contract.
+- Size threshold: backend `min_size`; UI label `Min size`. Applies universally: files below the threshold are hidden from both Tree View and List View regardless of duplicate status. Duplicate eligibility also uses `min_size` (hashes with all copies below threshold are not counted as duplicates).
 
 ## Directory vs File Semantics
 
@@ -111,5 +110,5 @@ queued for refresh; the worker picks them up after 120s of API idle time.
 ## Forward-Compatibility Flags
 
 - Scope naming: `context` is accepted but vague; if renamed later, update this doc and API/docs together.
-- Size filter UI naming may shift from "min dup size" to "min size"; backend `min_size` semantics remain the contract.
+- Size filter UI label is `Min size`; backend `min_size` semantics remain the contract. Hash search results bypass size and category filters.
 - If `/files/duplicates-by-subtree-hashes/count` is folded into another endpoint, preserve seeded-hash parity guarantees and update this doc immediately.

@@ -63,8 +63,8 @@ Code is authoritative for current behavior and contracts, except where behavior 
 ## Filter Composition Rules
 
 - Hosts/category/size/duplicate toggles are composable with the active mode semantics.
-- List View size floor behaves as universal minimum file size (UI label: `Min file size`).
-- Tree View size floor remains duplicate-oriented for duplicate workflows (UI label: `Min dup size`).
+- Size floor (`Min size`) applies universally to all files in both Tree View and List View; files below the threshold are hidden regardless of duplicate status.
+- Hash search results bypass size and category filters entirely; hash-result overlays always show all matches.
 - Duplicate-only filtering respects selected-host duplicate scope semantics.
 
 ## UX Signaling Rules

@@ -64,6 +64,7 @@ export default function FileTable({
   const rowHeights = useMemo(() => rows.map(row => {
     if (row.isGroupHeader) return 30
     if (row.isLoadMore) return 40
+    if (row.isFilteredPlaceholder) return 34
     return 34
   }), [rows])
 
@@ -105,11 +106,11 @@ export default function FileTable({
       onScroll={e => setScrollTop(e.currentTarget.scrollTop)}
     >
       <table className="w-full text-left border-collapse">
-        <thead>
+        <thead className="sticky top-0 z-10 bg-white">
           <tr className="border-b border-slate-200">
             {/* Name — always first */}
             <th
-              className="pb-2 pr-3 text-[10px] uppercase tracking-widest text-slate-500 font-medium cursor-pointer select-none hover:text-slate-800 transition-colors"
+              className="pb-2 pr-3 text-[10px] uppercase tracking-widest text-slate-500 font-medium cursor-pointer select-none hover:text-slate-800 transition-colors bg-white"
               onClick={() => onSort('name')}
             >
               Name <SortIcon col="name" sortBy={sortBy} sortDir={sortDir} />
@@ -123,7 +124,7 @@ export default function FileTable({
                   onClick={() => def.sortKey && onSort(def.sortKey)}
                   className={`
                     pb-2 pr-4 text-[10px] uppercase tracking-widest font-medium text-slate-500
-                    select-none transition-colors
+                    select-none transition-colors bg-white
                     ${def.headerClass}
                     ${def.sortKey ? 'cursor-pointer hover:text-slate-800' : ''}
                   `}
@@ -182,6 +183,14 @@ export default function FileTable({
                       >
                         Load more
                       </button>
+                    </div>
+                  </td>
+                </tr>
+              ) : row.isFilteredPlaceholder ? (
+                <tr key={`filtered:${row.fullPath}`} className="border-b border-slate-100">
+                  <td colSpan={colCount} className="py-1.5 pr-3">
+                    <div style={{ paddingLeft: (row.depth || 0) * 20 + 16 }} className="text-xs text-slate-400 italic">
+                      No files match current filters
                     </div>
                   </td>
                 </tr>

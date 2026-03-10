@@ -5,7 +5,24 @@ import Header from './components/Header.jsx'
 import StatsBar from './components/StatsBar.jsx'
 import FileTable from './components/FileTable.jsx'
 
+// ── Session persistence helpers ──────────────────────────────────────────
+const SESSION_KEY = 'sift-filters'
+function loadSession() {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch { return null }
+}
+function saveSession(state) {
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify(state)) } catch {}
+}
+function clearSession() {
+  try { localStorage.removeItem(SESSION_KEY) } catch {}
+}
+
 export default function App() {
+  const savedSession = useRef(loadSession())
+
   // ── Host state ──────────────────────────────────────────────────────────
   const [hosts, setHosts] = useState([])
   const [selectedHosts, setSelectedHosts] = useState(new Set())
@@ -22,7 +39,7 @@ export default function App() {
   const [debouncedFilenameQuery, setDebouncedFilenameQuery] = useState('')
   const [hashQuery, setHashQuery] = useState('')
   const [debouncedHashQuery, setDebouncedHashQuery] = useState('')
-  const [viewMode, setViewMode] = useState('tree')
+  const [viewMode, setViewMode] = useState(() => savedSession.current?.viewMode || 'tree')
   const [matchedDirPaths, setMatchedDirPaths] = useState(new Set()) // lowercase dir paths matched by dir query
   const [filenameResults, setFilenameResults] = useState(null)  // null | FileEntry[]
   const [hashResults, setHashResults] = useState(null)          // null | FileEntry[]
@@ -30,9 +47,12 @@ export default function App() {
   const [highlightedPaths, setHighlightedPaths] = useState(new Set()) // paths (lowercase) to blue-highlight in results
   const [subtreeDupPath, setSubtreeDupPath] = useState(null)          // string | null — path for subtree dup overlay
   const [pinnedSourcePath, setPinnedSourcePath] = useState(null)      // string | null — clicked file's display path (lowercase)
-  const [categoryFilter, setCategoryFilter] = useState(new Set())
-  const [minDupSize, setMinDupSize] = useState(0)
-  const [onlyDups, setOnlyDups] = useState(false)
+  const [categoryFilter, setCategoryFilter] = useState(() => {
+    const s = savedSession.current
+    return s?.categoryFilter?.length ? new Set(s.categoryFilter) : new Set()
+  })
+  const [minDupSize, setMinDupSize] = useState(() => savedSession.current?.minSize || 0)
+  const [onlyDups, setOnlyDups] = useState(() => savedSession.current?.onlyDups || false)
 
   // ── Display state ───────────────────────────────────────────────────────
   const [visibleColumns, setVisibleColumns] = useState({ size: true, date: true, seen: true, type: true, hash: true, hosts: true })
@@ -80,6 +100,19 @@ export default function App() {
   const [driveDupHashCounts, setDriveDupHashCounts] = useState({})
   const listFetchControllerRef = useRef(null)
   const listCursorRef = useRef(null)
+  const clientHostRef = useRef(null)
+
+  // ── Persist filter state to sessionStorage ──────────────────────────────
+  useEffect(() => {
+    if (hosts.length === 0) return  // don't save until hosts are loaded
+    saveSession({
+      selectedHosts: [...selectedHosts],
+      minSize: minDupSize,
+      onlyDups,
+      categoryFilter: [...categoryFilter],
+      viewMode,
+    })
+  }, [selectedHosts, minDupSize, onlyDups, categoryFilter, viewMode, hosts.length])
 
   // ── Host color map ──────────────────────────────────────────────────────
   const hostColorMap = useMemo(() => {
@@ -207,15 +240,24 @@ export default function App() {
     ])
       .then(([data, client]) => {
         setHosts(data)
-        const clientHost = (client?.client_host || '').toLowerCase()
-        const matched = clientHost
-          ? data.find(h => h.host.toLowerCase() === clientHost)
-          : null
-        setSelectedHosts(
-          matched
-            ? new Set([matched.host])
-            : new Set(data.map(h => h.host)),
-        )
+        const availableHosts = new Set(data.map(h => h.host))
+        const saved = savedSession.current?.selectedHosts
+        // Restore saved host selection if all saved hosts still exist
+        if (saved?.length && saved.every(h => availableHosts.has(h))) {
+          setSelectedHosts(new Set(saved))
+        } else {
+          const clientHost = (client?.client_host || '').toLowerCase()
+          const matched = clientHost
+            ? data.find(h => h.host.toLowerCase() === clientHost)
+            : null
+          clientHostRef.current = matched?.host || null
+          setSelectedHosts(
+            matched
+              ? new Set([matched.host])
+              : new Set(data.map(h => h.host)),
+          )
+        }
+        savedSession.current = null  // consumed; allow GC
       })
       .catch(() => {})
   }, [])
@@ -498,7 +540,7 @@ export default function App() {
     }
   }, [hostDrive, selectedHosts])
 
-  // Keep user context on min dup size changes: refresh metrics for visible
+  // Keep user context on min size changes: refresh metrics for visible
   // paths (current path + expanded dirs) instead of resetting expansion state.
   useEffect(() => {
     if (hosts.length === 0 || viewMode !== 'tree') return
@@ -803,10 +845,13 @@ export default function App() {
     setListPendingDetail('')
     setOverlayNotice('')
     setListActionStack([])
-    setSelectedHosts(new Set(hosts.map(h => h.host)))
+    const detectedHost = clientHostRef.current
+    const stillAvailable = detectedHost && hosts.some(h => h.host === detectedHost)
+    setSelectedHosts(stillAvailable ? new Set([detectedHost]) : new Set(hosts.map(h => h.host)))
     setExpandedPaths(new Set())
     setDupAutoExpanded(new Map())
     setActiveDrive('')
+    clearSession()
   }, [hosts])
 
   // ── Toggle dir expansion ─────────────────────────────────────────────────
@@ -1367,11 +1412,11 @@ export default function App() {
 
     if (isPinnedCopiesMode) {
       const sourceRow = hostFiltered.find(r => (r.entry.path_display || '').toLowerCase() === pinnedSourcePath)
-      const sourceBelowMinDupSize =
+      const sourceBelowMinSize =
         sourceRow && minDupSize > 0 && (sourceRow.entry.size_bytes || 0) < minDupSize
 
-      // If the clicked file is below min dup size, keep only that file in the copies view.
-      if (sourceBelowMinDupSize) return sourceRow ? [sourceRow] : []
+      // If the clicked file is below min size, keep only that file in the copies view.
+      if (sourceBelowMinSize) return sourceRow ? [sourceRow] : []
 
       // In pinned copies view above threshold, all rows share the same hash and are duplicates.
       // hostFiltered.forEach(r => { r.entry.dup_count = 1 })
@@ -1404,12 +1449,8 @@ export default function App() {
       }
     }
 
-    if (minDupSize > 0) {
-      filtered = filtered.filter(r => {
-        const isDup = r.entry.dup_count > 0 || hasSelectedOtherHost(r.entry.other_hosts, selectedHosts)
-        if (!isDup) return true
-        return (r.entry.size_bytes || 0) >= minDupSize
-      })
+    if (minDupSize > 0 && !isHashResultsMode) {
+      filtered = filtered.filter(r => (r.entry.size_bytes || 0) >= minDupSize)
     }
     // IMPORTANT: hash-result overlays are already hash-qualified and should not
     // be re-filtered by generic "Only dups" logic. Doing so can hide valid
@@ -1500,8 +1541,6 @@ export default function App() {
     if (minDupSize > 0) {
       filtered = filtered.filter(row => {
         if (row.entry.entry_type !== 'file') return true
-        const isDup = row.entry.dup_count > 0 || hasSelectedOtherHost(row.entry.other_hosts, selectedHosts)
-        if (!isDup) return true
         return (row.entry.size_bytes || 0) >= minDupSize
       })
     }
@@ -1586,7 +1625,7 @@ export default function App() {
         )
         if (!metricsLoaded) {
           // Preserve full visible branch (dirs + files) while metrics are in flight
-          // so changing min dup size does not appear to collapse navigation state.
+          // so changing min size does not appear to collapse navigation state.
           ch.forEach(c => keepPaths.add(c.fullPath))
         }
       }
@@ -1625,10 +1664,25 @@ export default function App() {
     return base
   }, [listItems, listHasMore])
 
+  // Set of dir paths that have at least one child in the unfiltered tree.
+  // Used to detect when filters hide all children of an expanded directory.
+  const unfilteredChildParents = useMemo(
+    () => new Set(allTreeRows.map(r => r.parentPath)),
+    [allTreeRows],
+  )
+  const hasActiveFilters = minDupSize > 0 || categoryFilter.size > 0 || onlyDups
+
   // ── Rows: search overlay > dir-search path-chain filter > plain tree ──────
   const rows = useMemo(() => {
     if (viewMode === 'list' && !isSearchMode) return listRows
-    if (isSearchMode) return searchRows ?? []
+    if (isSearchMode) {
+      const result = searchRows ?? []
+      // If filters hide all search results but unfiltered results exist, show placeholder
+      if (result.length === 0 && activeResults && activeResults.length > 0 && hasActiveFilters) {
+        return [{ isFilteredPlaceholder: true, fullPath: '__search_filtered__', depth: 0 }]
+      }
+      return result
+    }
 
     // Dir search active: filter tree to only show the path chain to each matched dir
     if (matchedDirPaths.size > 0 && debouncedDirQuery.length >= 2) {
@@ -1649,16 +1703,24 @@ export default function App() {
       for (let i = 0; i < filtered.length; i++) {
         const row = filtered[i]
         withMore.push(row)
-        if (row.entry?.entry_type === 'dir' && effectiveExpanded.has(row.fullPath) && hasMoreForPath(row.fullPath)) {
+        if (row.entry?.entry_type === 'dir' && effectiveExpanded.has(row.fullPath)) {
           const next = filtered[i + 1]
           const endOfSubtree = !next || next.depth <= row.depth
           if (endOfSubtree) {
-            withMore.push({
-              isLoadMore: true,
-              path: row.fullPath,
-              fullPath: `${row.fullPath}::__more__`,
-              depth: row.depth + 1,
-            })
+            if (hasMoreForPath(row.fullPath)) {
+              withMore.push({
+                isLoadMore: true,
+                path: row.fullPath,
+                fullPath: `${row.fullPath}::__more__`,
+                depth: row.depth + 1,
+              })
+            } else if (hasActiveFilters && unfilteredChildParents.has(row.fullPath)) {
+              withMore.push({
+                isFilteredPlaceholder: true,
+                fullPath: `${row.fullPath}::__filtered__`,
+                depth: row.depth + 1,
+              })
+            }
           }
         }
       }
@@ -1677,16 +1739,24 @@ export default function App() {
     for (let i = 0; i < treeRows.length; i++) {
       const row = treeRows[i]
       withMore.push(row)
-      if (row.entry?.entry_type === 'dir' && effectiveExpanded.has(row.fullPath) && hasMoreForPath(row.fullPath)) {
+      if (row.entry?.entry_type === 'dir' && effectiveExpanded.has(row.fullPath)) {
         const next = treeRows[i + 1]
         const endOfSubtree = !next || next.depth <= row.depth
         if (endOfSubtree) {
-          withMore.push({
-            isLoadMore: true,
-            path: row.fullPath,
-            fullPath: `${row.fullPath}::__more__`,
-            depth: row.depth + 1,
-          })
+          if (hasMoreForPath(row.fullPath)) {
+            withMore.push({
+              isLoadMore: true,
+              path: row.fullPath,
+              fullPath: `${row.fullPath}::__more__`,
+              depth: row.depth + 1,
+            })
+          } else if (hasActiveFilters && unfilteredChildParents.has(row.fullPath)) {
+            withMore.push({
+              isFilteredPlaceholder: true,
+              fullPath: `${row.fullPath}::__filtered__`,
+              depth: row.depth + 1,
+            })
+          }
         }
       }
     }
@@ -1712,6 +1782,9 @@ export default function App() {
     paginationVersion,
     viewMode,
     listRows,
+    hasActiveFilters,
+    unfilteredChildParents,
+    activeResults,
   ])
 
   const isLoading = viewMode === 'list'
