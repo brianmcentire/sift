@@ -3024,6 +3024,23 @@ _SIZE_100_GB = 100 * 1024 * 1024 * 1024
 _SIZE_1_TB = 1024 * 1024 * 1024 * 1024
 
 
+@app.get("/aggregate-status")
+def aggregate_status():
+    """Return freshness status of all aggregates."""
+    rows = db.query(
+        "SELECT key, status, updated_at, note FROM aggregate_meta ORDER BY key"
+    )
+    return [
+        {
+            "key": r[0],
+            "status": r[1],
+            "updated_at": r[2],
+            "note": r[3],
+        }
+        for r in rows
+    ]
+
+
 @app.get("/debug/query")
 def debug_query(sql: str = Query(...)):
     """Debug endpoint — run a read-only SQL query."""

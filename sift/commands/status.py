@@ -83,6 +83,20 @@ def cmd_status(args) -> None:
         except Exception as e:
             summary += f"  ·  (dup stats unavailable: {e})"
 
+    # Check aggregate freshness
+    stale_aggregates: list[dict] = []
+    try:
+        agg_rows = client.get("/aggregate-status")
+        stale_aggregates = [
+            r for r in agg_rows if r.get("status") in ("stale", "building")
+        ]
+    except Exception:
+        pass  # server may be older version without this endpoint
+
+    if stale_aggregates:
+        building = any(r.get("status") == "building" for r in stale_aggregates)
+        summary += "  ·  dup stats " + ("building" if building else "stale")
+
     print()
     print(f"  {summary}")
     print()
@@ -206,12 +220,25 @@ def cmd_status(args) -> None:
             print()
 
     verbose = bool(getattr(args, "verbose", False))
+
+    if verbose and stale_aggregates:
+        print("  stale aggregates")
+        for r in stale_aggregates:
+            key = r.get("key", "?")
+            status = r.get("status", "?")
+            refreshed = _fmt_dt(r.get("updated_at"))
+            note = r.get("note") or ""
+            note_str = f"  ({note})" if note else ""
+            label = f"{key} [{status}]" if status == "building" else key
+            print(f"    {label:<35s} last refreshed {refreshed}{note_str}")
+        print()
+
     if verbose and runs:
-        print("recent scans")
+        print("  recent scans")
         for r in runs:
             root = r.get("root_path_display") or r["root_path"]
             print(
-                f"  [{r['id']}] {r['host']}:{root}"
+                f"    [{r['id']}] {r['host']}:{root}"
                 f"  {r['status']}"
                 f"  {_fmt_dt(r.get('started_at'))}"
             )

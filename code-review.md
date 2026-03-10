@@ -100,12 +100,6 @@ The startup refresh thread (`_startup_refresh_aggregates()`) runs `refresh_host_
 
 ## 4. CLI Code
 
-### config.py — no validation of loaded config values
-
-`get_cli_config()` and `get_agent_config()` return raw dicts from TOML parsing with no validation. A config with `volatile_mtime_threshold_days = "thirty"` or `url = 12345` would pass through and cause cryptic errors later.
-
-**Recommendation:** Add basic type checking in `_load_config()` for critical fields (url must be string starting with `http`, threshold must be numeric, batch sizes must be positive int).
-
 ### scan.py — fresh_mtime_threshold_seconds not in config defaults
 
 Line ~459 of scan.py reads `cfg.get("fresh_mtime_threshold_seconds", 60)` but this key is not documented in `config.py`'s `_DEFAULT` dict. The hardcoded fallback of 60 works, but users can't discover or configure it.
@@ -118,19 +112,6 @@ if seg in path_lower:  # where seg = "/library/mail", etc.
 ```
 
 This could false-positive on paths like `/mnt/mail_backup/` (contains `/mail`) on Darwin. The current excluded segments are specific enough (`/library/mail`, `/library/messages`, `/library/mobile documents`) that this is unlikely in practice, but the matching technique is fragile.
-
-### normalize.py — normalize_query_path comment says "absolute inventory paths" but code says "./relative"
-
-The docstring for `normalize_query_path` says:
-> Bare names like 'users' or 'users/brian' [...] are treated as absolute inventory paths (i.e. 'users' → '/users').
-
-But the code actually does:
-```python
-if p and not p.startswith(("/", "~", ".", os.sep)):
-    p = "./" + p  # resolves relative to CWD
-```
-
-So `users` → `./users` → `{cwd}/users`, not `/users`. The docstring contradicts the code. The code behavior (resolving relative to CWD) is correct for CLI usage; the docstring needs updating.
 
 ### upgrade.py — fragile editable-install detection
 
@@ -169,18 +150,6 @@ These are harmless but add confusion.
 ---
 
 ## 6. Test Coverage Gaps
-
-### Critical: `resolve_host()` had no tests (now fixed)
-
-Added 9 tests in `tests/unit/test_resolve_host.py` covering:
-case-insensitive matching, localhost/127.0.0.1 resolution, server-unreachable fallback,
-unknown host passthrough, whitespace stripping, empty hosts list.
-
-### Critical: `normalize_query_path()` had no tests (now fixed)
-
-Added 8 tests in `tests/unit/test_normalize.py::TestNormalizeQueryPath` covering:
-absolute paths, tilde expansion, dot/CWD resolution, trailing slashes,
-bare names, root path, whitespace, double-dot parent.
 
 ### Significant gaps remaining
 
@@ -242,7 +211,7 @@ changes should bump the version before pushing, per project convention.
 
 ### Priority fixes
 
-1. **Update `normalize_query_path` docstring** — contradicts actual code behavior
+1. [DONE] **Update `normalize_query_path` docstring** — contradicts actual code behavior
 2. **Add aggregate staleness to `sift status`** — users can't see when dup stats are outdated
 3. **Fix category filter trap** — verify `availableCategories` uses unfiltered source in all paths
 4. **Overlay sorting** — either respect user sort preference or disable sort UI in overlay mode
@@ -250,7 +219,7 @@ changes should bump the version before pushing, per project convention.
 ### Priority tests to add
 
 1. **Trim safety tests** — verify host isolation and path scoping on the destructive command
-2. **Scan error recovery tests** — permission denied, file-disappears, disk full
+2. **Scan error recovery tests** — permission denied, file-disappears, disk full (affects log)
 3. **Server malformed input tests** — bad payloads, missing fields, oversized batches
 
 ### Things that are fine as-is

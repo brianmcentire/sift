@@ -85,10 +85,10 @@ def normalize_query_path(user_path: str) -> str:
     Expands ~, resolves to absolute, lowercases, uses forward slashes.
     Drive letter is stripped (POSIX behavior; Windows drive stored separately).
 
-    Paths starting with '/', '~', or '.' are resolved normally (relative to
-    cwd or home). Bare names like 'users' or 'users/brian' have no cwd
-    context in the inventory and are treated as absolute inventory paths
-    (i.e. 'users' → '/users').
+    All paths are resolved relative to the current working directory:
+    '/', '~', and '.' prefixes are handled by expanduser/realpath.
+    Bare names like 'users' or 'users/brian' are treated as relative to
+    cwd (i.e. 'users' → './users' → '{cwd}/users').
     """
     p = user_path.strip()
     if p and not p.startswith(("/", "~", ".", os.sep)):

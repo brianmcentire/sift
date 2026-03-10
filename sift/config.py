@@ -56,7 +56,51 @@ def load_config() -> dict[str, Any]:
     if db_path := os.environ.get("SIFT_DB_PATH"):
         cfg["_db_path"] = db_path
 
+    _validate(cfg)
     return cfg
+
+
+def _validate(cfg: dict[str, Any]) -> None:
+    """Validate critical config fields so typos surface early."""
+    errors: list[str] = []
+
+    # server.url
+    url = cfg.get("server", {}).get("url", "")
+    if url and (not isinstance(url, str) or not url.startswith(("http://", "https://"))):
+        errors.append(f"server.url must be a string starting with http:// or https://, got {url!r}")
+
+    # agent section
+    agent = cfg.get("agent", {})
+    _check_positive_number(errors, agent, "volatile_mtime_threshold_days")
+    _check_positive_int(errors, agent, "upsert_batch_size")
+    _check_positive_int(errors, agent, "seen_batch_size")
+    _check_positive_number(errors, agent, "chunk_size_mb")
+
+    if "host" in agent and not isinstance(agent["host"], str):
+        errors.append(f"agent.host must be a string, got {type(agent['host']).__name__}")
+
+    if "roots" in agent:
+        roots = agent["roots"]
+        if not isinstance(roots, list) or not all(isinstance(r, str) for r in roots):
+            errors.append(f"agent.roots must be a list of strings, got {roots!r}")
+
+    # cli.host
+    cli_host = cfg.get("cli", {}).get("host", "")
+    if cli_host and not isinstance(cli_host, str):
+        errors.append(f"cli.host must be a string, got {type(cli_host).__name__}")
+
+    if errors:
+        raise ValueError("Invalid sift config:\n  " + "\n  ".join(errors))
+
+
+def _check_positive_number(errors: list[str], section: dict, key: str) -> None:
+    if key in section and (not isinstance(section[key], (int, float)) or section[key] <= 0):
+        errors.append(f"agent.{key} must be a positive number, got {section[key]!r}")
+
+
+def _check_positive_int(errors: list[str], section: dict, key: str) -> None:
+    if key in section and (not isinstance(section[key], int) or section[key] <= 0):
+        errors.append(f"agent.{key} must be a positive integer, got {section[key]!r}")
 
 
 # Module-level singleton — loaded once per process
