@@ -1,7 +1,8 @@
 """Unit tests for sift.normalize."""
+import os
 import pytest
 from unittest.mock import patch
-from sift.normalize import normalize_path, local_hostname, get_source_os, safe_path
+from sift.normalize import normalize_path, normalize_query_path, local_hostname, get_source_os, safe_path
 
 
 class TestNormalizePath:
@@ -120,3 +121,45 @@ class TestSafePath:
             result = safe_path("\\\\server\\share\\file.txt")
             assert result.startswith("\\\\?\\UNC\\")
             assert "server\\share\\file.txt" in result
+
+
+class TestNormalizeQueryPath:
+    def test_absolute_path_lowercased(self):
+        result = normalize_query_path("/Users/Brian/Documents")
+        assert result == "/users/brian/documents"
+
+    def test_tilde_expands_to_home(self):
+        result = normalize_query_path("~/Documents")
+        home = os.path.expanduser("~").lower()
+        assert result.startswith(home.replace("\\", "/").rstrip("/"))
+        assert result.endswith("/documents")
+
+    def test_dot_resolves_to_cwd(self):
+        result = normalize_query_path(".")
+        cwd = os.path.realpath(".").lower().replace("\\", "/")
+        # On macOS /var -> /private/var, so compare realpath
+        assert result == cwd
+
+    def test_trailing_slash_stripped_by_realpath(self):
+        result = normalize_query_path("/Users/Brian/")
+        # os.path.realpath strips trailing slash
+        assert not result.endswith("/") or result == "/"
+
+    def test_bare_name_treated_as_relative_to_cwd(self):
+        # "users" should resolve relative to CWD (prepends "./")
+        result = normalize_query_path("users")
+        cwd = os.path.realpath(".").lower().replace("\\", "/")
+        assert result == cwd + "/users"
+
+    def test_slash_returns_root(self):
+        result = normalize_query_path("/")
+        assert result == "/"
+
+    def test_whitespace_stripped(self):
+        result = normalize_query_path("  /Users/Brian  ")
+        assert result == "/users/brian"
+
+    def test_double_dot_resolves_parent(self):
+        result = normalize_query_path("..")
+        parent = os.path.realpath("..").lower().replace("\\", "/")
+        assert result == parent

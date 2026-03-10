@@ -120,3 +120,49 @@ class TestClassifyFile:
     def test_unknown_extension(self):
         _, cat = classify_file("data.xyzzy")
         assert cat == "other"
+
+    # -- Edge cases ---------------------------------------------------------
+
+    def test_empty_filename(self):
+        ext, cat = classify_file("")
+        assert ext == ""
+        assert cat == "other"
+
+    def test_just_a_dot(self):
+        ext, cat = classify_file(".")
+        assert ext == ""
+        assert cat == "other"
+
+    def test_double_dot(self):
+        ext, cat = classify_file("..")
+        assert ext == ""
+        assert cat == "other"
+
+    def test_unicode_filename(self):
+        ext, cat = classify_file("写真.jpg")
+        assert ext == "jpg"
+        assert cat == "image"
+
+    def test_spaces_in_filename(self):
+        ext, cat = classify_file("my photo album.png")
+        assert ext == "png"
+        assert cat == "image"
+
+    def test_dotfile_with_extension(self):
+        # .bashrc.bak — dot at position 0, extension is "bak"
+        ext, cat = classify_file(".bashrc.bak")
+        assert ext == "bak"
+        assert cat == "other"
+
+    def test_many_dots(self):
+        ext, cat = classify_file("file.backup.2024.01.tar.gz")
+        assert ext == "gz"
+        assert cat == "archive"
+
+    def test_raw_camera_nef(self):
+        _, cat = classify_file("DSC_0001.NEF")
+        assert cat == "image"
+
+    def test_raw_camera_cr2(self):
+        _, cat = classify_file("IMG_0001.CR2")
+        assert cat == "image"

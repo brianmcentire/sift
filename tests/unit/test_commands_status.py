@@ -105,6 +105,37 @@ def test_status_host_filter_does_not_imply_verbose(monkeypatch, capsys):
     assert "recent scans" not in out
 
 
+def test_status_host_filter_resolves_localhost(monkeypatch, capsys):
+    from sift.commands import status as status_cmd
+
+    monkeypatch.setattr(status_cmd, "local_hostname", lambda: "mymac")
+
+    def fake_get(path, params=None):
+        if path == "/hosts":
+            return [
+                {
+                    "host": "mymac",
+                    "last_scan_at": "2026-03-04T04:04:00+00:00",
+                    "last_scan_root": "/users",
+                    "total_files": 100,
+                    "total_bytes": 1024,
+                    "total_hashed": 100,
+                }
+            ]
+        if path == "/scan-runs":
+            return []
+        raise AssertionError(path)
+
+    monkeypatch.setattr(status_cmd, "print_server_info", lambda: None)
+    monkeypatch.setattr(status_cmd, "print_config_hint", lambda: None)
+    monkeypatch.setattr(status_cmd.client, "get", fake_get)
+
+    args = SimpleNamespace(host="localhost", stats=False, verbose=False, showroots=False)
+    status_cmd.cmd_status(args)
+    out = capsys.readouterr().out
+    assert "mymac" in out
+
+
 def test_status_host_filter_is_case_insensitive(monkeypatch, capsys):
     from sift.commands import status as status_cmd
 

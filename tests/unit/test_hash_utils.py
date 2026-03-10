@@ -131,3 +131,82 @@ class TestNeedsRehash:
         stat = self._make_stat(1700000000.9, 1024)
         cached = {"mtime": 1700000000, "size_bytes": 1024}
         assert needs_rehash(stat, cached) is False
+
+
+class TestHashFileEdgeCases:
+    def _write_tmp(self, content: bytes) -> str:
+        f = tempfile.NamedTemporaryFile(delete=False)
+        f.write(content)
+        f.close()
+        return f.name
+
+    def test_file_deleted_after_open_returns_none(self):
+        """File removed between detection and read should return None."""
+        path = self._write_tmp(b"ephemeral")
+        os.unlink(path)
+        result = hash_file(path)
+        assert result is None
+
+    def test_hash_file_with_error_on_deleted_file(self):
+        path = self._write_tmp(b"ephemeral")
+        os.unlink(path)
+        digest, err = hash_file_with_error(path)
+        assert digest is None
+        assert err is not None
+
+    def test_directory_returns_none(self):
+        """Attempting to hash a directory should return None, not raise."""
+        result = hash_file(tempfile.gettempdir())
+        assert result is None
+
+    def test_hash_file_with_error_on_directory(self):
+        digest, err = hash_file_with_error(tempfile.gettempdir())
+        assert digest is None
+        assert err is not None
+
+    def test_large_content_hashes_correctly(self):
+        """Verify multi-chunk hashing with content larger than chunk_size."""
+        content = b"A" * 50000
+        path = self._write_tmp(content)
+        try:
+            result = hash_file(path, chunk_size=4096)
+            expected = hashlib.sha256(content).hexdigest()
+            assert result == expected
+        finally:
+            os.unlink(path)
+
+    def test_on_chunk_callback_called(self):
+        """Verify the on_chunk progress callback is invoked."""
+        content = b"B" * 20000
+        path = self._write_tmp(content)
+        chunks_seen = []
+        try:
+            hash_file(path, chunk_size=8192, on_chunk=lambda n: chunks_seen.append(n))
+            assert len(chunks_seen) > 0
+            assert sum(chunks_seen) == len(content)
+        finally:
+            os.unlink(path)
+
+    def test_permission_denied_returns_none(self):
+        """File with no read permissions should return None."""
+        path = self._write_tmp(b"secret")
+        try:
+            os.chmod(path, 0o000)
+            result = hash_file(path)
+            assert result is None
+        finally:
+            os.chmod(path, 0o644)
+            os.unlink(path)
+
+    def test_permission_denied_with_error(self):
+        """hash_file_with_error should capture the permission error message."""
+        path = self._write_tmp(b"secret")
+        try:
+            os.chmod(path, 0o000)
+            digest, err = hash_file_with_error(path)
+            assert digest is None
+            assert err is not None
+            assert "ermission" in err or "denied" in err.lower() or "peration" in err
+        finally:
+            os.chmod(path, 0o644)
+            os.unlink(path)
