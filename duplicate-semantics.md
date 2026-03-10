@@ -95,6 +95,19 @@ File rows also expose two adjacent actions that intentionally differ:
   - directories: `uniq dup hashes`
   - files: `extra copies`
 
+## Freshness
+
+Aggregate tables (`hash_stats`, `host_hash_stats`, `directory_index`) are
+refreshed by the background maintenance worker, which is enabled by default.
+After a scan or trim completes, affected aggregates are marked `stale` and
+queued for refresh; the worker picks them up after 120s of API idle time.
+
+- Per-host aggregates (`host_hash_stats`) are refreshed inline at scan completion.
+- Global aggregates (`hash_stats`, `directory_index`) are deferred to the maintenance queue.
+- `sift status` shows `dup stats stale` or `dup stats building` in the summary line when any aggregate is not fresh. `sift status -v` shows per-aggregate detail.
+- Endpoints handle staleness per their contracts: `/files/duplicates-by-subtree-hashes` returns HTTP 202; `/tree/dup-metrics` returns `data_freshness: "stale"` with empty metrics; `/stats/overview` includes `data_freshness` in response.
+- Disable the worker with `SIFT_MAINTENANCE_ENABLED=0` if needed; aggregates will stay stale until re-enabled or manually triggered via `POST /maintenance/run-now?force=true`.
+
 ## Forward-Compatibility Flags
 
 - Scope naming: `context` is accepted but vague; if renamed later, update this doc and API/docs together.

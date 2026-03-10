@@ -30,19 +30,14 @@ sees "817,400 files" but the actual inventory contains 818,678 rows.
 `total_indexed` or `total_hashed_or_skipped` would be more honest, or the
 UI/CLI could show both counts.
 
-### Stale aggregates after scan
+### Stale aggregates after scan — RESOLVED
 
-After the most recent MBP scan, `hash_stats` and `directory_index` are
-marked `stale` in `aggregate_meta`. The maintenance worker should have
-picked these up but appears to not have run. If `SIFT_MAINTENANCE_ENABLED`
-is not set (default: disabled), aggregates only refresh on scan completion
-via `PATCH /scan-runs`. If the maintenance worker is disabled and the
-post-scan enqueue fails or the job dequeue never fires, aggregates stay
-stale indefinitely.
-
-**Gap:** No alerting or CLI visibility into stale aggregates. `sift status`
-does not show aggregate freshness. Consider adding a `--health` flag or
-including freshness in `sift status --stats`.
+Maintenance worker is now enabled by default (`SIFT_MAINTENANCE_ENABLED=1`).
+After scan completion, stale global aggregates (`hash_stats`, `directory_index`)
+are picked up by the background worker after the 120s idle cooldown.
+`sift status` shows `dup stats stale/building` in the summary line when
+aggregates are not fresh, and `sift status -v` shows per-aggregate detail.
+Server logs maintenance job start/completion with elapsed time.
 
 ---
 
@@ -212,7 +207,7 @@ changes should bump the version before pushing, per project convention.
 ### Priority fixes
 
 1. [DONE] **Update `normalize_query_path` docstring** — contradicts actual code behavior
-2. **Add aggregate staleness to `sift status`** — users can't see when dup stats are outdated
+2. [DONE] **Add aggregate staleness to `sift status`** — summary line + `-v` detail; maintenance enabled by default
 3. **Fix category filter trap** — verify `availableCategories` uses unfiltered source in all paths
 4. **Overlay sorting** — either respect user sort preference or disable sort UI in overlay mode
 

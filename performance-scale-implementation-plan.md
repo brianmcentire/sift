@@ -618,7 +618,7 @@ Implemented groundwork (to minimize rework):
   - `GET /maintenance/jobs`
   - `POST /maintenance/run-now?force=true`
 - Added runtime controls:
-  - `SIFT_MAINTENANCE_ENABLED`
+  - `SIFT_MAINTENANCE_ENABLED` (default: on)
   - `SIFT_MAINTENANCE_COOLDOWN_SEC`
   - `SIFT_MAINTENANCE_MIN_IDLE_SEC`
 
@@ -633,7 +633,7 @@ Target scheduler behavior:
 
 Container/local deployment knobs (planned):
 
-- `SIFT_MAINTENANCE_ENABLED`
+- `SIFT_MAINTENANCE_ENABLED` (default: `1`, set `0` to disable)
 - `SIFT_MAINTENANCE_MIN_IDLE_SEC`
 - `SIFT_MAINTENANCE_CHUNK_MS`
 - `SIFT_MAINTENANCE_COOLDOWN_SEC`
@@ -721,7 +721,7 @@ This matrix is the required rollout gate for local macOS and Unraid container de
 Environment:
 
 - `SIFT_PERF_LOG=1`
-- `SIFT_MAINTENANCE_ENABLED=1`
+- `SIFT_MAINTENANCE_ENABLED=1` (now the default)
 - `SIFT_MAINTENANCE_MIN_IDLE_SEC=120`
 - `SIFT_MAINTENANCE_COOLDOWN_SEC=10`
 
@@ -875,7 +875,7 @@ Use this section to record execution progress as implementation begins.
   - scan-complete logic now defers heavy global refresh when other hosts are still scanning
   - added tests for deferred-vs-inline refresh behavior with concurrent host scans
 - Implemented adaptive-maintenance worker pass:
-  - background worker loop starts when `SIFT_MAINTENANCE_ENABLED=1`
+  - background worker loop starts by default (`SIFT_MAINTENANCE_ENABLED=1`)
   - activity-aware queue pickup (`ACTIVE`/`WARM`/`IDLE`)
   - maintenance queue execution helpers (dequeue/complete/fail/requeue)
   - operator endpoints for inspection/trigger (`/maintenance/jobs`, `/maintenance/run-now`)
@@ -951,7 +951,7 @@ Use this section to record execution progress as implementation begins.
   - All dup-metrics query paths now read from pre-computed table instead of scanning `files`.
 - Added `_bootstrap_aggregates()` — auto-populates aggregate tables on server startup when empty.
   - Runs in background thread so server startup isn't blocked.
-  - Solves "No files found" in dup-only mode when `SIFT_MAINTENANCE_ENABLED=0`.
+  - Solves "No files found" in dup-only mode when maintenance worker hasn't run yet.
 - **Critical perf fix:** Restructured all 3 dup-metrics query paths (aggregate, live, lite) to
   "aggregate-first" approach — GROUP BY (segment, hash) first to collapse files into unique hashes
   per segment before joining to `host_hash_stats`.

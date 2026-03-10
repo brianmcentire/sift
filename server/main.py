@@ -61,7 +61,7 @@ _hosts_cache: dict[tuple, tuple] = {}
 _report_size_distribution_cache: dict[tuple, tuple] = {}
 
 
-_MAINTENANCE_ENABLED = _env_flag("SIFT_MAINTENANCE_ENABLED", "0")
+_MAINTENANCE_ENABLED = _env_flag("SIFT_MAINTENANCE_ENABLED", "1")
 _MAINTENANCE_COOLDOWN_SEC = int(os.environ.get("SIFT_MAINTENANCE_COOLDOWN_SEC", "10"))
 _MAINTENANCE_MIN_IDLE_SEC = int(os.environ.get("SIFT_MAINTENANCE_MIN_IDLE_SEC", "120"))
 _DUP_METRICS_LIVE_MAX_FILES = int(
@@ -317,24 +317,24 @@ def _maintenance_mode() -> tuple[str, int]:
 def _run_maintenance_job(job: dict) -> None:
     job_type = job.get("job_type")
     host = job.get("host")
+    label = f"{job_type}" + (f" ({host})" if host else "")
+    logger.info("maintenance: starting %s", label)
+    start = time.monotonic()
     if job_type == "refresh_hash_stats":
         db.set_aggregate_meta("hash_stats", "building")
         db.refresh_hash_stats()
         db.set_aggregate_meta("hash_stats", "fresh")
-        return
-    if job_type == "refresh_directory_index":
+    elif job_type == "refresh_directory_index":
         db.set_aggregate_meta("directory_index", "building")
         db.refresh_directory_index()
         db.set_aggregate_meta("directory_index", "fresh")
-        return
-    if job_type == "refresh_host_hash_stats":
+    elif job_type == "refresh_host_hash_stats":
         if not host:
             raise ValueError("refresh_host_hash_stats requires host")
         db.set_aggregate_meta(f"host_hash_stats:{host}", "building")
         db.refresh_host_hash_stats(host)
         db.set_aggregate_meta(f"host_hash_stats:{host}", "fresh")
-        return
-    if job_type == "refresh_aggregates_for_host":
+    elif job_type == "refresh_aggregates_for_host":
         if not host:
             raise ValueError("refresh_aggregates_for_host requires host")
         db.set_aggregate_meta(f"host_hash_stats:{host}", "building")
@@ -346,8 +346,10 @@ def _run_maintenance_job(job: dict) -> None:
         db.set_aggregate_meta("directory_index", "building")
         db.refresh_directory_index()
         db.set_aggregate_meta("directory_index", "fresh")
-        return
-    raise ValueError(f"unknown maintenance job type: {job_type}")
+    else:
+        raise ValueError(f"unknown maintenance job type: {job_type}")
+    elapsed = time.monotonic() - start
+    logger.info("maintenance: completed %s in %.1fs", label, elapsed)
 
 
 def _run_one_maintenance_cycle(force: bool = False) -> dict:

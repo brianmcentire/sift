@@ -117,11 +117,9 @@ explicitly allowed and guarded.
    - Track p50/p95/max on representative large paths and hosts.
    - Specifically test host-filtered duplicate lookups and hash-click overlay workloads.
 
-4. **Cache/aggregation freshness behavior**
-   - Define behavior when aggregate tables are stale/missing:
-     - either return conservative flags (`false`/`null`) plus freshness marker,
-     - or skip enrichment and report metadata unavailable.
-   - Avoid silently switching to expensive live fallback on large hosts.
+4. ~~**Cache/aggregation freshness behavior**~~ — DONE.
+   Maintenance worker now enabled by default; `sift status` shows staleness;
+   server logs job start/completion. See `duplicate-semantics.md` §Freshness.
 
 ### Frontend semantics guidance
 
