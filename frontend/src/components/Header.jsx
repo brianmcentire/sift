@@ -82,10 +82,11 @@ export default function Header({
           {/* Dup-only toggle */}
           <DupOnlyToggle value={onlyDups} onChange={setOnlyDups} />
 
-          {/* Min size filter */}
+          {/* Min dup size filter */}
           <DupSizeFilter
             value={minDupSize}
             onChange={setMinDupSize}
+            label={isTree ? 'Min dup size' : 'Min file size'}
           />
 
           {/* Type filter */}

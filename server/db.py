@@ -353,7 +353,20 @@ def init_db(db_path: str | None = None) -> None:
         if _conn is not None:
             return
         path = db_path or get_db_path()
-        _conn = duckdb.connect(path)
+        try:
+            _conn = duckdb.connect(path)
+        except duckdb.IOException as exc:
+            if "lock" in str(exc).lower():
+                import re, sys
+                m = re.search(r"PID (\d+)", str(exc))
+                if m:
+                    pid = m.group(1)
+                    kill_hint = f"taskkill /PID {pid} /F" if sys.platform == "win32" else f"kill {pid}"
+                    msg = f"error: another sift server is already running (PID {pid}).\nStop it with:  {kill_hint}"
+                else:
+                    msg = "error: another sift server is already running.\nStop the other instance first."
+                raise SystemExit(msg) from None
+            raise
         # Cap parallelism so bulk queries don't saturate all cores on a shared host.
         # DuckDB defaults to using every available core.
         max_threads = int(os.environ.get("SIFT_DB_THREADS", "4"))

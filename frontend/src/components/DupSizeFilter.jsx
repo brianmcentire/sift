@@ -33,7 +33,7 @@ function formatBytes(bytes) {
 }
 
 // value: number (bytes), onChange: (number) => void
-export default function DupSizeFilter({ value, onChange, label = 'Min size' }) {
+export default function DupSizeFilter({ value, onChange, label = 'Min dup size' }) {
   const [open, setOpen] = useState(false)
   const [custom, setCustom] = useState('')
   const [customError, setCustomError] = useState(false)
@@ -77,7 +77,7 @@ export default function DupSizeFilter({ value, onChange, label = 'Min size' }) {
 
       {open && (
         <div className="absolute right-0 top-full mt-1 z-50 bg-white border border-slate-200 rounded-lg shadow-lg p-3 min-w-[200px]">
-          <div className="text-[11px] text-slate-400 mb-2 font-medium uppercase tracking-wide">Min size</div>
+          <div className="text-[11px] text-slate-400 mb-2 font-medium uppercase tracking-wide">Min file size</div>
 
           <div className="flex flex-wrap gap-1.5 mb-3">
             {PRESETS.map(p => (

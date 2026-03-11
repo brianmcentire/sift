@@ -20,6 +20,14 @@ def cmd_server(args) -> None:
     if db_path:
         os.environ["SIFT_DB_PATH"] = db_path
 
+    # Pre-flight: check DB lock before uvicorn swallows the error in a traceback
+    try:
+        from server import db
+        db.init_db(db_path)
+    except SystemExit as exc:
+        print(exc, file=sys.stderr)
+        sys.exit(1)
+
     print(f"Starting sift server on {host_bind}:{port}", flush=True)
 
     uvicorn.run(
