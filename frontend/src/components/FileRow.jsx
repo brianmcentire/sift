@@ -130,6 +130,7 @@ export default function FileRow({
   onDupSubtreeClick,
   onDupHashContextClick,
   subtreeDupOverlayActive,
+  forceDupHighlight,
   highlightedPaths,
   matchedDirPaths,
   hostColorMap,
@@ -156,6 +157,7 @@ export default function FileRow({
     entry.dup_count > 0 ||
     otherHostList.length > 0
   )
+  const showDupHighlight = !isDir && (forceDupHighlight || isDup)
   const isHardLinked = !isDir && Boolean(entry.is_hard_linked)
   const presentHostsSorted = (entry.presentHosts || [])
     .filter(h => selectedHosts.has(h))
@@ -202,7 +204,7 @@ export default function FileRow({
     <tr
       className={`
         group border-b border-slate-100
-        ${isHighlighted ? 'bg-blue-100 hover:bg-blue-200' : isDup ? 'bg-amber-50 hover:bg-amber-100' : isHardLinked ? 'bg-orange-50 hover:bg-orange-100' : isMatchedDir ? 'bg-blue-50 hover:bg-blue-100' : 'hover:bg-slate-100'}
+        ${isHighlighted ? 'bg-blue-100 hover:bg-blue-200' : showDupHighlight ? 'bg-amber-50 hover:bg-amber-100' : isHardLinked ? 'bg-orange-50 hover:bg-orange-100' : isMatchedDir ? 'bg-blue-50 hover:bg-blue-100' : 'hover:bg-slate-100'}
         ${isDir || onFileClick ? 'cursor-pointer' : ''}
         transition-colors duration-100
       `}

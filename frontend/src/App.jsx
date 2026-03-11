@@ -1971,6 +1971,7 @@ export default function App() {
           onLoadMore={handleLoadMore}
           pendingLoadMorePaths={pendingLoadMorePaths}
           subtreeDupOverlayActive={Boolean(subtreeDupPath)}
+          forceDupHighlight={pinnedResults !== null}
           highlightedPaths={highlightedPaths}
           matchedDirPaths={matchedDirPaths}
           expandedPaths={effectiveExpanded}

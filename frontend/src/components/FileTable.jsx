@@ -39,6 +39,7 @@ export default function FileTable({
   onLoadMore,
   pendingLoadMorePaths,
   subtreeDupOverlayActive,
+  forceDupHighlight,
   highlightedPaths,
   matchedDirPaths,
   expandedPaths,
@@ -206,6 +207,7 @@ export default function FileTable({
                   onDupSubtreeClick={onDupSubtreeClick}
                   onDupHashContextClick={onDupHashContextClick}
                   subtreeDupOverlayActive={subtreeDupOverlayActive}
+                  forceDupHighlight={forceDupHighlight}
                   highlightedPaths={highlightedPaths}
                   matchedDirPaths={matchedDirPaths}
                   hostColorMap={hostColorMap}
