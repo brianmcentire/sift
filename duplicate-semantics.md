@@ -57,6 +57,27 @@ File rows also expose two adjacent actions that intentionally differ:
 - Human meaning: "show all files for this hash within the current active context filters."
 - Context includes current host selection, size floor, and category filter(s) when specified (otherwise all categories).
 
+## File Click Semantics in Subtree Duplicate Overlays
+
+- When the user is already viewing a subtree duplicate overlay (entered via a directory's `X uniq dup hashes` click), clicking `Y extra copies` on a file row within that overlay should open the context-wide result set for that file's hash (equivalent to the list-icon/`☰` action in normal tree view).
+- In this scenario the adjacent list icon (`☰`) is redundant and should not be shown.
+- Rationale: the user is already in a subtree-scoped view; drilling into the same subtree again provides no new information. The useful next action is expanding to context-wide copies.
+- In normal tree view (no active overlay), the standard two-action contract (text click → subtree, list icon → context) still applies.
+
+## Overlay Color Semantics
+
+- Duplicate-result rows in overlay result sets are highlighted yellow (`bg-amber-50`) by default.
+- In subtree-seeded context overlays (`scope=context`), rows inside the originating subtree are highlighted blue (`bg-blue-50`) to show membership in the clicked subtree.
+- Non-subtree duplicate rows in the same context overlay remain yellow.
+- Blue overrides yellow where both could apply (a row is both a duplicate and inside the originating subtree).
+- These color semantics are shared with `search-interaction-contract.md` § Overlay Highlight Rules.
+
+## Badge and Count Freshness
+
+- Tree directory `X uniq dup hashes` badge counts must stay aligned with the current selected hosts, `Min size`, and category filters.
+- When host selection or `Min size` changes, stale cached badge counts must not remain visible. The frontend must invalidate or refresh cached tree dup metrics before counts are trusted for display or click-through.
+- This is a stronger form of the existing invariant "Host selection changes must invalidate/re-key duplicate metric caches" — it extends to `Min size` and category filter changes as well.
+
 ## API Contract Notes
 
 ### `GET /files/duplicates-by-subtree-hashes`
@@ -89,7 +110,7 @@ File rows also expose two adjacent actions that intentionally differ:
 
 - "Only dups" must keep directories that lead to duplicate hash sets navigable.
 - Context results must preserve in-subtree highlighting via `in_subtree`.
-- Host selection changes must invalidate/re-key duplicate metric caches.
+- Host selection, `Min size`, and category filter changes must invalidate/re-key duplicate metric caches (see § Badge and Count Freshness).
 - Terminology must remain consistent:
   - directories: `uniq dup hashes`
   - files: `extra copies`
@@ -112,3 +133,7 @@ queued for refresh; the worker picks them up after 120s of API idle time.
 - Scope naming: `context` is accepted but vague; if renamed later, update this doc and API/docs together.
 - Size filter UI label is `Min size`; backend `min_size` semantics remain the contract. Hash search results bypass size and category filters.
 - If `/files/duplicates-by-subtree-hashes/count` is folded into another endpoint, preserve seeded-hash parity guarantees and update this doc immediately.
+
+## Regression Testing
+
+- See `frontend-regression-checklist.md` for manual verification steps covering overlay transitions, badge correctness, highlight semantics, and reset behavior.

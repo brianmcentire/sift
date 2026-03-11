@@ -77,11 +77,40 @@ Code is authoritative for current behavior and contracts, except where behavior 
 
 ## Invariants
 
-- No visible, active-looking filter may appear to apply while having no effect without clear UI signaling.
+- No visible, active-looking control may appear to apply while having no effect without clear UI signaling (this includes "Load more" controls during pending dup-discovery scans).
 - Tree navigation behavior remains predictable when directory search is active.
 - List pagination/sorting correctness is preserved under active filters.
 - Duplicate click-through flows remain reliable and semantically correct.
 - Mode transitions do not corrupt filter state or create hidden cross-mode side effects.
+
+## Reset Contract
+
+- Reset returns the UI to fresh-load behavior:
+  - Clears all search queries (directory, filename, hash).
+  - Clears `Only dups`, `Min size`, and category filters.
+  - Clears all overlays, pinned results, and overlay back stacks.
+  - Collapses all expanded directories (resets expansion state).
+  - Switches to Tree View.
+  - Reselects the browser-matching host if present among available hosts; otherwise selects all hosts.
+- Reset must not leave stale filter state, cached overlay rows, or orphaned UI indicators.
+
+## Overlay Highlight Rules
+
+- File rows in overlay result sets use yellow highlighting (`bg-amber-50`) for displayed duplicates by default.
+- Blue highlighting (`bg-blue-50`) is reserved for rows that are inside or beneath the originating subtree path in a context overlay.
+- Where both yellow and blue could apply (a row is both a duplicate and inside the originating subtree), blue takes precedence.
+- These color semantics are shared with `duplicate-semantics.md` § Overlay Color Semantics.
+
+## List-Mode Category Filter Rule
+
+- The category picker in List View remains multi-selectable.
+- Available category choices must be derived from the unfiltered data source, not from currently visible filtered results.
+- This prevents the picker from collapsing to only the currently active selection, which would block the user from adding categories back.
+
+## Load More Pending State
+
+- If a tree branch is still scanning for dup-relevant rows (e.g., paging through children to find dup-eligible descendants under `Only dups`), any "Load more" control for that branch must signal pending/disabled state.
+- A "Load more" button must not appear active and clickable while the frontend is still awaiting results that determine whether additional rows exist.
 
 ## Tagged Follow-ups
 
@@ -99,10 +128,7 @@ Code is authoritative for current behavior and contracts, except where behavior 
     - `hash`: hash alpha
   - Default overlay ordering: `name asc` with deterministic secondary tie-break (for stable renders).
   - [FUTURE] Secondary sort selection (for example, shift-click) may be added later; if added, preserve clear primary/secondary precedence.
-- [TODO] Add/keep a lightweight regression checklist for:
-  - Tree search + overlay transitions,
-  - List filter + pagination resets,
-  - Duplicate overlay click-through integrity.
+- [DONE] Lightweight regression checklist: `frontend-regression-checklist.md`.
 - [FUTURE] Revisit whether Tree and List should converge on a single composable search model.
 - [FUTURE] Revisit dedicated path column support in List View if usability requires it.
 - [FUTURE] Revisit persistence of List View state across sessions if needed.

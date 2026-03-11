@@ -51,6 +51,8 @@ Code is authoritative for current behavior and contracts, except where behavior 
   - If unavoidable, treat as exceptional and justify explicitly before implementation.
 - Keep duplicate analysis read-only by default.
   - Any future action workflow (delete/move/reference) must be designed as a separate safety boundary.
+- Frontend should not use blind pagination or fallback loops when server-authoritative duplicate-state answers are available or can feasibly be added.
+  - Prefer bounded, server-assisted queries over client-side fan-out through multiple pages to discover dup-relevant rows.
 
 ## Exclusion and Classification Policy
 
