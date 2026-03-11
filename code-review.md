@@ -1,8 +1,11 @@
-# Code Review — March 2026
+# Code Review — March 2026 (v0.9.5)
 
 Comprehensive review of the sift codebase, checked against steering documents
 (`architecture-principles.md`, `duplicate-semantics.md`, `search-interaction-contract.md`)
 and verified against the live production database (localhost:8765).
+
+Updated from v0.9.3 review after frontend bug fixes, `minDupSize→minSize` rename,
+DuckDB lock improvements, and doc updates.
 
 ---
 
@@ -62,30 +65,42 @@ Server logs maintenance job start/completion with elapsed time.
 
 ## 3. Server Code (server/main.py, server/db.py)
 
-### Query cache invalidation inconsistency
+### Query cache invalidation — intentional design
 
-`POST /files` (ingest) invalidates all caches including `_tree_children_cache`, `_tree_dup_metrics_cache`, `_directories_cache`, etc. But `POST /files/seen` (seen-path updates) does NOT invalidate any cache, even though it updates `last_seen_at` which affects "last seen" column visibility. This is likely intentional (seen updates don't change tree structure or dup counts) but should be documented as a design decision.
+`POST /files` (ingest) invalidates all caches including `_tree_children_cache`, `_tree_dup_metrics_cache`, `_directories_cache`, etc. `POST /files/seen` (seen-path updates) does NOT invalidate any cache. This is intentional — seen updates only touch `last_seen_at` and don't change tree structure or dup counts. Documented here as a design decision.
 
 ### Aggregate freshness gating inconsistency
 
 Different endpoints handle stale aggregates differently:
 - `/files/duplicates-by-subtree-hashes` — returns HTTP 202 if any selected host is not fresh. Correct.
 - `/files/page` with `has_duplicates=true` — returns 202. Correct.
-- `/files/duplicates-in-subtree` — falls back to live query if aggregates missing (expensive on large hosts). Could be very slow on 800k+ file hosts.
+- `/files/duplicates-in-subtree` — falls back to live query if aggregates missing (expensive on large hosts). Could be very slow on 800k+ file hosts. **Still open:** lacks explicit freshness check (uses existence check only).
 - `/tree/dup-metrics` with multi-host `hosts` param — returns `data_freshness: "stale"` with empty metrics. Correct but silent.
-- `/stats/overview` — uses aggregates when available, falls back to live. No 202, no staleness indicator in response.
+- `/stats/overview` — NOW returns `data_freshness` field, partially closing the staleness gap.
 
-**Gap:** No consistent contract for "what does the client see when aggregates are stale?" The frontend handles this ad-hoc per endpoint. The duplicate-semantics.md doesn't specify fallback behavior.
+**Gap:** No fully consistent contract for "what does the client see when aggregates are stale?" The frontend handles this ad-hoc per endpoint.
 
-### Magic numbers scattered in main.py
+### Magic numbers — MOSTLY RESOLVED
 
-- `_DUP_METRICS_LIVE_MAX_FILES = 200_000` — threshold for live fallback
-- `_MAINTENANCE_COOLDOWN_SEC = 10`, `_MAINTENANCE_MIN_IDLE_SEC = 120`
-- `_QUERY_CACHE_TTL = 300`, `_QUERY_CACHE_MAX = 2000`
+Most operational thresholds are now configurable via env vars:
+- `SIFT_QUERY_CACHE_TTL` (default 300)
+- `SIFT_QUERY_CACHE_MAX` (default 2000)
+- `SIFT_MAINTENANCE_COOLDOWN_SEC` (default 10)
+- `SIFT_MAINTENANCE_MIN_IDLE_SEC` (default 120)
+- `SIFT_DUP_METRICS_LIVE_MAX_FILES` (default 200000)
+
+**Still hardcoded:**
 - Size bucket boundaries: `_SIZE_100_KB`, `_SIZE_1_MB`, etc.
 - Cross-host dup logic: `>= 3 copies AND >= 2 hosts` (hardcoded in report SQL)
 
-These are reasonable defaults but not configurable via env vars or config. If any need tuning in production, it requires a code change + redeploy.
+These are reasonable as hardcoded values — low change frequency, high semantic coupling.
+
+### DuckDB lock error handling — NEW
+
+`DBTimeoutError` class in `db.py` with `timeout_type` field (`lock_wait` or `query_timeout`).
+Timeout-protected lock acquisition prevents indefinite hangs. Exception handler in
+`main.py` returns 503 (lock wait) or 504 (query timeout). Pre-flight DB lock check
+in `sift/commands/server.py` catches stale lock files before uvicorn starts.
 
 ### Thread safety — background startup refresh
 
@@ -119,32 +134,121 @@ This will break if pip changes the JSON field ordering or escaping. Should use `
 
 ---
 
-## 5. Frontend Code
+## 5. Frontend Code (App.jsx, api.js)
 
-### Overlay sorting ignores user sort preference
+### BUG — CRITICAL: Reset doesn't clear Min size (introduced in 81e0aaa)
 
-When viewing subtree duplicate overlays (clicked "X uniq dup hashes"), results are sorted by hash → path → filename in a fixed order. The user's sort column selection (size, date, etc.) is ignored. `search-interaction-contract.md` marks this as `[TODO]` but it's a noticeable UX gap.
+**File:** `App.jsx:895`
 
-### Category filter can trap user in empty state
+The `minDupSize→minSize` rename (commit 81e0aaa) updated state declarations and most
+callers, but missed the reset handler. Line 895 calls `setMinDupSize(0)` — a function
+that doesn't exist. `setMinSize` is the correct setter (declared at line 34).
 
-`availableCategories` is computed from filtered results. If the user selects "Images" and no images exist in the current view, available categories collapse to empty. The user cannot deselect "Images" because the filter UI shows no categories to toggle. The fix is to compute `availableCategories` from the unfiltered source data.
+**Impact:** Reset button silently fails to clear the min-size filter. Violates the
+Reset Contract ("clear all filters to defaults").
 
-**Note:** The MEMORY.md already documents this: "`availableCategories` from UNFILTERED source to prevent collapse." If this is not actually implemented, it's a bug. If it is implemented, this analysis found a code path where it can still happen.
+### BUG — HIGH: Reset doesn't clear overlay result arrays
 
-### Host selection doesn't invalidate tree cache
+**File:** `App.jsx:887-910`
 
-When `selectedHosts` changes, `buildRows()` recomputes from the existing cache. But dup metrics in the cache were computed for the previous host selection. The metrics (dup_count, dup_hash_count, other_hosts) are host-scoped, so switching hosts can show stale dup counts until the user navigates to a directory and triggers a fresh fetch.
+The reset handler clears query strings (`filenameQuery`, `hashQuery`, `dirQuery`) and
+some overlay state (`pinnedResults`, `subtreeDupPath`), but does NOT clear the result
+arrays: `filenameResults`, `hashResults`, `highlightedPaths`.
 
-### Dead API references
+Compare with `handleToggleViewMode` (lines 977-990), which correctly clears all three.
 
-- `api.init()` endpoint is imported/defined but never called
-- `api.duplicatesInSubtree()` mapped to `/files/duplicates-in-subtree` but appears unused in current frontend
+**Impact:** Filename/hash search overlays and blue directory highlights survive reset.
+Violates "Clear all overlays" requirement.
 
-These are harmless but add confusion.
+### BUG — HIGH: Reset doesn't clear list-view state
+
+**File:** `App.jsx:887-910`
+
+Missing clears: `listItems`, `listCursor`, `listHasMore`, `listLoading`.
+
+**Impact:** After reset (which switches to tree view via `setViewMode('tree')`), list-view
+holds orphaned pagination state. Next switch to list view shows stale data from the
+previous session.
+
+### BUG — HIGH: categoryFilter change doesn't invalidate dup-metrics cache
+
+**File:** `App.jsx:324-338`
+
+The `useEffect` that clears `dupMetricSegmentsRef` / `dupMetricsInFlightRef` watches
+`[minSize, viewMode]` (line 332) and `[selectedHosts]` (line 338) but NOT `categoryFilter`.
+
+Additionally, `metricKey` (line 432) is `${host}:${drive}:${path}:${minAtRequest}:${selectedScopeKey}`
+— it doesn't include categoryFilter, so cached metrics won't be refetched when categories change.
+
+**Contract:** `duplicate-semantics.md` § Badge and Count Freshness explicitly says category
+filter changes must invalidate cached dup metrics.
+
+### Overlay sorting — deferred (not a bug)
+
+Subtree duplicate overlays use fixed hash→path→filename sort order. The user's sort
+column selection is ignored. `search-interaction-contract.md` marks this as `[TBD]`.
+Documented, not blocking.
+
+### Category filter trap — RESOLVED
+
+`availableCategories` now correctly derives from unfiltered source data, preventing the
+empty-state trap where users couldn't deselect a category with no results.
+
+### Host selection dup-metrics invalidation — RESOLVED
+
+`selectedHosts` now has its own `useEffect` (line 334-338) that clears
+`dupMetricSegmentsRef` and `dupMetricsInFlightRef`. Host switches properly
+invalidate cached dup metrics. ✓
+
+### Verified correct behaviors
+
+- **Hash search bypasses size/category filters** — `isDupQuery` flag gates filter application ✓
+- **Subtree overlay hides list icon on file rows** ✓
+- **Overlay highlight precedence** (blue > amber > orange) ✓
+- **minSize invalidates dup-metrics cache** (line 324-332) ✓
+- **`isDup` semantics** — `dup_count > 0 || otherHostList.length > 0` ✓
+- **`other_hosts`** drives cross-host highlight (not `presentHosts.length > 1`) ✓
+
+### Dead API methods in api.js
+
+- `api.init()` — defined, never called from frontend
+- `api.ls()` — defined, never called (tree uses `treeChildren` + `treeDupMetrics`)
+- `api.subtreeDups()` — defined, only `api.duplicatesBySubtreeHashes()` is used
+
+Note: `api.duplicatesInSubtree()` was removed. `api.dupHash()` IS used (line 1197).
+
+These are harmless but add confusion. Consider cleaning up in a future pass.
+
+### localStorage filter persistence — NOT IMPLEMENTED
+
+MEMORY.md documents `sift-filters` localStorage persistence, but no `localStorage`
+code exists in App.jsx. This was likely lost in a commit rollback and needs
+reimplementation.
 
 ---
 
-## 6. Test Coverage Gaps
+## 6. Test Coverage
+
+### Unit test inventory (current)
+
+| File | Tests | Coverage area |
+|------|-------|---------------|
+| `test_resolve_host.py` | 9 | resolve_host() function |
+| `test_normalize.py` | 8 | normalize_query_path() edge cases |
+| `test_classify.py` | 10 | Edge cases: empty, unicode, spaces, dotfiles, camera RAW |
+| `test_hash_utils.py` | 8 | Error scenarios: deleted file, directory, large content, permissions |
+| `test_commands_status.py` | 1 | localhost resolution in status command |
+| `test_config.py` | — | Config loading |
+| `test_config_validation.py` | — | Config validation |
+| `test_commands_init.py` | — | Init command |
+| `test_commands_ls_du_tree_api.py` | — | ls/du/tree API commands |
+| `test_commands_find.py` | — | find command |
+| `test_commands_report.py` | — | report command |
+| `test_commands_trim.py` | — | trim command |
+| `test_exclusions.py` | — | File/dir exclusion logic |
+| `test_scan.py` | — | Scan agent |
+| `test_scan_null_hash_retry.py` | — | Null hash retry logic |
+| `test_db_timeouts.py` | — | DuckDB timeout handling (NEW) |
 
 ### Significant gaps remaining
 
@@ -157,38 +261,32 @@ These are harmless but add confusion.
 | Config parsing errors | No tests for malformed TOML, permission denied on config file | Cryptic errors for users |
 | Report timeout | No tests for API timeout during report generation | Hangs indefinitely |
 | Large dataset behavior | No tests with 10k+ files | Performance cliffs unknown |
-
-### Tests added in this review
-
-| File | Tests added | Coverage area |
-|------|-------------|---------------|
-| `tests/unit/test_resolve_host.py` | 9 tests (new file) | resolve_host() function |
-| `tests/unit/test_normalize.py` | 8 tests | normalize_query_path() edge cases |
-| `tests/unit/test_classify.py` | 10 tests | Edge cases: empty, unicode, spaces, dotfiles, camera RAW |
-| `tests/unit/test_hash_utils.py` | 8 tests | Error scenarios: deleted file, directory, large content, callbacks, permissions |
-| `tests/unit/test_commands_status.py` | 1 test | localhost resolution in status command |
+| Frontend | No unit/component tests at all | Regressions caught only manually |
 
 ---
 
 ## 7. Documentation Gaps
 
-### search-interaction-contract.md has open TBDs
+### search-interaction-contract.md has open TBDs — reduced to 2
 
-Three items marked `[TBD]` or `[TODO]` that affect current behavior:
+Two items marked `[TBD]` that affect current behavior:
 1. Directory input behavior during overlay states (currently composable but undocumented)
 2. Overlay group sorting contract (currently fixed-order, ignores user sort)
-3. Regression checklist for search transitions (doesn't exist)
 
-### duplicate-semantics.md doesn't cover aggregate staleness
+~~3. Regression checklist for search transitions~~ — **DONE** (`frontend-regression-checklist.md` exists)
 
-The document defines semantics for dup counting and click-through but says nothing
-about what happens when aggregates are stale or building. The frontend and server
-each have ad-hoc handling. A "Freshness" section should define the contract.
+### duplicate-semantics.md freshness section — DONE
 
-### pyproject.toml version not bumped
+The document now has a Freshness section covering badge/count staleness behavior.
 
-Current version is `0.9.3`. The `resolve_host` feature and all other uncommitted
-changes should bump the version before pushing, per project convention.
+### pyproject.toml version — DONE
+
+Version is 0.9.5.
+
+### localStorage filter persistence — MISSING
+
+MEMORY.md documents `sift-filters` localStorage save/restore, but the implementation
+was lost in a commit rollback. Needs reimplementation.
 
 ---
 
@@ -203,24 +301,33 @@ changes should bump the version before pushing, per project convention.
 - Scan error recovery (retry, backoff, Ctrl-C handling) is robust
 - Duplicate semantics in the frontend match the spec accurately
 - The steering documents are genuinely useful and code follows them
+- Server operational thresholds now configurable via env vars
+- DuckDB lock timeouts prevent indefinite hangs (DBTimeoutError)
+- `/stats/overview` returns `data_freshness` field
+- Category filter trap resolved (availableCategories from unfiltered source)
+- Host selection properly invalidates dup-metrics cache
 
 ### Priority fixes
 
-1. [DONE] **Update `normalize_query_path` docstring** — contradicts actual code behavior
-2. [DONE] **Add aggregate staleness to `sift status`** — summary line + `-v` detail; maintenance enabled by default
-3. **Fix category filter trap** — verify `availableCategories` uses unfiltered source in all paths
-4. **Overlay sorting** — either respect user sort preference or disable sort UI in overlay mode
+1. **CRITICAL: `setMinDupSize(0)` → `setMinSize(0)` in reset handler** — rename missed this callsite
+2. **HIGH: Reset must clear `filenameResults`, `hashResults`, `highlightedPaths`** — overlays survive reset
+3. **HIGH: Reset must clear `listItems`, `listCursor`, `listHasMore`, `listLoading`** — stale list state
+4. **HIGH: Add `categoryFilter` to dup-metrics cache invalidation** — stale badges after category change
+5. **Reimplement localStorage filter persistence** — `sift-filters` save/restore lost in rollback
 
-### Priority tests to add
+### Considerations for future
 
-1. **Trim safety tests** — verify host isolation and path scoping on the destructive command
-2. **Scan error recovery tests** — permission denied, file-disappears, disk full (affects log)
-3. **Server malformed input tests** — bad payloads, missing fields, oversized batches
+- `fresh_mtime_threshold_seconds` → add to `config.py` `_DEFAULT` dict
+- `upgrade.py` — use `json.loads()` for editable detection
+- Overlay sorting contract (marked TBD in steering doc)
+- Clean up unused API methods in `api.js` (`init`, `ls`, `subtreeDups`)
+- `/files/duplicates-in-subtree` explicit freshness gating
 
 ### Things that are fine as-is
 
 - `executemany()` existing in db.py (unused in production, only test conftest)
-- Magic numbers in server config (reasonable defaults, low change frequency)
+- Hardcoded size buckets and cross-host dup thresholds (low change frequency)
 - Hardcoded extension lists in classify.py (comprehensive, easy to extend)
 - Single RLock instead of reader-writer lock (correct for current scale)
 - `host_stats` excluding skipped files (intentional, just needs clearer naming)
+- `POST /files/seen` skipping cache invalidation (intentional — only touches `last_seen_at`)
