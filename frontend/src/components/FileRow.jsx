@@ -135,7 +135,7 @@ export default function FileRow({
   matchedDirPaths,
   hostColorMap,
   selectedHosts,
-  minDupSize,
+  minSize,
   orderedCols,
   filterActive,
   hashFilterActive,
@@ -152,7 +152,7 @@ export default function FileRow({
   //                           another host). Using other_hosts rather than presentHosts.length
   //                           avoids false positives: two hosts can have the same path with
   //                           different content (e.g. /home/pi/.bash_history on two Pis).
-  const meetsDupSize = (entry.size_bytes || 0) >= (minDupSize || 0)
+  const meetsDupSize = (entry.size_bytes || 0) >= (minSize || 0)
   const isDup = !isDir && meetsDupSize && (
     entry.dup_count > 0 ||
     otherHostList.length > 0

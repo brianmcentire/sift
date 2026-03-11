@@ -22,8 +22,8 @@ export default function Header({
   categoryFilter,
   setCategoryFilter,
   availableCategories,
-  minDupSize,
-  setMinDupSize,
+  minSize,
+  setMinSize,
   onlyDups,
   setOnlyDups,
   visibleColumns,
@@ -84,8 +84,8 @@ export default function Header({
 
           {/* Min size filter */}
           <DupSizeFilter
-            value={minDupSize}
-            onChange={setMinDupSize}
+            value={minSize}
+            onChange={setMinSize}
           />
 
           {/* Type filter */}

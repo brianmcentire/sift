@@ -564,3 +564,109 @@ unlisted FUSE type (safe default: assume local). Critical for Unraid where
 ### Future consideration
 - `--include-network` flag if users explicitly want to scan network mounts
 - Per-mount overrides in `~/.sift.config`
+
+# Performance Hardening and Correctness
+
+## Remove Remaining Duplicate-Click Fallbacks
+
+### Why this is deferred
+
+- Current duplicate click behavior is working well enough for the main user flows.
+- Some older fallback code still exists to recover when a file row is missing a hash or when the frontend tries alternate duplicate lookup paths.
+- Those paths add complexity and make the behavior harder to reason about, but they are not the highest-value work now that the main regressions are fixed.
+
+### Current areas to review
+
+- `frontend/src/App.jsx`
+  - `handleDupHashClick()`
+  - `handleDupHashContextClick()`
+  - `handleFileClick()`
+- In particular, review the branch in `handleDupHashClick()` that:
+  - probes `/files/ls/dup-hash`
+  - then falls back to `/files`
+  - and reconstructs highlight/context state client-side
+
+### Goal
+
+- Make duplicate click behavior use one clear source of truth per interaction.
+- Remove fallback branches that are no longer needed once row hashes and selected-host aggregate endpoints are reliable.
+- Keep these interaction contracts intact:
+  - directory `X uniq dup hashes` -> subtree-scoped duplicate rows
+  - directory list/context action -> context-wide rows seeded by subtree hashes
+  - file `X extra copies` -> subtree or context result depending on mode
+  - context overlays preserve subtree-relative blue highlighting while other dup rows remain yellow
+
+### Suggested implementation approach
+
+1. Inventory all duplicate click code paths in `frontend/src/App.jsx`.
+2. For each path, map it to the intended server endpoint and contract.
+3. Remove branches that depend on older same-host probing behavior when the modern aggregate-backed endpoint already covers the case.
+4. Re-test these cases manually:
+   - tree dir dup click
+   - tree dir context/list click
+   - file extra-copies click from normal tree/list views
+   - file extra-copies click from subtree dup overlay
+   - file overlay/back navigation
+
+### Watch-outs
+
+- Do not regress selected-host scoping.
+- Do not regress hash-search bypass semantics.
+- Do not lose the special subtree-context blue highlighting behavior.
+
+## Tree Duplicate Discovery: Pursue Server/API Assistance Later
+
+### Decision
+
+- Do not try to solve tree duplicate discovery purely in the frontend right now.
+- The current UI is acceptable after the recent fixes, but the remaining heaviness is caused by the frontend paging ahead through tree children and waiting for duplicate metrics to discover whether deeper descendants are relevant.
+- This should be improved later with explicit server/API support.
+
+### Current limitation
+
+- In Tree + `Only dups`, the frontend may need to:
+  - request additional `/tree/children` pages,
+  - request `/tree/dup-metrics` for those pages,
+  - repeat until a dup-eligible descendant is found.
+- This can make `Load more` feel heavy or latent, even though the UI is now much more honest about it.
+
+### What the future server/API improvement should accomplish
+
+- Let the frontend know whether additional paged children under a directory contain dup-relevant descendants before blindly paging through them.
+- Reduce or eliminate cases where one click has to chase multiple hidden pages to reveal the next useful duplicate row.
+- Make Tree + `Only dups` feel closer to:
+  - one click -> immediately reveal the next dup-relevant row set,
+  - or clearly know there is nothing relevant left.
+
+### Good future shapes for that improvement
+
+- Add an aggregate-backed endpoint or extension that can answer one of these questions cheaply:
+  - "Does this directory have any more dup-eligible descendants beyond the currently loaded page?"
+  - "What are the next child segments under this directory that satisfy current selected-host/category/min-size duplicate filters?"
+  - "Give me tree children already filtered for dup-only tree rendering under the current filter set."
+
+- The ideal server-assisted result would let the frontend avoid blind pagination loops and replace them with one bounded request that returns either:
+  - the next dup-relevant children to show, or
+  - a definitive "nothing else relevant" answer.
+
+### Constraints from existing docs and architecture
+
+- Keep alignment with:
+  - `architecture-principles.md`
+  - `search-interaction-contract.md`
+  - `duplicate-semantics.md`
+- Prefer aggregate-backed, bounded, paged, selected-host-aware server logic.
+- Avoid reintroducing expensive live scans or broad fallback fan-out from the frontend.
+
+### Handoff notes for a future coding agent
+
+- Start by reviewing:
+  - `frontend/src/App.jsx`
+  - `frontend/src/api.js`
+  - `server/main.py`
+  - `architecture-principles.md`
+  - `search-interaction-contract.md`
+  - `duplicate-semantics.md`
+- Reproduce the historical issue in Tree + `Only dups` with deep branches and `Load more`.
+- Measure where repeated `/tree/children` + `/tree/dup-metrics` paging happens.
+- Propose a bounded server-side contract first, then simplify the frontend to consume it.

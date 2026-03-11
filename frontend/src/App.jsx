@@ -31,7 +31,7 @@ export default function App() {
   const [subtreeDupPath, setSubtreeDupPath] = useState(null)          // string | null — path for subtree dup overlay
   const [pinnedSourcePath, setPinnedSourcePath] = useState(null)      // string | null — clicked file's display path (lowercase)
   const [categoryFilter, setCategoryFilter] = useState(new Set())
-  const [minDupSize, setMinDupSize] = useState(0)
+  const [minSize, setMinSize] = useState(0)
   const [onlyDups, setOnlyDups] = useState(false)
 
   // ── Display state ───────────────────────────────────────────────────────
@@ -49,7 +49,7 @@ export default function App() {
   const [structureVersion, setStructureVersion] = useState(0)   // new children loaded
   const [metadataVersion, setMetadataVersion] = useState(0)    // dup metrics merged
   const [lsFetchKey, setLsFetchKey] = useState(0)
-  const minDupSizeRef = useRef(minDupSize)
+  const minSizeRef = useRef(minSize)
   const [dupAutoExpanded, setDupAutoExpanded] = useState(new Map())  // Map<rootPath, Set<autoExpandedPaths>>
   const onlyDupsRef = useRef(onlyDups)
   const appStartRef = useRef(performance.now())
@@ -231,10 +231,10 @@ export default function App() {
     return () => clearInterval(id)
   }, [])
 
-  // ── Stats (re-fetched when minDupSize, categoryFilter, or selectedHosts changes)
+  // ── Stats (re-fetched when minSize, categoryFilter, or selectedHosts changes)
   useEffect(() => {
     if (!statsEnabled) return
-    const params = { min_size: minDupSize }
+    const params = { min_size: minSize }
     if (categoryFilter.size > 0) params.categories = [...categoryFilter].join(',')
     if (selectedHosts.size > 0 && selectedHosts.size < hosts.length) {
       params.hosts = [...selectedHosts].join(',')
@@ -242,7 +242,7 @@ export default function App() {
     api.stats(params)
       .then(setStats)
       .catch(() => {})
-  }, [statsEnabled, minDupSize, categoryFilter, selectedHosts, hosts.length])
+  }, [statsEnabled, minSize, categoryFilter, selectedHosts, hosts.length])
 
   useEffect(() => subscribeInFlightCount(setApiPendingCount), [])
 
@@ -270,7 +270,7 @@ export default function App() {
             const res = await api.duplicatesBySubtreeHashesCount(
               hostsCsv,
               '/',
-              minDupSize,
+               minSize,
               categoriesCsv,
               d,
             )
@@ -289,7 +289,7 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [viewMode, availableDrives, selectedHosts, minDupSize, categoryFilter])
+  }, [viewMode, availableDrives, selectedHosts, minSize, categoryFilter])
 
   // ── Sync onlyDupsRef + clear auto-expanded on toggle off ──────────────
   useEffect(() => {
@@ -321,15 +321,15 @@ export default function App() {
     setMetadataVersion(v => v + 1)
   }, [])
 
-  // ── When minDupSize changes, refresh dup metrics without collapsing tree ───
+  // ── When minSize changes, refresh dup metrics without collapsing tree ───
   useEffect(() => {
-    minDupSizeRef.current = minDupSize
+    minSizeRef.current = minSize
     dupMetricSegmentsRef.current.clear()
     dupMetricsInFlightRef.current.clear()
     clearCachedTreeDupMetrics()
     if (viewMode === 'tree' && onlyDupsRef.current) setTreeMetricsRefreshing(true)
     setPaginationVersion(v => v + 1)
-  }, [minDupSize, viewMode, clearCachedTreeDupMetrics])
+  }, [minSize, viewMode, clearCachedTreeDupMetrics])
 
   useEffect(() => {
     dupMetricSegmentsRef.current.clear()
@@ -423,7 +423,7 @@ export default function App() {
 
     if (!enrichDupMetrics) return
 
-    const minAtRequest = minDupSizeRef.current
+    const minAtRequest = minSizeRef.current
     const selectedScopeKey = [...selectedHosts].sort().join(',')
     const metricsTargets = hostList
       .map(h => {
@@ -456,7 +456,7 @@ export default function App() {
       const driveForSet = forceDrive !== undefined ? forceDrive : (metricsTargets[0]?.drive || hostDrive(hostNames[0]))
       const p = api.treeDupMetrics(path, '', minAtRequest, unionMissing, driveForSet, {}, hostsCsv)
         .then(data => {
-          if (minDupSizeRef.current !== minAtRequest) return
+          if (minSizeRef.current !== minAtRequest) return
           const metrics = data?.metrics || {}
           metricsTargets.forEach(target => {
             const existing = cacheRef.current.get(target.key) || []
@@ -491,7 +491,7 @@ export default function App() {
       dupMetricsInFlightRef.current.add(metricKey)
       return api.treeDupMetrics(path, host, minAtRequest, missing, drive)
         .then(data => {
-          if (minDupSizeRef.current !== minAtRequest) return
+          if (minSizeRef.current !== minAtRequest) return
           const metrics = data?.metrics || {}
           const existing = cacheRef.current.get(key) || []
           const merged = existing.map(entry => {
@@ -530,7 +530,7 @@ export default function App() {
     }
   }, [hostDrive, selectedHosts])
 
-  // Keep user context on min dup size changes: refresh metrics for visible
+  // Keep user context on min size changes: refresh metrics for visible
   // paths (current path + expanded dirs) instead of resetting expansion state.
   useEffect(() => {
     if (hosts.length === 0 || viewMode !== 'tree') return
@@ -550,7 +550,7 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [minDupSize, hosts.length, viewMode, currentPath, effectiveExpanded, activeHosts, fetchPath])
+  }, [minSize, hosts.length, viewMode, currentPath, effectiveExpanded, activeHosts, fetchPath])
 
   const listSortBy = useMemo(() => {
     const map = { name: 'name', size: 'size', date: 'date', seen: 'seen', type: 'type', hash: 'hash' }
@@ -590,7 +590,7 @@ export default function App() {
         hosts: hostsCsv,
         categories: !hasHashSearch && categoryFilter.size > 0 ? [...categoryFilter].join(',') : undefined,
         has_duplicates: onlyDups ? true : undefined,
-        min_size: !hasHashSearch && minDupSize > 0 ? minDupSize : undefined,
+        min_size: !hasHashSearch && minSize > 0 ? minSize : undefined,
         path_contains: debouncedDirQuery.length >= 2 ? debouncedDirQuery : undefined,
         iname: debouncedFilenameQuery.length >= 2 ? `*${debouncedFilenameQuery}*` : undefined,
         hash: hasHashSearch ? debouncedHashQuery : undefined,
@@ -636,7 +636,7 @@ export default function App() {
     selectedHosts,
     categoryFilter,
     onlyDups,
-    minDupSize,
+    minSize,
     debouncedDirQuery,
     debouncedFilenameQuery,
     debouncedHashQuery,
@@ -703,11 +703,11 @@ export default function App() {
       }
       const isDup = entry.dup_count > 0 || hasSelectedOtherHost(entry.other_hosts, selectedHosts)
       if (!isDup) return false
-      if (minDupSize > 0 && (entry.size_bytes || 0) < minDupSize) return false
+      if (minSize > 0 && (entry.size_bytes || 0) < minSize) return false
       if (categoryFilter.size > 0 && !categoryFilter.has(entry.file_category)) return false
       return true
     }).length
-  }, [activeHosts, hostDrive, selectedHosts, minDupSize, categoryFilter])
+  }, [activeHosts, hostDrive, selectedHosts, minSize, categoryFilter])
 
   const handleLoadMore = useCallback(async (path) => {
     if (path === '__list__' && viewMode === 'list') {
@@ -769,7 +769,7 @@ export default function App() {
     const anchorHost = activeHosts[0].host
     const drive = hostDrive(anchorHost)
     const results = await Promise.allSettled([
-      api.dupDirAncestors(anchorHost, rootPath, minDupSizeRef.current, 500, drive),
+      api.dupDirAncestors(anchorHost, rootPath, minSizeRef.current, 500, drive),
     ])
     const allPaths = new Set()
     for (const r of results) {
@@ -999,12 +999,12 @@ export default function App() {
         sortBy,
         sortDir,
         onlyDups,
-        minDupSize,
+        minSize,
         categoryFilter: [...categoryFilter],
       }]
       return next.slice(-20)
     })
-  }, [dirQuery, filenameQuery, hashQuery, sortBy, sortDir, onlyDups, minDupSize, categoryFilter])
+  }, [dirQuery, filenameQuery, hashQuery, sortBy, sortDir, onlyDups, minSize, categoryFilter])
 
   const pushOverlayState = useCallback((reason = 'overlay_action') => {
     setOverlayBackStack(prev => {
@@ -1044,7 +1044,7 @@ export default function App() {
       setSortBy(last.sortBy || 'name')
       setSortDir(last.sortDir || 'asc')
       setOnlyDups(Boolean(last.onlyDups))
-      setMinDupSize(last.minDupSize || 0)
+      setMinSize(last.minSize || 0)
       setCategoryFilter(new Set(last.categoryFilter || []))
       return prev.slice(0, -1)
     })
@@ -1123,7 +1123,7 @@ export default function App() {
         const data = await api.duplicatesBySubtreeHashes(
           hostsCsv,
           scopedPath,
-          minDupSizeRef.current,
+          minSizeRef.current,
           'subtree',
           categoriesCsv,
           2000,
@@ -1164,7 +1164,7 @@ export default function App() {
         const files = await api.duplicatesBySubtreeHashes(
           hostsCsv,
           fullPath,
-          minDupSizeRef.current,
+          minSizeRef.current,
           'subtree',
           categoriesCsv,
           5000,
@@ -1194,7 +1194,7 @@ export default function App() {
     if (!host) return
     const drive = hostDrive(host)
     try {
-      const result = await api.dupHash(fullPath, host, minDupSizeRef.current, drive)
+      const result = await api.dupHash(fullPath, host, minSizeRef.current, drive)
       if (result?.hash) {
         if (pinnedResults !== null) pushOverlayState('file_dup_click')
         if (viewMode === 'list') pushListState('dup_hash_click')
@@ -1254,7 +1254,7 @@ export default function App() {
       const data = await api.duplicatesBySubtreeHashes(
         hostsCsv,
         scopedPath,
-        minDupSizeRef.current,
+        minSizeRef.current,
         'context',
         categoriesCsv,
         3000,
@@ -1507,8 +1507,8 @@ export default function App() {
       }
     }
 
-    if (minDupSize > 0 && !isHashResultsMode) {
-      filtered = filtered.filter(r => (r.entry.size_bytes || 0) >= minDupSize)
+    if (minSize > 0 && !isHashResultsMode) {
+      filtered = filtered.filter(r => (r.entry.size_bytes || 0) >= minSize)
     }
     // IMPORTANT: hash-result overlays are already hash-qualified and should not
     // be re-filtered by generic "Only dups" logic. Doing so can hide valid
@@ -1572,7 +1572,7 @@ export default function App() {
     pinnedSourcePath,
     pinnedResults,
     categoryFilter,
-    minDupSize,
+    minSize,
     onlyDups,
     selectedHosts,
     sortBy,
@@ -1596,10 +1596,10 @@ export default function App() {
     let filtered = categoryFilter.size > 0
       ? r.filter(row => row.entry.entry_type === 'file' && categoryFilter.has(row.entry.file_category))
       : r
-    if (minDupSize > 0) {
+    if (minSize > 0) {
       filtered = filtered.filter(row => {
         if (row.entry.entry_type !== 'file') return true
-        return (row.entry.size_bytes || 0) >= minDupSize
+        return (row.entry.size_bytes || 0) >= minSize
       })
     }
     if (onlyDups) {
@@ -1676,7 +1676,7 @@ export default function App() {
       filtered = filtered.filter(row => keepPaths.has(row.fullPath))
     }
     return filtered
-  }, [allTreeRows, categoryFilter, minDupSize, onlyDups, selectedHosts, currentPath, effectiveExpanded, treeMetricsRefreshing])
+  }, [allTreeRows, categoryFilter, minSize, onlyDups, selectedHosts, currentPath, effectiveExpanded, treeMetricsRefreshing])
 
   const listRows = useMemo(() => {
     const base = listItems.map(fe => fileEntryToRow(fe))
@@ -1894,8 +1894,8 @@ export default function App() {
         categoryFilter={categoryFilter}
         setCategoryFilter={setCategoryFilter}
         availableCategories={availableCategories}
-        minDupSize={minDupSize}
-        setMinDupSize={setMinDupSize}
+        minSize={minSize}
+        setMinSize={setMinSize}
         onlyDups={onlyDups}
         setOnlyDups={setOnlyDups}
         visibleColumns={visibleColumns}
@@ -1936,7 +1936,7 @@ export default function App() {
         <StatsBar
           stats={stats}
           rowCount={visibleRowCount}
-          isFiltered={minDupSize > 0 || categoryFilter.size > 0}
+          isFiltered={minSize > 0 || categoryFilter.size > 0}
         />
 
         {viewMode === 'list' && listPendingDetail && (
@@ -1955,7 +1955,7 @@ export default function App() {
           rows={rows}
           hostColorMap={hostColorMap}
           selectedHosts={selectedHosts}
-          minDupSize={minDupSize}
+          minSize={minSize}
           visibleColumns={visibleColumns}
           columnOrder={columnOrder}
           sortBy={sortBy}
