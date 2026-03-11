@@ -184,11 +184,11 @@ Note: `api.duplicatesInSubtree()` was removed. `api.dupHash()` IS used (line 119
 
 These are harmless but add confusion. Consider cleaning up in a future pass.
 
-### localStorage filter persistence — NOT IMPLEMENTED
+### ~~localStorage filter persistence — NOT IMPLEMENTED~~ — RESOLVED
 
-MEMORY.md documents `sift-filters` localStorage persistence, but no `localStorage`
-code exists in App.jsx. This was likely lost in a commit rollback and needs
-reimplementation.
+`sift-filters` localStorage persistence reimplemented: module-level IIFE loads saved
+state, lazy useState initializers restore all 7 filter fields, startup hosts effect
+validates and restores selectedHosts, save useEffect writes on every change.
 
 ---
 
@@ -248,10 +248,9 @@ The document now has a Freshness section covering badge/count staleness behavior
 
 Version is 0.9.5.
 
-### localStorage filter persistence — MISSING
+### ~~localStorage filter persistence — MISSING~~ — RESOLVED
 
-MEMORY.md documents `sift-filters` localStorage save/restore, but the implementation
-was lost in a commit rollback. Needs reimplementation.
+Reimplemented in v0.9.6. See §5 above for details.
 
 ---
 
@@ -284,9 +283,7 @@ All previously listed HIGH/CRITICAL frontend bugs have been resolved:
 3. ~~**HIGH: Reset must clear `listItems`, `listCursor`, `listHasMore`, `listLoading`**~~ — RESOLVED
 4. ~~**HIGH: Add `categoryFilter` to dup-metrics cache invalidation**~~ — RESOLVED
 
-Remaining:
-
-5. **Reimplement localStorage filter persistence** — `sift-filters` save/restore lost in rollback
+~~5. **Reimplement localStorage filter persistence** — `sift-filters` save/restore lost in rollback~~ — RESOLVED
 
 ### Considerations for future
 

@@ -5,6 +5,13 @@ import Header from './components/Header.jsx'
 import StatsBar from './components/StatsBar.jsx'
 import FileTable from './components/FileTable.jsx'
 
+const _savedFilters = (() => {
+  try {
+    const raw = window.localStorage?.getItem('sift-filters')
+    return raw ? JSON.parse(raw) : {}
+  } catch { return {} }
+})()
+
 export default function App() {
   // ── Host state ──────────────────────────────────────────────────────────
   const [hosts, setHosts] = useState([])
@@ -30,15 +37,20 @@ export default function App() {
   const [highlightedPaths, setHighlightedPaths] = useState(new Set()) // paths (lowercase) to blue-highlight in results
   const [subtreeDupPath, setSubtreeDupPath] = useState(null)          // string | null — path for subtree dup overlay
   const [pinnedSourcePath, setPinnedSourcePath] = useState(null)      // string | null — clicked file's display path (lowercase)
-  const [categoryFilter, setCategoryFilter] = useState(new Set())
-  const [minSize, setMinSize] = useState(0)
-  const [onlyDups, setOnlyDups] = useState(false)
+  const [categoryFilter, setCategoryFilter] = useState(
+    () => _savedFilters.categoryFilter ? new Set(_savedFilters.categoryFilter) : new Set()
+  )
+  const [minSize, setMinSize] = useState(() => _savedFilters.minSize ?? 0)
+  const [onlyDups, setOnlyDups] = useState(() => Boolean(_savedFilters.onlyDups))
 
   // ── Display state ───────────────────────────────────────────────────────
-  const [visibleColumns, setVisibleColumns] = useState({ size: true, date: true, seen: true, type: true, hash: true, hosts: true })
+  const [visibleColumns, setVisibleColumns] = useState(() => {
+    const def = { size: true, date: true, seen: true, type: true, hash: true, hosts: true }
+    return _savedFilters.visibleColumns ? { ...def, ..._savedFilters.visibleColumns } : def
+  })
   const [columnOrder] = useState(['size', 'date', 'seen', 'type', 'hash', 'hosts'])
-  const [sortBy, setSortBy] = useState('name')
-  const [sortDir, setSortDir] = useState('asc')
+  const [sortBy, setSortBy] = useState(() => _savedFilters.sortBy ?? 'name')
+  const [sortDir, setSortDir] = useState(() => _savedFilters.sortDir ?? 'asc')
   const [apiPendingCount, setApiPendingCount] = useState(0)
 
   // ── Clipboard toast ─────────────────────────────────────────────────────
@@ -214,10 +226,16 @@ export default function App() {
           ? data.find(h => h.host.toLowerCase() === clientHost)
           : null
         clientHostRef.current = matched?.host || null
+        const storedHosts = _savedFilters.selectedHosts
+        const validStored = Array.isArray(storedHosts)
+          ? storedHosts.filter(h => data.some(x => x.host === h))
+          : []
         setSelectedHosts(
-          matched
-            ? new Set([matched.host])
-            : new Set(data.map(h => h.host)),
+          validStored.length > 0
+            ? new Set(validStored)
+            : matched
+              ? new Set([matched.host])
+              : new Set(data.map(h => h.host)),
         )
       })
       .catch(() => {})
@@ -340,6 +358,24 @@ export default function App() {
   useEffect(() => {
     if (viewMode !== 'tree' || !onlyDups) setTreeMetricsRefreshing(false)
   }, [viewMode, onlyDups])
+
+  // ── Persist filters to localStorage ──────────────────────────────────────
+  useEffect(() => {
+    try {
+      const toSave = {
+        categoryFilter: [...categoryFilter],
+        minSize,
+        onlyDups,
+        visibleColumns,
+        sortBy,
+        sortDir,
+      }
+      if (selectedHosts.size > 0) toSave.selectedHosts = [...selectedHosts]
+      window.localStorage?.setItem('sift-filters', JSON.stringify(toSave))
+    } catch {
+      // ignore quota exceeded / private browsing / security errors
+    }
+  }, [categoryFilter, minSize, onlyDups, visibleColumns, sortBy, sortDir, selectedHosts])
 
   // ── Fetch ls data for a path (all hosts) ─────────────────────────────────
   const fetchPath = useCallback(async (path, hostList, opts = {}) => {
