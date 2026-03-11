@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { api, subscribeInFlightCount } from './api.js'
-import { joinPath, mergeEntries, sortEntries, hostColor, fileEntryToRow, sortFileEntries, logPerf, formatClipboardPath, hasSelectedOtherHost, shouldApplyOnlyDupsInSearch } from './utils.js'
+import { ALL_FILE_CATEGORIES, joinPath, mergeEntries, sortEntries, hostColor, fileEntryToRow, sortFileEntries, logPerf, formatClipboardPath, hasSelectedOtherHost, shouldApplyOnlyDupsInSearch } from './utils.js'
 import Header from './components/Header.jsx'
 import StatsBar from './components/StatsBar.jsx'
 import FileTable from './components/FileTable.jsx'
@@ -81,6 +81,7 @@ export default function App() {
   const [pendingLoadMorePaths, setPendingLoadMorePaths] = useState(new Set())
   const listFetchControllerRef = useRef(null)
   const listCursorRef = useRef(null)
+  const clientHostRef = useRef(null)
 
   // ── Host color map ──────────────────────────────────────────────────────
   const hostColorMap = useMemo(() => {
@@ -212,6 +213,7 @@ export default function App() {
         const matched = clientHost
           ? data.find(h => h.host.toLowerCase() === clientHost)
           : null
+        clientHostRef.current = matched?.host || null
         setSelectedHosts(
           matched
             ? new Set([matched.host])
@@ -305,14 +307,35 @@ export default function App() {
     return union
   }, [expandedPaths, dupAutoExpanded])
 
+  const clearCachedTreeDupMetrics = useCallback(() => {
+    for (const [key, entries] of cacheRef.current.entries()) {
+      if (!Array.isArray(entries)) continue
+      cacheRef.current.set(key, entries.map(entry => ({
+        ...entry,
+        dup_count: 0,
+        dup_hash_count: 0,
+        other_hosts: null,
+        is_hard_linked: false,
+      })))
+    }
+    setMetadataVersion(v => v + 1)
+  }, [])
+
   // ── When minDupSize changes, refresh dup metrics without collapsing tree ───
   useEffect(() => {
     minDupSizeRef.current = minDupSize
     dupMetricSegmentsRef.current.clear()
     dupMetricsInFlightRef.current.clear()
+    clearCachedTreeDupMetrics()
     if (viewMode === 'tree' && onlyDupsRef.current) setTreeMetricsRefreshing(true)
     setPaginationVersion(v => v + 1)
-  }, [minDupSize, viewMode])
+  }, [minDupSize, viewMode, clearCachedTreeDupMetrics])
+
+  useEffect(() => {
+    dupMetricSegmentsRef.current.clear()
+    dupMetricsInFlightRef.current.clear()
+    clearCachedTreeDupMetrics()
+  }, [selectedHosts, clearCachedTreeDupMetrics])
 
   useEffect(() => {
     if (viewMode !== 'tree' || !onlyDups) setTreeMetricsRefreshing(false)
@@ -562,14 +585,15 @@ export default function App() {
     setListLoading(true)
 
     try {
+      const hasHashSearch = debouncedHashQuery.length >= 4
       const params = {
         hosts: hostsCsv,
-        categories: categoryFilter.size > 0 ? [...categoryFilter].join(',') : undefined,
+        categories: !hasHashSearch && categoryFilter.size > 0 ? [...categoryFilter].join(',') : undefined,
         has_duplicates: onlyDups ? true : undefined,
-        min_size: minDupSize > 0 ? minDupSize : undefined,
+        min_size: !hasHashSearch && minDupSize > 0 ? minDupSize : undefined,
         path_contains: debouncedDirQuery.length >= 2 ? debouncedDirQuery : undefined,
         iname: debouncedFilenameQuery.length >= 2 ? `*${debouncedFilenameQuery}*` : undefined,
-        hash: debouncedHashQuery.length >= 4 ? debouncedHashQuery : undefined,
+        hash: hasHashSearch ? debouncedHashQuery : undefined,
         sort_by: listSortBy,
         sort_dir: sortDir,
         limit: 200,
@@ -865,6 +889,7 @@ export default function App() {
     setFilenameQuery('')
     setHashQuery('')
     setDirQuery('')
+    setViewMode('tree')
     setMatchedDirPaths(new Set())
     setCategoryFilter(new Set())
     setMinDupSize(0)
@@ -876,7 +901,9 @@ export default function App() {
     setListPendingDetail('')
     setOverlayNotice('')
     setListActionStack([])
-    setSelectedHosts(new Set(hosts.map(h => h.host)))
+    const detectedHost = clientHostRef.current
+    const stillAvailable = detectedHost && hosts.some(h => h.host === detectedHost)
+    setSelectedHosts(stillAvailable ? new Set([detectedHost]) : new Set(hosts.map(h => h.host)))
     setExpandedPaths(new Set())
     setDupAutoExpanded(new Map())
     setActiveDrive('')
@@ -1192,18 +1219,28 @@ export default function App() {
       if (pinnedResults !== null) pushOverlayState('file_dup_click_context')
       if (viewMode === 'list') pushListState('dup_hash_click_context')
       const files = await api.files({ hash: entry.hash, limit: 5000, lite: 1 })
+      const rows = files || []
+      const highlightPrefix = subtreeDupPath ? subtreeDupPath.toLowerCase() : null
+      const highlighted = highlightPrefix
+        ? rows
+            .filter(file => {
+              const key = toResultPathKey(file)
+              return key === highlightPrefix || key.startsWith(highlightPrefix + '/')
+            })
+            .map(toResultPathKey)
+        : rows.map(toResultPathKey)
       setOverlayNotice('')
-      setHighlightedPaths(new Set((files || []).map(toResultPathKey)))
+      setHighlightedPaths(new Set(highlighted))
       setPinnedSourcePath((entry.path_display || fullPath || '').toLowerCase())
       setSubtreeDupPath(null)
-      setPinnedResults(files || [])
+      setPinnedResults(rows)
       setHashQuery(entry.hash)
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('file dup-hash context lookup failed', err)
       setOverlayNotice('Could not load duplicate copies for this file')
     }
-  }, [pinnedResults, pushOverlayState, viewMode, pushListState, toResultPathKey])
+  }, [pinnedResults, pushOverlayState, viewMode, pushListState, toResultPathKey, subtreeDupPath])
 
   // ── Handle subtree list icon → show context for subtree-seeded dup hashes ──
   const handleDupSubtreeClick = useCallback(async (fullPath, entry) => {
@@ -1439,13 +1476,6 @@ export default function App() {
     })
 
     if (isPinnedCopiesMode) {
-      const sourceRow = hostFiltered.find(r => (r.entry.path_display || '').toLowerCase() === pinnedSourcePath)
-      const sourceBelowMinDupSize =
-        sourceRow && minDupSize > 0 && (sourceRow.entry.size_bytes || 0) < minDupSize
-
-      // If the clicked file is below min dup size, keep only that file in the copies view.
-      if (sourceBelowMinDupSize) return sourceRow ? [sourceRow] : []
-
       // In pinned copies view above threshold, all rows share the same hash and are duplicates.
       // hostFiltered.forEach(r => { r.entry.dup_count = 1 })
     }
@@ -1454,7 +1484,7 @@ export default function App() {
     if (subtreeDupPath) {
       // hostFiltered.forEach(r => { r.entry.dup_count = 1 })
     }
-    let filtered = categoryFilter.size > 0
+    let filtered = !isHashResultsMode && categoryFilter.size > 0
       ? hostFiltered.filter(r => categoryFilter.has(r.entry.file_category))
       : hostFiltered
 
@@ -1477,12 +1507,8 @@ export default function App() {
       }
     }
 
-    if (minDupSize > 0) {
-      filtered = filtered.filter(r => {
-        const isDup = r.entry.dup_count > 0 || hasSelectedOtherHost(r.entry.other_hosts, selectedHosts)
-        if (!isDup) return true
-        return (r.entry.size_bytes || 0) >= minDupSize
-      })
+    if (minDupSize > 0 && !isHashResultsMode) {
+      filtered = filtered.filter(r => (r.entry.size_bytes || 0) >= minDupSize)
     }
     // IMPORTANT: hash-result overlays are already hash-qualified and should not
     // be re-filtered by generic "Only dups" logic. Doing so can hide valid
@@ -1573,8 +1599,6 @@ export default function App() {
     if (minDupSize > 0) {
       filtered = filtered.filter(row => {
         if (row.entry.entry_type !== 'file') return true
-        const isDup = row.entry.dup_count > 0 || hasSelectedOtherHost(row.entry.other_hosts, selectedHosts)
-        if (!isDup) return true
         return (row.entry.size_bytes || 0) >= minDupSize
       })
     }
@@ -1789,6 +1813,7 @@ export default function App() {
 
   // ── Available categories — from unfiltered source so multi-select works ──
   const availableCategories = useMemo(() => {
+    if (viewMode === 'list' && !isSearchMode) return ALL_FILE_CATEGORIES
     const source = isSearchMode
       ? (activeResults ? activeResults.map(fe => fileEntryToRow(fe)) : [])
       : viewMode === 'list'
@@ -1945,6 +1970,7 @@ export default function App() {
           onDupHashContextClick={handleDupHashContextClick}
           onLoadMore={handleLoadMore}
           pendingLoadMorePaths={pendingLoadMorePaths}
+          subtreeDupOverlayActive={Boolean(subtreeDupPath)}
           highlightedPaths={highlightedPaths}
           matchedDirPaths={matchedDirPaths}
           expandedPaths={effectiveExpanded}

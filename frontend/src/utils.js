@@ -294,6 +294,8 @@ const DOC_EXTS   = new Set(['pdf','doc','docx','xls','xlsx','ppt','pptx','odt','
 const CODE_EXTS  = new Set(['py','js','ts','jsx','tsx','java','c','cpp','h','rs','go','rb','php','sh','bash','css','html','json','yaml','yml','toml','sql'])
 const ARCH_EXTS  = new Set(['zip','tar','gz','bz2','xz','rar','7z','tgz'])
 
+export const ALL_FILE_CATEGORIES = ['archive', 'audio', 'code', 'document', 'image', 'other', 'video']
+
 export function guessCategory(filename) {
   const ext = (filename.split('.').pop() || '').toLowerCase()
   if (IMAGE_EXTS.has(ext)) return 'image'

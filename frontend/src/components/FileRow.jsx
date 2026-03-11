@@ -42,7 +42,7 @@ const CELL_RENDERERS = {
     </td>
   ),
 
-  hash: ({ entry, extraCopies, fullPath, onDupHashClick, onDupSubtreeClick, onDupHashContextClick, hashFilterActive }) => {
+  hash: ({ entry, extraCopies, fullPath, onDupHashClick, onDupSubtreeClick, onDupHashContextClick, hashFilterActive, subtreeDupOverlayActive }) => {
     // For directories: show "uniq dup hashes" (stable set count) instead of "extra copies" (intra-redundancy).
     // This aligns with navigation visibility: if a dir is shown, it's because it leads to duplicate sets.
     const dirDupCount = entry.entry_type === 'dir' ? (entry.dup_hash_count || 0) : 0
@@ -81,11 +81,13 @@ const CELL_RENDERERS = {
           <span className="inline-flex items-center gap-1">
             <span
               className="text-[11px] text-amber-600 font-medium cursor-pointer hover:text-amber-800 hover:underline"
-              onClick={onDupHashClick ? e => { e.stopPropagation(); onDupHashClick(fullPath, entry) } : undefined}
+              onClick={subtreeDupOverlayActive
+                ? (onDupHashContextClick ? e => { e.stopPropagation(); onDupHashContextClick(fullPath, entry) } : undefined)
+                : (onDupHashClick ? e => { e.stopPropagation(); onDupHashClick(fullPath, entry) } : undefined)}
             >
               {extraCopies} extra cop{extraCopies !== 1 ? 'ies' : 'y'}
             </span>
-            {onDupHashContextClick && (
+            {onDupHashContextClick && !subtreeDupOverlayActive && (
               <span
                 className="text-[11px] text-blue-500 cursor-pointer hover:text-blue-700 font-medium select-none"
                 onClick={e => { e.stopPropagation(); onDupHashContextClick(fullPath, entry) }}
@@ -127,6 +129,7 @@ export default function FileRow({
   onDupHashClick,
   onDupSubtreeClick,
   onDupHashContextClick,
+  subtreeDupOverlayActive,
   highlightedPaths,
   matchedDirPaths,
   hostColorMap,
@@ -193,7 +196,7 @@ export default function FileRow({
     }
   }
 
-  const cellOpts = { entry, extraCopies, allHostsSet, hostColorMap, onTypeClick, fullPath, onDupHashClick, onDupSubtreeClick, onDupHashContextClick, hashFilterActive }
+  const cellOpts = { entry, extraCopies, allHostsSet, hostColorMap, onTypeClick, fullPath, onDupHashClick, onDupSubtreeClick, onDupHashContextClick, hashFilterActive, subtreeDupOverlayActive }
 
   return (
     <tr
