@@ -108,8 +108,8 @@ export default function FileTable({
       onScroll={e => setScrollTop(e.currentTarget.scrollTop)}
     >
       <table className="w-full text-left border-collapse">
-        <thead>
-          <tr className="border-b border-slate-200">
+        <thead className="sticky top-0 z-10">
+          <tr className="border-b border-slate-200 bg-white">
             {/* Name — always first */}
             <th
               className="pb-2 pr-3 text-[10px] uppercase tracking-widest text-slate-500 font-medium cursor-pointer select-none hover:text-slate-800 transition-colors"

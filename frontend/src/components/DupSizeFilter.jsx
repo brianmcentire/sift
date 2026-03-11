@@ -12,11 +12,11 @@ const PRESETS = [
 // Returns bytes as integer, or null if unparseable.
 function parseSize(str) {
   if (!str || !str.trim()) return null
-  const m = str.trim().match(/^(\d+(?:\.\d+)?)\s*([KMGT]i?B|B)?$/i)
+  const m = str.trim().match(/^(\d+(?:\.\d+)?)\s*([KMGT]i?B|[KMGT]|B)?$/i)
   if (!m) return null
   const num = parseFloat(m[1])
-  // Normalise: GiB → GB, MiB → MB, etc. (all treated as 1024-based)
-  const unit = (m[2] || 'B').toUpperCase().replace(/IB$/, 'B')
+  // Normalise: GiB → GB, MiB → MB, etc. (all treated as 1024-based); K → KB, M → MB, etc.
+  const unit = (m[2] || 'B').toUpperCase().replace(/IB$/, 'B').replace(/^([KMGT])$/, '$1B')
   const mult = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4 }
   if (!(unit in mult)) return null
   return Math.floor(num * mult[unit])
