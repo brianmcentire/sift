@@ -136,52 +136,17 @@ This will break if pip changes the JSON field ordering or escaping. Should use `
 
 ## 5. Frontend Code (App.jsx, api.js)
 
-### BUG — CRITICAL: Reset doesn't clear Min size (introduced in 81e0aaa)
+### Reset doesn't clear overlay result arrays — RESOLVED
 
-**File:** `App.jsx:895`
+`filenameResults`, `hashResults`, and `highlightedPaths` are now cleared in the reset
+handler (lines 899-901). `listItems`, `listCursor`, `listHasMore`, and `listLoading`
+are also cleared (lines 902-905).
 
-The `minDupSize→minSize` rename (commit 81e0aaa) updated state declarations and most
-callers, but missed the reset handler. Line 895 calls `setMinDupSize(0)` — a function
-that doesn't exist. `setMinSize` is the correct setter (declared at line 34).
+### categoryFilter change doesn't invalidate dup-metrics cache — RESOLVED
 
-**Impact:** Reset button silently fails to clear the min-size filter. Violates the
-Reset Contract ("clear all filters to defaults").
-
-### BUG — HIGH: Reset doesn't clear overlay result arrays
-
-**File:** `App.jsx:887-910`
-
-The reset handler clears query strings (`filenameQuery`, `hashQuery`, `dirQuery`) and
-some overlay state (`pinnedResults`, `subtreeDupPath`), but does NOT clear the result
-arrays: `filenameResults`, `hashResults`, `highlightedPaths`.
-
-Compare with `handleToggleViewMode` (lines 977-990), which correctly clears all three.
-
-**Impact:** Filename/hash search overlays and blue directory highlights survive reset.
-Violates "Clear all overlays" requirement.
-
-### BUG — HIGH: Reset doesn't clear list-view state
-
-**File:** `App.jsx:887-910`
-
-Missing clears: `listItems`, `listCursor`, `listHasMore`, `listLoading`.
-
-**Impact:** After reset (which switches to tree view via `setViewMode('tree')`), list-view
-holds orphaned pagination state. Next switch to list view shows stale data from the
-previous session.
-
-### BUG — HIGH: categoryFilter change doesn't invalidate dup-metrics cache
-
-**File:** `App.jsx:324-338`
-
-The `useEffect` that clears `dupMetricSegmentsRef` / `dupMetricsInFlightRef` watches
-`[minSize, viewMode]` (line 332) and `[selectedHosts]` (line 338) but NOT `categoryFilter`.
-
-Additionally, `metricKey` (line 432) is `${host}:${drive}:${path}:${minAtRequest}:${selectedScopeKey}`
-— it doesn't include categoryFilter, so cached metrics won't be refetched when categories change.
-
-**Contract:** `duplicate-semantics.md` § Badge and Count Freshness explicitly says category
-filter changes must invalidate cached dup metrics.
+`categoryFilter` is now in the invalidation `useEffect` dep array (line 338), and
+`categoriesCsv` is included in `metricKey` (line 433), so cached metrics are correctly
+invalidated and re-keyed when categories change.
 
 ### Overlay sorting — deferred (not a bug)
 
@@ -306,13 +271,21 @@ was lost in a commit rollback. Needs reimplementation.
 - `/stats/overview` returns `data_freshness` field
 - Category filter trap resolved (availableCategories from unfiltered source)
 - Host selection properly invalidates dup-metrics cache
+- Reset handler fully clears all filter, overlay, and list-view state
+- categoryFilter correctly invalidates dup-metrics cache (dep array + metricKey)
+- Windows drive tree path collision fixed (drive children namespaced as `__drive__:C/path`)
 
 ### Priority fixes
 
-1. **CRITICAL: `setMinDupSize(0)` → `setMinSize(0)` in reset handler** — rename missed this callsite
-2. **HIGH: Reset must clear `filenameResults`, `hashResults`, `highlightedPaths`** — overlays survive reset
-3. **HIGH: Reset must clear `listItems`, `listCursor`, `listHasMore`, `listLoading`** — stale list state
-4. **HIGH: Add `categoryFilter` to dup-metrics cache invalidation** — stale badges after category change
+All previously listed HIGH/CRITICAL frontend bugs have been resolved:
+
+1. ~~**CRITICAL: `setMinDupSize(0)` → `setMinSize(0)` in reset handler**~~ — RESOLVED
+2. ~~**HIGH: Reset must clear `filenameResults`, `hashResults`, `highlightedPaths`**~~ — RESOLVED
+3. ~~**HIGH: Reset must clear `listItems`, `listCursor`, `listHasMore`, `listLoading`**~~ — RESOLVED
+4. ~~**HIGH: Add `categoryFilter` to dup-metrics cache invalidation**~~ — RESOLVED
+
+Remaining:
+
 5. **Reimplement localStorage filter persistence** — `sift-filters` save/restore lost in rollback
 
 ### Considerations for future
