@@ -78,6 +78,7 @@ export default function App() {
   const [overlayBackStack, setOverlayBackStack] = useState([])
   const [treeMetricsRefreshing, setTreeMetricsRefreshing] = useState(false)
   const [driveDupHashCounts, setDriveDupHashCounts] = useState({})
+  const [pendingLoadMorePaths, setPendingLoadMorePaths] = useState(new Set())
   const listFetchControllerRef = useRef(null)
   const listCursorRef = useRef(null)
 
@@ -322,6 +323,7 @@ export default function App() {
     const loadMore = Boolean(opts.loadMore)
     const enrichDupMetrics = Boolean(opts.enrichDupMetrics)
     const awaitDupMetrics = Boolean(opts.awaitDupMetrics)
+    const delayVisibleTreeUpdate = loadMore && awaitDupMetrics
     const forceDrive = opts.drive  // optional explicit drive override
 
     const hasEmptyAncestor = (host, drive, fullPath) => {
@@ -390,8 +392,10 @@ export default function App() {
         next.delete(path)
         return next
       })
-      setStructureVersion(v => v + 1)
-      setPaginationVersion(v => v + 1)
+      if (!delayVisibleTreeUpdate) {
+        setStructureVersion(v => v + 1)
+        setPaginationVersion(v => v + 1)
+      }
     }
 
     if (!enrichDupMetrics) return
@@ -495,6 +499,11 @@ export default function App() {
 
     if (awaitDupMetrics) {
       await Promise.allSettled(metricPromises)
+    }
+
+    if (delayVisibleTreeUpdate) {
+      setStructureVersion(v => v + 1)
+      setPaginationVersion(v => v + 1)
     }
   }, [hostDrive, selectedHosts])
 
@@ -653,16 +662,80 @@ export default function App() {
     return false
   }, [selectedHosts, hostDrive])
 
-  const handleLoadMore = useCallback((path) => {
+  const countEligibleOnlyDupChildren = useCallback((path) => {
+    const hostDataMap = new Map()
+    activeHosts.forEach(h => {
+      const drive = hostDrive(h.host)
+      const key = `${h.host}:${drive}:${path}`
+      if (cacheRef.current.has(key)) {
+        hostDataMap.set(h.host, cacheRef.current.get(key))
+      }
+    })
+
+    const entries = mergeEntries(hostDataMap, selectedHosts)
+    return entries.filter(entry => {
+      if (entry.entry_type === 'dir') {
+        return (entry.dup_hash_count || 0) > 0
+      }
+      const isDup = entry.dup_count > 0 || hasSelectedOtherHost(entry.other_hosts, selectedHosts)
+      if (!isDup) return false
+      if (minDupSize > 0 && (entry.size_bytes || 0) < minDupSize) return false
+      if (categoryFilter.size > 0 && !categoryFilter.has(entry.file_category)) return false
+      return true
+    }).length
+  }, [activeHosts, hostDrive, selectedHosts, minDupSize, categoryFilter])
+
+  const handleLoadMore = useCallback(async (path) => {
     if (path === '__list__' && viewMode === 'list') {
       fetchListPage({ reset: false })
       return
     }
-    fetchPath(path, activeHosts, {
-      loadMore: true,
-      enrichDupMetrics: true,
+    let alreadyPending = false
+    setPendingLoadMorePaths(prev => {
+      if (prev.has(path)) {
+        alreadyPending = true
+        return prev
+      }
+      const next = new Set(prev)
+      next.add(path)
+      return next
     })
-  }, [fetchPath, activeHosts, viewMode, fetchListPage])
+    if (alreadyPending) return
+
+    const shouldAutoAdvance = viewMode === 'tree' && onlyDups
+    let beforeEligible = shouldAutoAdvance ? countEligibleOnlyDupChildren(path) : 0
+
+    try {
+      await fetchPath(path, activeHosts, {
+        loadMore: true,
+        enrichDupMetrics: true,
+        awaitDupMetrics: shouldAutoAdvance,
+      })
+
+      if (!shouldAutoAdvance) return
+
+      let attempts = 0
+      const started = performance.now()
+      while (attempts < 100 && hasMoreForPath(path) && (performance.now() - started) < 2500) {
+        const afterEligible = countEligibleOnlyDupChildren(path)
+        if (afterEligible > beforeEligible) break
+        beforeEligible = afterEligible
+        attempts += 1
+        await fetchPath(path, activeHosts, {
+          loadMore: true,
+          enrichDupMetrics: true,
+          awaitDupMetrics: true,
+        })
+      }
+    } finally {
+      setPendingLoadMorePaths(prev => {
+        if (!prev.has(path)) return prev
+        const next = new Set(prev)
+        next.delete(path)
+        return next
+      })
+    }
+  }, [fetchPath, activeHosts, viewMode, onlyDups, fetchListPage, hasMoreForPath, countEligibleOnlyDupChildren])
 
   // ── Fetch dup ancestor dirs for auto-expand ─────────────────────────────
   const fetchDupAncestors = useCallback(async (rootPath) => {
@@ -1563,34 +1636,6 @@ export default function App() {
         }
       })
 
-      // Pending-metrics fallback: tree/children returns dup_count=0 for all
-      // entries; real values arrive asynchronously from dup-metrics.  When an
-      // expanded kept dir has ALL children still at dup_count=0 &&
-      // dup_hash_count=0, assume metrics are in-flight and temporarily show
-      // all child dirs to avoid an empty-expanded-dir flash.
-      const childRowsByParent = new Map()
-      filtered.forEach(row => {
-        if (keepPaths.has(row.fullPath)) return
-        let list = childRowsByParent.get(row.parentPath)
-        if (!list) { list = []; childRowsByParent.set(row.parentPath, list) }
-        list.push(row)
-      })
-      for (const dirPath of keepPaths) {
-        if (!(effectiveExpanded.has(dirPath) || dirPath === currentPath)) continue
-        const ch = childRowsByParent.get(dirPath)
-        if (!ch || ch.length === 0) continue
-        // Check ALL children of this parent (not just un-kept dirs) for zero metrics
-        const allChildren = filtered.filter(c => c.parentPath === dirPath)
-        const metricsLoaded = allChildren.some(c =>
-          (c.entry.dup_count || 0) !== 0 || (c.entry.dup_hash_count || 0) !== 0
-        )
-        if (!metricsLoaded) {
-          // Preserve full visible branch (dirs + files) while metrics are in flight
-          // so changing min dup size does not appear to collapse navigation state.
-          ch.forEach(c => keepPaths.add(c.fullPath))
-        }
-      }
-
       // Preserve current expansion context only while dup metrics are actively
       // refreshing (e.g. after min-size changes). Outside refresh windows,
       // strict only-dups filtering should apply normally.
@@ -1899,6 +1944,7 @@ export default function App() {
           onDupSubtreeClick={handleDupSubtreeClick}
           onDupHashContextClick={handleDupHashContextClick}
           onLoadMore={handleLoadMore}
+          pendingLoadMorePaths={pendingLoadMorePaths}
           highlightedPaths={highlightedPaths}
           matchedDirPaths={matchedDirPaths}
           expandedPaths={effectiveExpanded}

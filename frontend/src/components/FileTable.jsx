@@ -37,6 +37,7 @@ export default function FileTable({
   onDupSubtreeClick,
   onDupHashContextClick,
   onLoadMore,
+  pendingLoadMorePaths,
   highlightedPaths,
   matchedDirPaths,
   expandedPaths,
@@ -177,10 +178,11 @@ export default function FileTable({
                   <td colSpan={colCount} className="py-1.5 pr-3">
                     <div style={{ paddingLeft: row.depth * 20 + 16 }}>
                       <button
-                        className="text-xs px-2 py-1 rounded border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                        className={`text-xs px-2 py-1 rounded border ${pendingLoadMorePaths?.has(row.path) ? 'border-slate-200 bg-slate-100 text-slate-400 cursor-wait' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`}
                         onClick={() => onLoadMore?.(row.path)}
+                        disabled={pendingLoadMorePaths?.has(row.path)}
                       >
-                        Load more
+                        {pendingLoadMorePaths?.has(row.path) ? 'Finding dups...' : 'Load more'}
                       </button>
                     </div>
                   </td>
