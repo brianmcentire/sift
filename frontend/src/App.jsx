@@ -335,7 +335,7 @@ export default function App() {
     dupMetricSegmentsRef.current.clear()
     dupMetricsInFlightRef.current.clear()
     clearCachedTreeDupMetrics()
-  }, [selectedHosts, clearCachedTreeDupMetrics])
+  }, [selectedHosts, categoryFilter, clearCachedTreeDupMetrics])
 
   useEffect(() => {
     if (viewMode !== 'tree' || !onlyDups) setTreeMetricsRefreshing(false)
@@ -425,11 +425,12 @@ export default function App() {
 
     const minAtRequest = minSizeRef.current
     const selectedScopeKey = [...selectedHosts].sort().join(',')
+    const categoriesCsv = [...categoryFilter].sort().join(',')
     const metricsTargets = hostList
       .map(h => {
         const drive = forceDrive !== undefined ? forceDrive : hostDrive(h.host)
         const key = `${h.host}:${drive}:${path}`
-        const metricKey = `${h.host}:${drive}:${path}:${minAtRequest}:${selectedScopeKey}`
+        const metricKey = `${h.host}:${drive}:${path}:${minAtRequest}:${selectedScopeKey}:${categoriesCsv}`
         const entries = cacheRef.current.get(key) || []
         if (!entries.length) return null
         if (dupMetricsInFlightRef.current.has(metricKey)) return null
@@ -889,11 +890,19 @@ export default function App() {
     setFilenameQuery('')
     setHashQuery('')
     setDirQuery('')
+    setDebouncedDirQuery('')
     setViewMode('tree')
     setMatchedDirPaths(new Set())
     setCategoryFilter(new Set())
-    setMinDupSize(0)
+    setMinSize(0)
     setOnlyDups(false)
+    setFilenameResults(null)
+    setHashResults(null)
+    setHighlightedPaths(new Set())
+    setListItems([])
+    setListCursor(null)
+    setListHasMore(false)
+    setListLoading(false)
     setPinnedResults(null)
     setPinnedSourcePath(null)
     setSubtreeDupPath(null)
