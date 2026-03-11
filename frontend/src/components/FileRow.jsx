@@ -42,7 +42,7 @@ const CELL_RENDERERS = {
     </td>
   ),
 
-  hash: ({ entry, extraCopies, fullPath, onDupHashClick, onDupSubtreeClick, onDupHashContextClick, hashFilterActive, subtreeDupOverlayActive }) => {
+  hash: ({ entry, extraCopies, fullPath, onDupHashClick, onDupSubtreeClick, onDupHashContextClick, hashFilterActive, subtreeDupOverlayActive, isListView }) => {
     // For directories: show "uniq dup hashes" (stable set count) instead of "extra copies" (intra-redundancy).
     // This aligns with navigation visibility: if a dir is shown, it's because it leads to duplicate sets.
     const dirDupCount = entry.entry_type === 'dir' ? (entry.dup_hash_count || 0) : 0
@@ -58,7 +58,7 @@ const CELL_RENDERERS = {
                   ? 'cursor-pointer hover:text-amber-800 hover:underline'
                   : ''
               }`}
-              title={onDupHashClick ? 'Show all files in these duplicate sets' : undefined}
+              title={onDupHashClick ? 'Show duplicate files in this subtree' : undefined}
               onClick={onDupHashClick
                 ? e => { e.stopPropagation(); onDupHashClick(fullPath, entry) }
                 : undefined}
@@ -68,7 +68,7 @@ const CELL_RENDERERS = {
             {onDupSubtreeClick && (
               <span
                 className="text-[11px] text-blue-500 cursor-pointer hover:text-blue-700 font-medium select-none"
-                title="Show duplicate files in subtree"
+                title="Show all copies including files outside this subtree"
                 onClick={e => { e.stopPropagation(); onDupSubtreeClick(fullPath, entry) }}
               >
                 ☰
@@ -81,13 +81,13 @@ const CELL_RENDERERS = {
           <span className="inline-flex items-center gap-1">
             <span
               className="text-[11px] text-amber-600 font-medium cursor-pointer hover:text-amber-800 hover:underline"
-              onClick={subtreeDupOverlayActive
+              onClick={(isListView || subtreeDupOverlayActive)
                 ? (onDupHashContextClick ? e => { e.stopPropagation(); onDupHashContextClick(fullPath, entry) } : undefined)
                 : (onDupHashClick ? e => { e.stopPropagation(); onDupHashClick(fullPath, entry) } : undefined)}
             >
               {extraCopies} extra cop{extraCopies !== 1 ? 'ies' : 'y'}
             </span>
-            {onDupHashContextClick && !subtreeDupOverlayActive && (
+            {onDupHashContextClick && !subtreeDupOverlayActive && !isListView && (
               <span
                 className="text-[11px] text-blue-500 cursor-pointer hover:text-blue-700 font-medium select-none"
                 onClick={e => { e.stopPropagation(); onDupHashContextClick(fullPath, entry) }}
@@ -138,6 +138,7 @@ export default function FileRow({
   minSize,
   orderedCols,
   filterActive,
+  isListView,
   hashFilterActive,
 }) {
   const isDir = entry.entry_type === 'dir'
@@ -198,7 +199,7 @@ export default function FileRow({
     }
   }
 
-  const cellOpts = { entry, extraCopies, allHostsSet, hostColorMap, onTypeClick, fullPath, onDupHashClick, onDupSubtreeClick, onDupHashContextClick, hashFilterActive, subtreeDupOverlayActive }
+  const cellOpts = { entry, extraCopies, allHostsSet, hostColorMap, onTypeClick, fullPath, onDupHashClick, onDupSubtreeClick, onDupHashContextClick, hashFilterActive, subtreeDupOverlayActive, isListView }
 
   return (
     <tr

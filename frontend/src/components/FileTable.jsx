@@ -45,6 +45,7 @@ export default function FileTable({
   expandedPaths,
   isLoading,
   filterActive,
+  isListView,
   hashFilterActive,
 }) {
   // Ordered list of visible non-name columns
@@ -215,6 +216,7 @@ export default function FileTable({
                   minSize={minSize}
                   orderedCols={orderedCols}
                   filterActive={filterActive}
+                  isListView={isListView}
                   hashFilterActive={hashFilterActive}
                 />
               ))}

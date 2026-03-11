@@ -2092,6 +2092,7 @@ export default function App() {
           expandedPaths={effectiveExpanded}
           isLoading={isLoading && !isSearchMode}
           filterActive={isSearchMode || viewMode === 'list'}
+          isListView={viewMode === 'list'}
           hashFilterActive={hashQuery.length >= 4}
         />
       </div>
