@@ -1629,7 +1629,55 @@ export default function App() {
         groupCount++
       }
       if (groupStartIdx >= 0) grouped[groupStartIdx].count = groupCount
-      return grouped
+      // Parse flat list into [{header, rows}] for group-level sorting
+      const groups = []
+      let curGroup = null
+      for (const item of grouped) {
+        if (item.isGroupHeader) {
+          if (curGroup) groups.push(curGroup)
+          curGroup = { header: item, rows: [] }
+        } else if (curGroup) {
+          curGroup.rows.push(item)
+        }
+      }
+      if (curGroup) groups.push(curGroup)
+      // Sort groups by a representative member value.
+      // asc → min-value member; desc → max-value member; compare in sortDir.
+      const getGroupKey = (rows) => {
+        if (!rows.length) return ''
+        switch (sortBy) {
+          case 'size':
+            return rows[0].entry.size_bytes || 0 // all members share same size
+          case 'date':
+            return sortDir === 'asc'
+              ? Math.min(...rows.map(r => r.entry.mtime || 0))
+              : Math.max(...rows.map(r => r.entry.mtime || 0))
+          case 'seen':
+            return sortDir === 'asc'
+              ? rows.map(r => r.entry.last_seen_at || '').reduce((a, b) => a < b ? a : b)
+              : rows.map(r => r.entry.last_seen_at || '').reduce((a, b) => a > b ? a : b)
+          case 'type':
+            return sortDir === 'asc'
+              ? rows.map(r => (r.entry.file_category || '').toLowerCase()).reduce((a, b) => a < b ? a : b)
+              : rows.map(r => (r.entry.file_category || '').toLowerCase()).reduce((a, b) => a > b ? a : b)
+          default: // name
+            return sortDir === 'asc'
+              ? rows.map(r => (r.entry.filename || '').toLowerCase()).reduce((a, b) => a < b ? a : b)
+              : rows.map(r => (r.entry.filename || '').toLowerCase()).reduce((a, b) => a > b ? a : b)
+        }
+      }
+      const sortedGroups = [...groups].sort((ga, gb) => {
+        if (sortBy === 'hash') {
+          const ha = ga.header.hash || '', hb = gb.header.hash || ''
+          return sortDir === 'asc' ? ha.localeCompare(hb) : hb.localeCompare(ha)
+        }
+        const ka = getGroupKey(ga.rows), kb = getGroupKey(gb.rows)
+        if (typeof ka === 'number') return sortDir === 'asc' ? ka - kb : kb - ka
+        return sortDir === 'asc'
+          ? String(ka).localeCompare(String(kb))
+          : String(kb).localeCompare(String(ka))
+      })
+      return sortedGroups.flatMap(g => [g.header, ...sortFileEntries(g.rows, sortBy, sortDir)])
     }
     return sortFileEntries(filtered, sortBy, sortDir)
   }, [
