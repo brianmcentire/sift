@@ -202,6 +202,9 @@ export default function FileRow({
 
   return (
     <tr
+      data-testid="tree-row"
+      data-entry-type={isDir ? 'dir' : 'file'}
+      data-path={fullPath}
       className={`
         group border-b border-slate-100
         ${isHighlighted ? 'bg-blue-100 hover:bg-blue-200' : showDupHighlight ? 'bg-amber-50 hover:bg-amber-100' : isHardLinked ? 'bg-orange-50 hover:bg-orange-100' : isMatchedDir ? 'bg-blue-50 hover:bg-blue-100' : 'hover:bg-slate-100'}

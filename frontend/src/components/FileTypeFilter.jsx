@@ -40,6 +40,7 @@ export default function FileTypeFilter({ value, onChange, categories }) {
   return (
     <div className="relative shrink-0" ref={ref}>
       <button
+        data-testid="file-type-filter"
         onClick={() => categories.length > 0 && setOpen(o => !o)}
         className={`
           text-sm px-2.5 py-1.5
@@ -58,6 +59,7 @@ export default function FileTypeFilter({ value, onChange, categories }) {
           {categories.map(cat => (
             <label
               key={cat}
+              data-testid={`category-chip-${cat}`}
               className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-slate-50 cursor-pointer text-sm text-slate-700 select-none"
             >
               <input

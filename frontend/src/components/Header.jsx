@@ -103,6 +103,7 @@ export default function Header({
 
           {/* Reset */}
           <button
+            data-testid="reset-button"
             onClick={onReset}
             title="Clear all filters and reset view"
             className="

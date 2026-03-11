@@ -951,15 +951,26 @@ export default function App() {
         return next
       })
     } else {
-      // Drive node expansion
+      // Drive node expansion — top-level (e.g. __drive__:C) or drive-context subpath (e.g. __drive__:C/Users)
       if (fullPath.startsWith('__drive__:')) {
-        const driveLabel = fullPath.split(':')[1]
-        setActiveDrive(driveLabel)
-        pendingExpandRef.current.set(fullPath, performance.now())
-        setExpandedPaths(prev => new Set([...prev, fullPath]))
-        // Fetch root path for this drive
-        const driveHosts = activeHosts.filter(h => h.drives && h.drives.includes(driveLabel))
-        fetchPath('/', driveHosts, { enrichDupMetrics: true, drive: driveLabel })
+        const slashIdx = fullPath.indexOf('/')
+        if (slashIdx === -1) {
+          // Top-level drive node: __drive__:C
+          const driveLabel = fullPath.slice('__drive__:'.length)
+          setActiveDrive(driveLabel)
+          pendingExpandRef.current.set(fullPath, performance.now())
+          setExpandedPaths(prev => new Set([...prev, fullPath]))
+          const driveHosts = activeHosts.filter(h => h.drives && h.drives.includes(driveLabel))
+          fetchPath('/', driveHosts, { enrichDupMetrics: true, drive: driveLabel })
+        } else {
+          // Drive-context subpath: __drive__:C/Users — expand without polluting Unix expandedPaths
+          const driveLabel = fullPath.slice('__drive__:'.length, slashIdx)
+          const realPath = fullPath.slice(slashIdx) // e.g. '/Users'
+          const driveHosts = activeHosts.filter(h => h.drives && h.drives.includes(driveLabel))
+          pendingExpandRef.current.set(fullPath, performance.now())
+          setExpandedPaths(prev => new Set([...prev, fullPath]))
+          fetchPath(realPath, driveHosts, { enrichDupMetrics: true, drive: driveLabel })
+        }
         return
       }
       // Normal expand
@@ -1126,9 +1137,12 @@ export default function App() {
         const hostsCsv = [...selectedHosts].join(',')
         if (!hostsCsv) return
         const categoriesCsv = categoryFilter.size > 0 ? [...categoryFilter].join(',') : ''
-        const isDriveNode = Boolean(entry.isDriveNode) || String(fullPath || '').startsWith('__drive__:')
-        const scopedPath = isDriveNode ? '/' : fullPath
-        const drive = isDriveNode ? (entry.driveLabel || activeDrive || '') : (activeDrive || '')
+        const fp = String(fullPath || '')
+        const isDriveTopLevel = Boolean(entry.isDriveNode) || (fp.startsWith('__drive__:') && !fp.includes('/'))
+        const isDriveSubPath = !isDriveTopLevel && fp.startsWith('__drive__:')
+        const driveSlash = isDriveSubPath ? fp.indexOf('/') : -1
+        const scopedPath = isDriveTopLevel ? '/' : isDriveSubPath ? fp.slice(driveSlash) : fp
+        const drive = isDriveTopLevel ? (entry.driveLabel || activeDrive || '') : isDriveSubPath ? fp.slice('__drive__:'.length, driveSlash) : (activeDrive || '')
         const data = await api.duplicatesBySubtreeHashes(
           hostsCsv,
           scopedPath,
@@ -1257,9 +1271,12 @@ export default function App() {
       const hostsCsv = [...selectedHosts].join(',')
       if (!hostsCsv) return
       const categoriesCsv = categoryFilter.size > 0 ? [...categoryFilter].join(',') : ''
-      const isDriveNode = Boolean(entry?.isDriveNode) || String(fullPath || '').startsWith('__drive__:')
-      const scopedPath = isDriveNode ? '/' : fullPath
-      const drive = isDriveNode ? (entry?.driveLabel || activeDrive || '') : (activeDrive || '')
+      const fp = String(fullPath || '')
+      const isDriveTopLevel = Boolean(entry?.isDriveNode) || (fp.startsWith('__drive__:') && !fp.includes('/'))
+      const isDriveSubPath = !isDriveTopLevel && fp.startsWith('__drive__:')
+      const driveSlash = isDriveSubPath ? fp.indexOf('/') : -1
+      const scopedPath = isDriveTopLevel ? '/' : isDriveSubPath ? fp.slice(driveSlash) : fp
+      const drive = isDriveTopLevel ? (entry?.driveLabel || activeDrive || '') : isDriveSubPath ? fp.slice('__drive__:'.length, driveSlash) : (activeDrive || '')
       const data = await api.duplicatesBySubtreeHashes(
         hostsCsv,
         scopedPath,
@@ -1389,7 +1406,8 @@ export default function App() {
           const entries = mergeEntries(hostDataMap, selectedHosts)
           const sorted = sortEntries(entries, sortBy, sortDir)
           for (const entry of sorted) {
-            const fullPath = joinPath('/', entry.segment)
+            // Namespace fullPath under __drive__:X to prevent collisions with Unix paths in effectiveExpanded
+            const fullPath = joinPath(`__drive__:${d}`, entry.segment)
             const fullDisplayPath = joinPath(`${d}:`, entry.segment_display || entry.segment)
             rows.push({ entry, parentPath: drivePath, fullPath, fullDisplayPath, depth: 1, driveContext: d })
             if (entry.entry_type === 'dir' && effectiveExpanded.has(fullPath)) {
@@ -1429,10 +1447,14 @@ export default function App() {
 
   // Helper for building rows within a specific drive context
   const buildRowsForDrive = useCallback((parentPath, depth, parentDisplayPath, drive) => {
+    // parentPath is namespaced: __drive__:C/Users — strip prefix to get cache path (/Users)
+    const drivePrefix = `__drive__:${drive}`
+    const cachePath = parentPath.startsWith(drivePrefix) ? parentPath.slice(drivePrefix.length) : parentPath
+
     const hostDataMap = new Map()
     activeHosts.forEach(h => {
       if (h.drives && h.drives.includes(drive)) {
-        const key = `${h.host}:${drive}:${parentPath}`
+        const key = `${h.host}:${drive}:${cachePath}`
         if (cacheRef.current.has(key)) {
           hostDataMap.set(h.host, cacheRef.current.get(key))
         }
@@ -1603,7 +1625,7 @@ export default function App() {
   const treeRows = useMemo(() => {
     const r = allTreeRows
     let filtered = categoryFilter.size > 0
-      ? r.filter(row => row.entry.entry_type === 'file' && categoryFilter.has(row.entry.file_category))
+      ? r.filter(row => row.entry.entry_type !== 'file' || categoryFilter.has(row.entry.file_category))
       : r
     if (minSize > 0) {
       filtered = filtered.filter(row => {

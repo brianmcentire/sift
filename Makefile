@@ -1,5 +1,5 @@
 .PHONY: dist-agent build-frontend dev-frontend clean help \
-	test-fast test-unit test-server test-integration-live smoke-local verify-local soak-local
+	test-fast test-unit test-server test-integration-live smoke-local verify-local soak-local test-e2e
 # Local targets (sync-db, deploy, etc.) live in local.mk — see bottom of this file
 
 help: ## Show available targets
@@ -38,6 +38,9 @@ verify-local: ## Fast local verification before deploy (tests + frontend build)
 
 soak-local: ## Run long soak/perf tests (manual usage only)
 	pytest -o addopts='' -m "soak or perf" -q
+
+test-e2e: ## Run Playwright e2e tests (requires sift server + make dev-frontend)
+	cd frontend && npx playwright test
 
 dist-agent: ## Build standalone sift binary for Linux x86_64 (Unraid)
 	mkdir -p dist
