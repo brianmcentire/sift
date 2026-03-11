@@ -16,7 +16,9 @@ class TestMaintenanceEndpoints:
         assert len(jobs) >= 1
         assert jobs[0]["job_type"] == "refresh_directory_index"
 
-    def test_run_now_requires_enabled_or_force(self, client):
+    def test_run_now_requires_enabled_or_force(self, client, monkeypatch):
+        import server.main as main_module
+        monkeypatch.setattr(main_module, "_MAINTENANCE_ENABLED", False)
         db_module.enqueue_maintenance_job("refresh_directory_index", priority=70)
         resp = client.post("/maintenance/run-now")
         assert resp.status_code == 200
