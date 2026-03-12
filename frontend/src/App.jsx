@@ -986,6 +986,8 @@ export default function App() {
     setExpandedPaths(new Set())
     setDupAutoExpanded(new Map())
     setActiveDrive('')
+    setSortBy('name')
+    setSortDir('asc')
   }, [hosts])
 
   // ── Toggle dir expansion ─────────────────────────────────────────────────
