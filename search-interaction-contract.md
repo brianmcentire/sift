@@ -29,6 +29,7 @@ Code is authoritative for current behavior and contracts, except where behavior 
   - Tree View: finds directories to open/expand (navigation aid), not a global file-row filter.
   - List View: maps to `path_contains` and filters paged rows by path match.
   - Overlay: applies only where explicitly supported by overlay rules below.
+  - Drive-qualified input: if the query starts with a drive letter prefix (e.g. `D:\videos` or `D:/videos`), the drive letter is extracted and used to constrain results to that drive. The path portion (after stripping the drive prefix) is used as the search term. In Tree View, only matching drive nodes are expanded. In List View, `path_contains` uses the stripped path and a `drive` filter constrains to the specified drive. If no drive prefix is present, all drives are searched.
 - Filename input (`filenameQuery`):
   - Tree View: drives filename-result overlay behavior.
   - List View: filters paged rows server-side.

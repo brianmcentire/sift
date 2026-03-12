@@ -443,9 +443,15 @@ class TestLiveDupHash:
 
 
 class TestLiveDirectories:
+    @staticmethod
+    def _all_hosts_csv(live_client):
+        hosts = get(live_client, "/hosts")
+        return ",".join(h["host"] for h in hosts)
+
     def test_all_results_contain_query(self, live_client):
         """Every returned dir_path must contain the query string (case-insensitive)."""
-        results = get(live_client, "/directories", q="users")
+        hosts = self._all_hosts_csv(live_client)
+        results = get(live_client, "/directories", q="users", hosts=hosts)
         for r in results:
             assert "users" in r["dir_path"].lower(), (
                 f"Result '{r['dir_path']}' does not contain 'users'"
@@ -453,19 +459,24 @@ class TestLiveDirectories:
 
     def test_short_query_returns_empty(self, live_client):
         """Single-char query should return []."""
-        results = get(live_client, "/directories", q="x")
+        hosts = self._all_hosts_csv(live_client)
+        results = get(live_client, "/directories", q="x", hosts=hosts)
         assert results == []
 
     def test_respects_limit(self, live_client):
-        results = get(live_client, "/directories", q="users", limit=3)
+        hosts = self._all_hosts_csv(live_client)
+        results = get(live_client, "/directories", q="users", hosts=hosts, limit=3)
         assert len(results) <= 3
 
     def test_result_has_required_fields(self, live_client):
-        results = get(live_client, "/directories", q="users", limit=1)
+        hosts = self._all_hosts_csv(live_client)
+        results = get(live_client, "/directories", q="users", hosts=hosts, limit=1)
         if not results:
             pytest.skip("No matching directories")
         assert "dir_path" in results[0]
         assert "dir_display" in results[0]
+        assert "host" in results[0]
+        assert "drive" in results[0]
 
     def test_matching_ancestors_included(self, live_client):
         """
@@ -482,19 +493,21 @@ class TestLiveDirectories:
         The UI expands betterzip.app to reveal Contents, but betterzip.app
         itself is not highlighted as a match.
         """
+        hosts = self._all_hosts_csv(live_client)
         q = "better"
-        results = get(live_client, "/directories", q=q, limit=100)
+        results = get(live_client, "/directories", q=q, hosts=hosts, limit=100)
         if not results:
             pytest.skip(f"No '{q}' directories in database — cannot test")
 
-        result_paths = {r["dir_path"] for r in results}
+        result_keys = {(r["host"], r["drive"], r["dir_path"]) for r in results}
 
         missing = []
         for r in results:
             parts = r["dir_path"].split("/")  # ['', 'users', 'brian', ...]
             for i in range(2, len(parts)):
                 ancestor = "/".join(parts[:i])
-                if q.lower() in ancestor.lower() and ancestor not in result_paths:
+                anc_key = (r["host"], r["drive"], ancestor)
+                if q.lower() in ancestor.lower() and anc_key not in result_keys:
                     missing.append((r["dir_path"], ancestor))
 
         assert not missing, (

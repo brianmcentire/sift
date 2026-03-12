@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { api, subscribeInFlightCount } from './api.js'
-import { ALL_FILE_CATEGORIES, joinPath, mergeEntries, sortEntries, hostColor, fileEntryToRow, sortFileEntries, logPerf, formatClipboardPath, hasSelectedOtherHost, shouldApplyOnlyDupsInSearch } from './utils.js'
+import { ALL_FILE_CATEGORIES, joinPath, mergeEntries, sortEntries, hostColor, fileEntryToRow, sortFileEntries, logPerf, formatClipboardPath, hasSelectedOtherHost, shouldApplyOnlyDupsInSearch, parseDirQuery, dirResultToUiPath, buildUiAncestors } from './utils.js'
 import Header from './components/Header.jsx'
 import StatsBar from './components/StatsBar.jsx'
 import FileTable from './components/FileTable.jsx'
@@ -148,6 +148,16 @@ export default function App() {
     const t = setTimeout(() => setDebouncedHashQuery(hashQuery), 250)
     return () => clearTimeout(t)
   }, [hashQuery])
+
+  // ── Parsed dir query (drive prefix extraction) ────────────────────────────
+  const parsedDirQuery = useMemo(() => parseDirQuery(debouncedDirQuery), [debouncedDirQuery])
+
+  // Map hostname → host object for dirResultToUiPath lookups
+  const hostMap = useMemo(() => {
+    const m = new Map()
+    hosts.forEach(h => m.set(h.host, h))
+    return m
+  }, [hosts])
 
   // ── Filename search (server-side) ────────────────────────────────────────
   useEffect(() => {
@@ -628,7 +638,8 @@ export default function App() {
         categories: !hasHashSearch && categoryFilter.size > 0 ? [...categoryFilter].join(',') : undefined,
         has_duplicates: onlyDups ? true : undefined,
         min_size: !hasHashSearch && minSize > 0 ? minSize : undefined,
-        path_contains: debouncedDirQuery.length >= 2 ? debouncedDirQuery : undefined,
+        path_contains: parsedDirQuery.pathQuery.length >= 2 ? parsedDirQuery.pathQuery : undefined,
+        drive: parsedDirQuery.drive || undefined,
         iname: debouncedFilenameQuery.length >= 2 ? `*${debouncedFilenameQuery}*` : undefined,
         hash: hasHashSearch ? debouncedHashQuery : undefined,
         sort_by: listSortBy,
@@ -674,7 +685,7 @@ export default function App() {
     categoryFilter,
     onlyDups,
     minSize,
-    debouncedDirQuery,
+    parsedDirQuery,
     debouncedFilenameQuery,
     debouncedHashQuery,
     listSortBy,
@@ -833,16 +844,22 @@ export default function App() {
       setMatchedDirPaths(new Set())
       return
     }
-    if (debouncedDirQuery.length < 2) {
+    const { drive: qDrive, pathQuery } = parsedDirQuery
+    if (pathQuery.length < 2) {
+      setMatchedDirPaths(new Set())
+      return
+    }
+    const hostsCsv = [...selectedHosts].join(',')
+    if (!hostsCsv) {
       setMatchedDirPaths(new Set())
       return
     }
     const controller = new AbortController()
     const started = performance.now()
-    api.directories(debouncedDirQuery, 50, { signal: controller.signal })
+    api.directories(pathQuery, 50, hostsCsv, qDrive, { signal: controller.signal })
       .then(dirs => {
         logPerf('search.directory', {
-          query_len: debouncedDirQuery.length,
+          query_len: pathQuery.length,
           ms: (performance.now() - started).toFixed(1),
           rows: Array.isArray(dirs) ? dirs.length : 0,
         })
@@ -852,14 +869,13 @@ export default function App() {
         }
         const toExpand = new Set()
         const matched = new Set()
+        const syntheticNodes = new Set() // drive nodes — expand but don't fetch
         dirs.forEach(d => {
-          const p = d.dir_path
-          matched.add(p)
-          // Add ancestor paths (not the match itself) so the tree opens down to each match
-          const parts = p.split('/').filter(Boolean)
-          for (let i = 1; i < parts.length; i++) {
-            toExpand.add('/' + parts.slice(0, i).join('/'))
-          }
+          const uiPath = dirResultToUiPath(d.host, d.drive, d.dir_path, hostMap)
+          matched.add(uiPath)
+          const { ancestors, driveNode } = buildUiAncestors(uiPath)
+          ancestors.forEach(a => toExpand.add(a))
+          if (driveNode) syntheticNodes.add(driveNode)
         })
         setMatchedDirPaths(matched)
         // Expand only non-matched ancestors — matched dirs stay collapsed for the user to open
@@ -870,8 +886,26 @@ export default function App() {
           return next
         })
         toExpand.forEach(p => {
-          if (!matched.has(p) && activeHosts.some(h => !cacheRef.current.has(`${h.host}:${hostDrive(h.host)}:${p}`))) {
-            fetchPath(p, activeHosts, { enrichDupMetrics: false })
+          if (matched.has(p) || syntheticNodes.has(p)) return
+          // Extract drive from __drive__:X prefixed paths for correct fetchPath context
+          let fetchDrive
+          let cachePath = p
+          if (p.startsWith('__drive__:')) {
+            const afterPrefix = p.slice('__drive__:'.length)
+            const slashIdx = afterPrefix.indexOf('/')
+            if (slashIdx > 0) {
+              fetchDrive = afterPrefix.slice(0, slashIdx)
+              cachePath = afterPrefix.slice(slashIdx)
+            } else {
+              return // bare drive node — don't fetch
+            }
+          }
+          const needsFetch = activeHosts.some(h => {
+            const d = fetchDrive !== undefined ? fetchDrive : hostDrive(h.host)
+            return !cacheRef.current.has(`${h.host}:${d}:${cachePath}`)
+          })
+          if (needsFetch) {
+            fetchPath(cachePath, activeHosts, { enrichDupMetrics: false, ...(fetchDrive !== undefined ? { drive: fetchDrive } : {}) })
           }
         })
       })
@@ -880,7 +914,7 @@ export default function App() {
         setMatchedDirPaths(new Set())
       })
     return () => controller.abort()
-  }, [debouncedDirQuery, activeHosts, fetchPath, hostDrive, viewMode])
+  }, [parsedDirQuery, selectedHosts, activeHosts, fetchPath, hostDrive, hostMap, viewMode])
 
   // Fetch currentPath whenever it, hosts, or lsFetchKey changes.
   // Always enrich dup metrics — with aggregate tables the call is fast,
@@ -1568,7 +1602,7 @@ export default function App() {
         filtered = filtered.filter(r => (r.entry.hash || '').toLowerCase().includes(hNeedle))
       }
 
-      const dNeedle = dirQuery.trim().toLowerCase()
+      const dNeedle = parsedDirQuery.pathQuery.trim().toLowerCase()
       if (dNeedle) {
         filtered = filtered.filter(r => (r.entry.path_display || '').toLowerCase().includes(dNeedle))
       }
@@ -1820,10 +1854,8 @@ export default function App() {
       const visiblePaths = new Set()
       matchedDirPaths.forEach(p => {
         visiblePaths.add(p)
-        const parts = p.split('/').filter(Boolean)
-        for (let i = 1; i < parts.length; i++) {
-          visiblePaths.add('/' + parts.slice(0, i).join('/'))
-        }
+        const { ancestors } = buildUiAncestors(p)
+        ancestors.forEach(a => visiblePaths.add(a))
       })
       // Show ancestors+matches, plus children of any expanded matched dir
       const filtered = treeRows.filter(row =>

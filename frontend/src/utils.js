@@ -306,3 +306,78 @@ export function guessCategory(filename) {
   if (ARCH_EXTS.has(ext))  return 'archive'
   return 'other'
 }
+
+// ─── Drive-aware directory search helpers ───────────────────────────────────
+
+const DRIVE_PREFIX_RE = /^([a-zA-Z]):[/\\]/
+
+/**
+ * Parse a raw directory query for an optional drive letter prefix.
+ * "D:\\videos" → { drive: 'D', pathQuery: '/videos' }
+ * "videos"    → { drive: '',  pathQuery: 'videos' }
+ */
+export function parseDirQuery(raw) {
+  const s = (raw || '').trim()
+  const m = DRIVE_PREFIX_RE.exec(s)
+  if (m) {
+    let remainder = s.slice(2) // strip "D:"
+    // Normalize to forward slash and ensure leading /
+    remainder = remainder.replace(/\\/g, '/')
+    if (!remainder.startsWith('/')) remainder = '/' + remainder
+    return { drive: m[1].toUpperCase(), pathQuery: remainder }
+  }
+  return { drive: '', pathQuery: s }
+}
+
+/**
+ * Convert a /directories API result to the UI-path form used in the tree.
+ * Multi-drive host + non-empty drive → "__drive__:D/users/videos"
+ * Single-drive or POSIX host         → "/users/videos"
+ *
+ * hostMap: Map<hostname, hostObj> where hostObj has .drives array
+ */
+export function dirResultToUiPath(host, drive, dirPath, hostMap) {
+  const h = hostMap.get(host)
+  const isMultiDrive = h && h.drives && h.drives.length > 1
+  if (isMultiDrive && drive) {
+    return `__drive__:${drive.toUpperCase()}${dirPath}`
+  }
+  return dirPath
+}
+
+/**
+ * Build ancestor UI paths for a given UI path.
+ * Returns { ancestors: string[], driveNode: string|null }.
+ *
+ * "__drive__:C/users/brian" → { ancestors: ["__drive__:C", "__drive__:C/users"], driveNode: "__drive__:C" }
+ * "/home/pi/videos"        → { ancestors: ["/home", "/home/pi"], driveNode: null }
+ *
+ * driveNode is the synthetic drive entry that should be expanded but NOT fetched.
+ */
+export function buildUiAncestors(uiPath) {
+  if (uiPath.startsWith('__drive__:')) {
+    const afterPrefix = uiPath.slice('__drive__:'.length) // "C/users/brian"
+    const slashIdx = afterPrefix.indexOf('/')
+    if (slashIdx < 0) {
+      // Path IS the drive node itself (e.g. "__drive__:C") — no ancestors
+      return { ancestors: [], driveNode: null }
+    }
+    const driveLetter = afterPrefix.slice(0, slashIdx) // "C"
+    const driveNode = `__drive__:${driveLetter}`
+    const subPath = afterPrefix.slice(slashIdx) // "/users/brian"
+    const parts = subPath.split('/').filter(Boolean) // ["users", "brian"]
+    const ancestors = [driveNode]
+    for (let i = 1; i < parts.length; i++) {
+      ancestors.push(`${driveNode}/${parts.slice(0, i).join('/')}`)
+    }
+    return { ancestors, driveNode }
+  }
+
+  // Plain POSIX path
+  const parts = uiPath.split('/').filter(Boolean)
+  const ancestors = []
+  for (let i = 1; i < parts.length; i++) {
+    ancestors.push('/' + parts.slice(0, i).join('/'))
+  }
+  return { ancestors, driveNode: null }
+}

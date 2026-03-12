@@ -227,9 +227,12 @@ CREATE TABLE IF NOT EXISTS host_hash_stats (
 );
 
 CREATE TABLE IF NOT EXISTS directory_index (
-    dir_path        TEXT PRIMARY KEY,
+    host            TEXT NOT NULL,
+    drive           TEXT NOT NULL DEFAULT '',
+    dir_path        TEXT NOT NULL,
     dir_display     TEXT,
-    updated_at      TIMESTAMPTZ NOT NULL
+    updated_at      TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (host, drive, dir_path)
 );
 
 CREATE TABLE IF NOT EXISTS aggregate_meta (
@@ -268,7 +271,6 @@ CREATE INDEX IF NOT EXISTS idx_files_category  ON files(file_category);
 CREATE INDEX IF NOT EXISTS idx_files_seen      ON files(host, last_seen_at);
 CREATE INDEX IF NOT EXISTS idx_files_host_path ON files(host, path);
 CREATE INDEX IF NOT EXISTS idx_files_host_hash ON files(host, hash);
-CREATE INDEX IF NOT EXISTS idx_dir_index_path ON directory_index(dir_path);
 CREATE INDEX IF NOT EXISTS idx_maintenance_jobs_status_priority ON maintenance_jobs(status, priority, created_at);
 """
 
@@ -328,6 +330,28 @@ def _run_migrations(conn: duckdb.DuckDBPyConnection) -> None:
             FROM files WHERE skipped_reason IS NULL GROUP BY host
         """)
 
+    # Migrate directory_index to host/drive-aware schema (pre-0.9.7 databases).
+    di_cols = {
+        row[0]
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'directory_index'"
+        ).fetchall()
+    }
+    if "host" not in di_cols:
+        conn.execute("DROP INDEX IF EXISTS idx_dir_index_path")
+        conn.execute("DROP TABLE IF EXISTS directory_index")
+        conn.execute("""
+            CREATE TABLE directory_index (
+                host        TEXT NOT NULL,
+                drive       TEXT NOT NULL DEFAULT '',
+                dir_path    TEXT NOT NULL,
+                dir_display TEXT,
+                updated_at  TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY (host, drive, dir_path)
+            )
+        """)
+        conn.execute("CREATE INDEX idx_dir_index_host_path ON directory_index(host, dir_path)")
+
     dir_row = conn.execute("SELECT COUNT(*) FROM directory_index").fetchone()
     dir_count = dir_row[0] if dir_row else 0
     file_row = conn.execute("SELECT COUNT(*) FROM files").fetchone()
@@ -335,16 +359,22 @@ def _run_migrations(conn: duckdb.DuckDBPyConnection) -> None:
     if dir_count == 0 and file_count > 0:
         conn.execute(
             """
-            INSERT INTO directory_index (dir_path, dir_display, updated_at)
+            INSERT INTO directory_index (host, drive, dir_path, dir_display, updated_at)
             SELECT
+                host,
+                drive,
                 regexp_replace(path, '/[^/]+$', '') AS dir_path,
                 ANY_VALUE(regexp_replace(path_display, '/[^/]+$', '')) AS dir_display,
                 now()
             FROM files
-            GROUP BY regexp_replace(path, '/[^/]+$', '')
+            GROUP BY host, drive, regexp_replace(path, '/[^/]+$', '')
             HAVING regexp_replace(path, '/[^/]+$', '') != ''
             """
         )
+
+    # Ensure directory_index index exists — covers both fresh DBs (table created
+    # by SCHEMA_SQL with correct schema) and migrated DBs (table just recreated).
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dir_index_host_path ON directory_index(host, dir_path)")
 
 
 def init_db(db_path: str | None = None) -> None:
@@ -553,13 +583,15 @@ def refresh_directory_index() -> None:
         conn.execute("DELETE FROM directory_index")
         conn.execute(
             """
-            INSERT INTO directory_index (dir_path, dir_display, updated_at)
+            INSERT INTO directory_index (host, drive, dir_path, dir_display, updated_at)
             SELECT
+                host,
+                drive,
                 regexp_replace(path, '/[^/]+$', '') AS dir_path,
                 ANY_VALUE(regexp_replace(path_display, '/[^/]+$', '')) AS dir_display,
                 now()
             FROM files
-            GROUP BY regexp_replace(path, '/[^/]+$', '')
+            GROUP BY host, drive, regexp_replace(path, '/[^/]+$', '')
             """
         )
         conn.execute("COMMIT")

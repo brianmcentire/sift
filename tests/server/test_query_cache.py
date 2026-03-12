@@ -105,14 +105,14 @@ class TestDirectoryCacheInvalidation:
             json=[make_file(path="/users/brian/first/a.txt", filename="a.txt")],
         )
 
-        first = client.get("/directories", params={"q": "users/brian", "limit": 50})
+        first = client.get("/directories", params={"q": "users/brian", "hosts": "mac", "limit": 50})
         assert first.status_code == 200
         first_paths = {r["dir_path"] for r in first.json()}
         assert "/users/brian/first" in first_paths
         assert "/users/brian/second" not in first_paths
 
         # Prime cache.
-        second = client.get("/directories", params={"q": "users/brian", "limit": 50})
+        second = client.get("/directories", params={"q": "users/brian", "hosts": "mac", "limit": 50})
         assert second.status_code == 200
 
         client.post(
@@ -120,7 +120,12 @@ class TestDirectoryCacheInvalidation:
             json=[make_file(path="/users/brian/second/b.txt", filename="b.txt")],
         )
 
-        third = client.get("/directories", params={"q": "users/brian", "limit": 50})
+        third = client.get("/directories", params={"q": "users/brian", "hosts": "mac", "limit": 50})
         assert third.status_code == 200
         third_paths = {r["dir_path"] for r in third.json()}
         assert "/users/brian/second" in third_paths
+
+        # Verify response includes host and drive fields
+        for r in third.json():
+            assert "host" in r
+            assert "drive" in r

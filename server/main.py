@@ -2297,6 +2297,7 @@ def list_files_page(
     hosts: str = Query(..., description="Comma-separated selected hosts"),
     categories: Optional[str] = None,
     path_contains: Optional[str] = None,
+    drive: str = Query("", description="Optional drive letter filter (e.g. 'C')"),
     min_size: Optional[int] = None,
     max_size: Optional[int] = None,
     has_duplicates: Optional[bool] = None,
@@ -2376,6 +2377,11 @@ def list_files_page(
     if path_contains:
         conditions.append("LOWER(f.path) LIKE '%' || ? || '%'")
         where_params.append(path_contains.lower())
+
+    drive_upper = drive.strip().upper() if drive else ""
+    if drive_upper:
+        conditions.append("f.drive = ?")
+        where_params.append(drive_upper)
 
     if min_size is not None:
         conditions.append("f.size_bytes >= ?")
@@ -3747,13 +3753,21 @@ def stats_duplicates(
 
 
 @app.get("/directories")
-def list_directories(q: str = "", limit: int = Query(20, le=100)):
+def list_directories(
+    hosts: str = Query(..., description="Comma-separated selected hosts"),
+    q: str = "",
+    drive: str = Query("", description="Optional drive letter filter (e.g. 'C')"),
+    limit: int = Query(20, le=100),
+):
     req_start = time.monotonic()
     q = q.strip()
-    if len(q) < 2:
+    host_list = [h.strip() for h in hosts.split(",") if h.strip()]
+    drive_upper = drive.strip().upper()
+    if len(q) < 2 or not host_list:
         _log_perf("/directories", req_start, query_len=len(q), limit=limit, rows=0)
         return []
-    cache_key = (q.lower(), limit)
+    hosts_key = ",".join(sorted(host_list))
+    cache_key = (q.lower(), hosts_key, drive_upper, limit)
     cached = _cache_get(_directories_cache, cache_key)
     if cached is not None:
         _log_perf(
@@ -3765,12 +3779,25 @@ def list_directories(q: str = "", limit: int = Query(20, le=100)):
             cache="hit",
         )
         return cached
+
+    # Build dynamic host/drive filter
+    host_ph = ", ".join(["?"] * len(host_list))
+    host_filter = f"AND host IN ({host_ph})"
+    host_params = list(host_list)
+    drive_filter = ""
+    drive_params: list = []
+    if drive_upper:
+        drive_filter = "AND drive = ?"
+        drive_params = [drive_upper]
+
     rows = db.query(
-        """
-        SELECT dir_path, dir_display
+        f"""
+        SELECT host, drive, dir_path, dir_display
         FROM directory_index
         WHERE dir_path != ''
           AND lower(dir_path) LIKE '%' || lower(?) || '%'
+          {host_filter}
+          {drive_filter}
         ORDER BY
           CASE
             WHEN lower(regexp_extract(dir_path, '[^/]+$')) = lower(?) THEN 0
@@ -3782,17 +3809,21 @@ def list_directories(q: str = "", limit: int = Query(20, le=100)):
           dir_path
         LIMIT ?
         """,
-        [q, q, q, q, q, limit],
+        [q] + host_params + drive_params + [q, q, q, q, limit],
     )
     if not rows:
         rows = db.query(
-            """
-            SELECT dir_path, dir_display FROM (
+            f"""
+            SELECT host, drive, dir_path, dir_display FROM (
                 SELECT
+                    host,
+                    drive,
                     regexp_replace(path, '/[^/]+$', '') AS dir_path,
                     ANY_VALUE(regexp_replace(path_display, '/[^/]+$', '')) AS dir_display
                 FROM files
-                GROUP BY regexp_replace(path, '/[^/]+$', '')
+                WHERE host IN ({host_ph})
+                  {drive_filter}
+                GROUP BY host, drive, regexp_replace(path, '/[^/]+$', '')
                 HAVING regexp_replace(path, '/[^/]+$', '') != ''
             ) sub
             WHERE lower(dir_path) LIKE '%' || lower(?) || '%'
@@ -3807,32 +3838,37 @@ def list_directories(q: str = "", limit: int = Query(20, le=100)):
               dir_path
             LIMIT ?
             """,
-            [q, q, q, q, q, limit],
+            host_params + drive_params + [q, q, q, q, q, limit],
         )
-    results = {r[0]: r[1] or r[0] for r in rows}
+
+    # Key by (host, drive, dir_path) to preserve per-host/drive identity
+    results: dict[tuple, str] = {}
+    for r in rows:
+        key = (r[0], r[1], r[2])  # host, drive, dir_path
+        results[key] = r[3] or r[2]
 
     # Also include any ancestor paths that contain the query but have no files
     # directly in them (e.g. BetterZip.app only has files in Contents/).
     # Without this the UI expands the ancestor as a non-highlighted node.
     q_lower = q.lower()
-    extra = {}
-    for dir_path in list(results):
-        parts = dir_path.split(
-            "/"
-        )  # ['', 'users', 'brian', 'downloads', 'betterzip.app', ...]
+    extra: dict[tuple, str] = {}
+    for (host, drv, dir_path) in list(results):
+        parts = dir_path.split("/")
         for i in range(2, len(parts)):
             ancestor = "/".join(parts[:i])
+            anc_key = (host, drv, ancestor)
             if (
                 q_lower in ancestor.lower()
-                and ancestor not in results
-                and ancestor not in extra
+                and anc_key not in results
+                and anc_key not in extra
             ):
-                extra[ancestor] = ancestor  # no display path available; use raw path
+                extra[anc_key] = ancestor
 
     results.update(extra)
     output = [
-        {"dir_path": p, "dir_display": results[p]} for p in sorted(results)[:limit]
-    ]
+        {"host": k[0], "drive": k[1], "dir_path": k[2], "dir_display": v}
+        for k, v in sorted(results.items(), key=lambda kv: (kv[0][2], kv[0][0], kv[0][1]))
+    ][:limit]
     _log_perf(
         "/directories",
         req_start,

@@ -109,6 +109,6 @@ export const api = {
   filesPage: (params, options = {}) => get('/files/page', params, options),
   files: (params, options = {}) => get('/files', params, options),
   stats: (params = {}, options = {}) => get('/stats/overview', params, options),
-  directories: (q, limit = 10, options = {}) => get('/directories', { q, limit }, options),
+  directories: (q, limit = 10, hosts = '', drive = '', options = {}) => get('/directories', { q, limit, hosts, drive: drive || undefined }, options),
   clientHost: (options = {}) => get('/client-host', {}, options),
 }
