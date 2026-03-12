@@ -43,6 +43,12 @@ def client():
     """FastAPI TestClient backed by the in-memory DB."""
     # lifespan fires init_db() but _conn is already set → guard skips it
     with TestClient(app) as c:
+        # Wait for the startup-refresh thread to finish so it doesn't race
+        # with test assertions (e.g. aggregate freshness state).
+        from server.main import _startup_thread
+
+        if _startup_thread is not None:
+            _startup_thread.join(timeout=5.0)
         yield c
 
 

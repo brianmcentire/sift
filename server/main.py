@@ -69,6 +69,7 @@ _DUP_METRICS_LIVE_MAX_FILES = int(
 )
 _maintenance_stop_event = threading.Event()
 _maintenance_thread: threading.Thread | None = None
+_startup_thread: threading.Thread | None = None
 _maintenance_lock = threading.Lock()
 _last_api_activity = time.monotonic()
 
@@ -152,6 +153,8 @@ from server.models import (
 
 def _startup_refresh() -> None:
     """Refresh host_stats (cheap) then bootstrap aggregates if needed."""
+    if _maintenance_stop_event.is_set():
+        return
     try:
         hosts = db.query("SELECT DISTINCT host FROM files")
         for (host,) in hosts:
@@ -170,6 +173,8 @@ def _bootstrap_aggregates() -> None:
     Runs in a background thread so server startup isn't blocked.
     """
     try:
+        if _maintenance_stop_event.is_set():
+            return
         hhs_row = db.query_one("SELECT COUNT(*) FROM host_hash_stats")
         hhs_count = int(hhs_row[0]) if hhs_row else 0
         if hhs_count > 0:
@@ -182,6 +187,8 @@ def _bootstrap_aggregates() -> None:
             return
 
         for (host,) in hosts_with_files:
+            if _maintenance_stop_event.is_set():
+                return
             logger.info("Bootstrapping aggregates for host %s ...", host)
             start = time.monotonic()
             db.refresh_host_hash_stats(host)
@@ -189,18 +196,24 @@ def _bootstrap_aggregates() -> None:
             elapsed = time.monotonic() - start
             logger.info("Bootstrapped host_hash_stats for %s in %.1fs", host, elapsed)
 
+        if _maintenance_stop_event.is_set():
+            return
         logger.info("Bootstrapping global hash_stats ...")
         start = time.monotonic()
         db.refresh_hash_stats()
         db.set_aggregate_meta("hash_stats", "fresh")
         logger.info("Bootstrapped hash_stats in %.1fs", time.monotonic() - start)
 
+        if _maintenance_stop_event.is_set():
+            return
         logger.info("Bootstrapping directory_index ...")
         start = time.monotonic()
         db.refresh_directory_index()
         db.set_aggregate_meta("directory_index", "fresh")
         logger.info("Bootstrapped directory_index in %.1fs", time.monotonic() - start)
 
+        if _maintenance_stop_event.is_set():
+            return
         _invalidate_query_caches()
         logger.info("Aggregate bootstrap complete.")
     except Exception:
@@ -241,11 +254,14 @@ async def lifespan(app: FastAPI):
         )
         _maintenance_thread.start()
     # Refresh host_stats on startup (cheap) and bootstrap aggregates if empty
-    threading.Thread(
+    global _startup_thread
+    t = threading.Thread(
         target=_startup_refresh,
         daemon=True,
         name="startup-refresh",
-    ).start()
+    )
+    t.start()
+    _startup_thread = t
     try:
         yield
     finally:
@@ -253,6 +269,20 @@ async def lifespan(app: FastAPI):
         if _maintenance_thread and _maintenance_thread.is_alive():
             _maintenance_thread.join(timeout=1.0)
         _maintenance_thread = None
+        if _startup_thread is not None and _startup_thread.is_alive():
+            _startup_thread.join(timeout=2.0)
+            if _startup_thread.is_alive():
+                logger.warning("startup-refresh thread did not exit within 2s")
+        _startup_thread = None
+        # Join any outstanding stats-refresh threads
+        with _stats_refresh_lock:
+            threads = list(_stats_refresh_threads.values())
+            _stats_refresh_threads.clear()
+        for t in threads:
+            if t.is_alive():
+                t.join(timeout=2.0)
+                if t.is_alive():
+                    logger.warning("stats-refresh thread %s did not exit within 2s", t.name)
 
 
 # ---------------------------------------------------------------------------
@@ -262,30 +292,42 @@ async def lifespan(app: FastAPI):
 _STATS_REFRESH_INTERVAL = 60  # seconds between mid-scan refreshes
 _last_stats_refresh: dict[str, float] = {}  # host -> monotonic time
 _stats_refresh_lock = threading.Lock()
+_stats_refresh_threads: dict[str, threading.Thread] = {}
 
 
 def _maybe_refresh_host_stats(host: str) -> None:
-    """Refresh host_stats if it's been ≥10 min since last refresh for this host.
+    """Refresh host_stats if it's been ≥60s since last refresh for this host.
 
     Runs in a background thread so it doesn't add latency to the flush response.
-    Skips if a refresh is already in progress for this host.
+    Skips if a refresh is already in progress for this host or shutdown is underway.
     """
+    if _maintenance_stop_event.is_set():
+        return
     now = time.monotonic()
     with _stats_refresh_lock:
         if now - _last_stats_refresh.get(host, 0) < _STATS_REFRESH_INTERVAL:
+            return
+        # Skip if a refresh thread for this host is still alive
+        existing = _stats_refresh_threads.get(host)
+        if existing is not None and existing.is_alive():
             return
         _last_stats_refresh[host] = now
 
     def _do_refresh():
         try:
+            if _maintenance_stop_event.is_set():
+                return
             db.refresh_host_stats(host)
             _invalidate_query_caches()
         except Exception:
             pass
 
-    threading.Thread(
+    t = threading.Thread(
         target=_do_refresh, daemon=True, name=f"stats-refresh-{host}"
-    ).start()
+    )
+    t.start()
+    with _stats_refresh_lock:
+        _stats_refresh_threads[host] = t
 
 
 app = FastAPI(title="sift", version="0.9.3", lifespan=lifespan)
