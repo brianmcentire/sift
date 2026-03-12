@@ -129,7 +129,12 @@ export default function Header({
               />
             </div>
 
-            <div className="shrink-0 flex items-center gap-2 text-[11px] text-slate-500">
+            <div
+              data-testid="api-activity"
+              data-state={apiPendingCount > 0 ? 'busy' : 'idle'}
+              data-count={String(apiPendingCount)}
+              className="shrink-0 flex items-center gap-2 text-[11px] text-slate-500"
+            >
               <span>API</span>
               {apiPendingCount > 0 ? (
                 <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-blue-700 font-medium">

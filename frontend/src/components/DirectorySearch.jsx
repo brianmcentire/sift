@@ -5,6 +5,7 @@ export default function DirectorySearch({ value, onChange, placeholder = 'direct
         🔍
       </span>
       <input
+        data-testid="directory-search"
         type="text"
         value={value}
         onChange={e => onChange(e.target.value)}
