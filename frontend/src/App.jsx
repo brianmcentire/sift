@@ -451,8 +451,9 @@ export default function App() {
             nextCursor: data?.next_cursor || null,
           })
         } catch {
-          cacheRef.current.set(key, [])
-          treePageStateRef.current.set(key, { hasMore: false, nextCursor: null })
+          // Do NOT cache [] on error — a transient failure must not
+          // poison the cache and permanently hide real data.
+          // Leave the key absent so the next render retries.
         }
       }))
 
