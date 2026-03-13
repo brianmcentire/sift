@@ -53,6 +53,7 @@ const CELL_RENDERERS = {
         dirDupCount > 0 ? (
           <span className="inline-flex items-center gap-1">
             <span
+              data-testid="dup-badge"
               className={`text-[11px] text-amber-600 font-medium ${
                 onDupHashClick
                   ? 'cursor-pointer hover:text-amber-800 hover:underline'

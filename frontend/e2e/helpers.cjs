@@ -103,6 +103,22 @@ async function clickReset(page) {
   await waitForApiIdle(page)
 }
 
+async function clickDupBadge(page, row) {
+  const badge = row.locator('[data-testid="dup-badge"]')
+  await expect(badge).toBeVisible({ timeout: 5_000 })
+  await badge.click()
+  await waitForApiIdle(page)
+}
+
+async function expectOverlayHasRows(page) {
+  // The pinned overlay should show file rows
+  const rows = page.locator('[data-testid="tree-row"]')
+  await expect(rows.first()).toBeVisible({ timeout: 10_000 })
+  // The "no matches" notice should NOT appear
+  const notice = page.locator('[data-testid="overlay-notice"]')
+  await expect(notice).toHaveCount(0)
+}
+
 module.exports = {
   escapeRegex,
   waitForApiIdle,
@@ -117,4 +133,6 @@ module.exports = {
   toggleDupOnly,
   setHashSearch,
   clickReset,
+  clickDupBadge,
+  expectOverlayHasRows,
 }

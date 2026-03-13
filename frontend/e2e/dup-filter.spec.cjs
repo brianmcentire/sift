@@ -8,6 +8,8 @@ const {
   toggleDupOnly,
   waitForApiIdle,
   waitForTreeReady,
+  clickDupBadge,
+  expectOverlayHasRows,
 } = require('./helpers.cjs')
 
 test.describe('dup-only toggle', () => {
@@ -145,5 +147,68 @@ test.describe('dup-only + min-size combined', () => {
     // Just verify the page didn't break - dirs should still be navigable
     const dirsAfter = await dirRows.count()
     expect(dirsAfter).toBeGreaterThanOrEqual(0) // may be 0 if no large dups
+  })
+})
+
+test.describe('dup badge click-through', () => {
+  test.beforeEach(async ({ page }) => {
+    await gotoCleanAndSettle(page)
+  })
+
+  test('clicking dir dup badge shows overlay with results', async ({ page }) => {
+    await selectHost(page, 'Brians-M2ProMBP')
+    await toggleDupOnly(page)
+    await waitForTreeReady(page)
+
+    // Find a dir row that has dup_count > 0 (it will have a dup badge)
+    const dirWithDups = page.locator(
+      '[data-testid="tree-row"][data-entry-type="dir"]'
+    ).filter({
+      has: page.locator('[data-testid="dup-badge"]'),
+    }).first()
+    await expect(dirWithDups).toBeVisible({ timeout: 10_000 })
+
+    // Click the dup badge
+    await clickDupBadge(page, dirWithDups)
+
+    // Overlay should show results, not the "no matches" notice
+    await expectOverlayHasRows(page)
+
+    // Verify "← Back" button is available and click it to restore tree
+    const backBtn = page.getByRole('button', { name: '← Back' })
+    await expect(backBtn).toBeVisible({ timeout: 5_000 })
+    await backBtn.click()
+    await waitForApiIdle(page)
+
+    // Tree should be restored with dir rows visible again
+    const dirRows = page.locator('[data-testid="tree-row"][data-entry-type="dir"]')
+    await expect(dirRows.first()).toBeVisible({ timeout: 10_000 })
+  })
+
+  test('clicking dir dup badge after min-size change still shows results', async ({ page }) => {
+    await selectHost(page, 'Brians-M2ProMBP')
+    await toggleDupOnly(page)
+    await waitForTreeReady(page)
+
+    // Set a min-size filter first to exercise the cache interaction
+    await setMinSize(page, '1 MB')
+    await page.waitForTimeout(500)
+    await waitForApiIdle(page)
+
+    // Find a dir that still has a dup badge after min-size filtering
+    const dirWithDups = page.locator(
+      '[data-testid="tree-row"][data-entry-type="dir"]'
+    ).filter({
+      has: page.locator('[data-testid="dup-badge"]'),
+    }).first()
+
+    // If no dirs have dups at this min-size, skip gracefully
+    const count = await dirWithDups.count()
+    if (count === 0) return
+
+    await clickDupBadge(page, dirWithDups)
+
+    // Overlay should show results, not the stale-cache "no matches" error
+    await expectOverlayHasRows(page)
   })
 })
