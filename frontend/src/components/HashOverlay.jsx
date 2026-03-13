@@ -4,7 +4,7 @@ import HashCell from './HashCell.jsx'
 
 export default function HashOverlay({ results, hashQuery, hostColorMap, onClose }) {
   return (
-    <div className="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden flex flex-col max-h-[80vh]">
+    <div data-testid="hash-overlay" className="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden flex flex-col max-h-[80vh]">
       {/* Overlay header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100 bg-slate-50">
         <div className="flex items-center gap-2">

@@ -45,6 +45,7 @@ export default function Header({
         <div className="flex items-center gap-3 flex-wrap">
           {/* App mode toggle */}
           <button
+            data-testid="view-mode"
             onClick={onToggleViewMode}
             className="text-[13px] font-bold tracking-tight text-slate-800 mr-1 shrink-0 px-2 py-1 rounded-md hover:bg-slate-100 transition-colors"
             title={isTree ? 'Switch to List View' : 'Switch to Tree View'}
@@ -74,6 +75,7 @@ export default function Header({
             onChange={setHashQuery}
             placeholder="hash prefix or full…"
             className="w-44 shrink-0"
+            data-testid="hash-search"
           />
 
           {/* Spacer */}

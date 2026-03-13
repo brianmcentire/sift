@@ -1,4 +1,4 @@
-export default function SearchBar({ value, onChange, placeholder = 'filename…', className = '' }) {
+export default function SearchBar({ value, onChange, placeholder = 'filename…', className = '', 'data-testid': testId }) {
   return (
     <div className={`relative ${className}`}>
       <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-sm pointer-events-none">
@@ -6,6 +6,7 @@ export default function SearchBar({ value, onChange, placeholder = 'filename…'
       </span>
       <input
         type="text"
+        data-testid={testId}
         value={value}
         onChange={e => onChange(e.target.value)}
         placeholder={placeholder}

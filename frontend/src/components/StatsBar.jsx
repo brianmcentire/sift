@@ -43,7 +43,7 @@ export default function StatsBar({ stats, rowCount, isFiltered }) {
   }
 
   return (
-    <div className="flex items-center gap-4 py-1.5 mb-2 text-[11px] text-slate-400 border-b border-slate-100">
+    <div data-testid="stats-bar" className="flex items-center gap-4 py-1.5 mb-2 text-[11px] text-slate-400 border-b border-slate-100">
       <span>
         <span className="font-medium text-slate-600">{stats.total_files?.toLocaleString()}</span>
         {' '}files

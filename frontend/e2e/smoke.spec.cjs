@@ -1,73 +1,13 @@
 // @ts-check
 const { test, expect } = require('@playwright/test')
-
-// Requires: sift server running on :8765 and `make dev-frontend` on :5173
-
-function escapeRegex(text) {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
-async function waitForApiIdle(page, timeout = 30_000) {
-  const badge = page.locator('[data-testid="api-activity"]')
-  await expect(badge).toBeVisible({ timeout })
-  await expect(badge).toHaveAttribute('data-state', 'idle', { timeout })
-  await expect(badge).toHaveAttribute('data-count', '0', { timeout })
-}
-
-async function waitForTreeReady(page, timeout = 30_000) {
-  const rows = page.locator('[data-testid="tree-row"]')
-  await expect.poll(async () => {
-    const count = await rows.count()
-    const hasEmptyState = await page.getByText('No files found.').isVisible().catch(() => false)
-    return { count, hasEmptyState }
-  }, { timeout }).toEqual(expect.objectContaining({ hasEmptyState: false }))
-  await expect(rows.first()).toBeVisible({ timeout })
-}
-
-async function gotoCleanAndSettle(page) {
-  await page.addInitScript(() => {
-    window.localStorage.clear()
-    window.sessionStorage.clear()
-  })
-  await page.goto('/')
-  await waitForApiIdle(page)
-  await waitForTreeReady(page, 20_000)
-}
-
-async function selectHost(page, hostName) {
-  const hostButton = page.locator('header button').filter({
-    hasText: new RegExp(`^${escapeRegex(hostName)}$`),
-  })
-  await expect(hostButton).toBeVisible({ timeout: 10_000 })
-  await hostButton.click()
-  await waitForApiIdle(page)
-  await waitForTreeReady(page)
-}
-
-async function switchToListView(page) {
-  const modeBtn = page.locator('button', { hasText: /sift · Tree View/i })
-  await expect(modeBtn).toBeVisible({ timeout: 10_000 })
-  await modeBtn.click()
-  await waitForApiIdle(page)
-  await waitForTreeReady(page, 20_000)
-}
-
-async function setDirectorySearch(page, query) {
-  const input = page.locator('[data-testid="directory-search"]')
-  await expect(input).toBeVisible({ timeout: 10_000 })
-  await input.fill(query)
-  await page.waitForTimeout(500)
-  await waitForApiIdle(page)
-}
-
-async function applyFirstCategoryFilter(page) {
-  await page.locator('[data-testid="file-type-filter"]').click()
-  const firstChip = page.locator('[data-testid^="category-chip-"]').first()
-  await expect(firstChip).toBeVisible({ timeout: 10_000 })
-  await firstChip.click()
-  await page.locator('header').click({ position: { x: 5, y: 5 } })
-  await waitForApiIdle(page)
-}
+const {
+  gotoCleanAndSettle,
+  selectHost,
+  switchToListView,
+  setDirectorySearch,
+  applyFirstCategoryFilter,
+  waitForApiIdle,
+} = require('./helpers.cjs')
 
 test.describe('smoke', () => {
   test.beforeEach(async ({ page }) => {

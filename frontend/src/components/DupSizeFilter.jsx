@@ -62,6 +62,7 @@ export default function DupSizeFilter({ value, onChange, label = 'Min size' }) {
   return (
     <div className="relative shrink-0" ref={ref}>
       <button
+        data-testid="min-size-filter"
         onClick={() => setOpen(o => !o)}
         title={label}
         className={`

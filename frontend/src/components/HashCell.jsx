@@ -7,6 +7,8 @@ export default function HashCell({ hash }) {
 
   return (
     <button
+      data-testid="hash-cell"
+      data-hash={hash}
       onClick={() => setExpanded(e => !e)}
       title={expanded ? 'Click to collapse' : 'Click to expand'}
       className="font-mono text-[11px] text-slate-400 hover:text-slate-700 transition-colors duration-150 text-left cursor-pointer"
