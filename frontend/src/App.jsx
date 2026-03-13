@@ -711,6 +711,7 @@ export default function App() {
   }, [
     viewMode,
     fetchListPage,
+    selectedHosts,
   ])
 
   // When dup-only mode is enabled, ensure dup metrics are loaded for the

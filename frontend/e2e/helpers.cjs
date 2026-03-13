@@ -103,6 +103,13 @@ async function clickReset(page) {
   await waitForApiIdle(page)
 }
 
+async function selectAllHosts(page) {
+  const allBtn = page.locator('header button', { hasText: /^all$/i })
+  await expect(allBtn).toBeVisible({ timeout: 10_000 })
+  await allBtn.click()
+  await waitForApiIdle(page)
+}
+
 async function clickDupBadge(page, row) {
   const badge = row.locator('[data-testid="dup-badge"]')
   await expect(badge).toBeVisible({ timeout: 5_000 })
@@ -133,6 +140,7 @@ module.exports = {
   toggleDupOnly,
   setHashSearch,
   clickReset,
+  selectAllHosts,
   clickDupBadge,
   expectOverlayHasRows,
 }
