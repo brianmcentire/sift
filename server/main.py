@@ -465,7 +465,7 @@ async def log_requests(request: Request, call_next):
     # Skip static asset noise
     if path.startswith("/assets/") or path == "/favicon.ico":
         return response
-    if not path.startswith("/maintenance"):
+    if not path.startswith("/maintenance") and request.method in {"POST", "PATCH", "DELETE"}:
         _last_api_activity = time.monotonic()
     if elapsed > 1.0:
         qs = str(request.url.query)
