@@ -123,6 +123,64 @@ class TestTreeDupMetrics:
         assert metrics["mnt"]["dup_hash_count"] == 1
         assert metrics["mnt"]["dup_count"] == 2
 
+    def test_hosts_scope_honors_drive_for_mixed_windows_and_posix_hosts(self, client):
+        insert_files(
+            [
+                make_file(
+                    host="photoshop-pc",
+                    drive="C",
+                    path="/tmp/a.bin",
+                    path_display="/tmp/a.bin",
+                    filename="a.bin",
+                    hash=HASH_A,
+                    size=20,
+                    source_os="windows",
+                ),
+                make_file(
+                    host="unraid",
+                    path="/mnt/a.bin",
+                    filename="a.bin",
+                    hash=HASH_A,
+                    size=20,
+                    source_os="linux",
+                ),
+            ]
+        )
+        db_module.refresh_host_hash_stats("photoshop-pc")
+        db_module.refresh_host_hash_stats("unraid")
+        db_module.set_aggregate_meta("host_hash_stats:photoshop-pc", "fresh")
+        db_module.set_aggregate_meta("host_hash_stats:unraid", "fresh")
+
+        windows_resp = client.get(
+            "/tree/dup-metrics",
+            params={
+                "path": "/",
+                "hosts": "photoshop-pc,unraid",
+                "drive": "C",
+                "segments": ["tmp"],
+                "min_size": 0,
+            },
+        )
+        assert windows_resp.status_code == 200
+        windows_metrics = windows_resp.json()["metrics"]
+        assert windows_metrics["tmp"]["dup_hash_count"] == 1
+        assert windows_metrics["tmp"]["dup_count"] == 1
+
+        posix_resp = client.get(
+            "/tree/dup-metrics",
+            params={
+                "path": "/",
+                "hosts": "photoshop-pc,unraid",
+                "drive": "",
+                "segments": ["mnt"],
+                "min_size": 0,
+            },
+        )
+        assert posix_resp.status_code == 200
+        posix_metrics = posix_resp.json()["metrics"]
+        assert posix_metrics["mnt"]["dup_hash_count"] == 1
+        assert posix_metrics["mnt"]["dup_count"] == 1
+
     def test_hosts_scope_returns_stale_when_any_host_not_fresh(self, client):
         insert_files(
             [

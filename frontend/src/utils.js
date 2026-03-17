@@ -266,6 +266,41 @@ export function fileEntryToRow(fe) {
   return { entry, parentPath, fullPath: displayPath, depth: 0, driveContext: fe.drive || '' }
 }
 
+export function uiPathToCacheContext(uiPath) {
+  const raw = String(uiPath || '')
+  if (!raw || raw === '/') return { path: '/', drive: undefined }
+
+  if (raw.startsWith('__drive__:')) {
+    const afterPrefix = raw.slice('__drive__:'.length)
+    const slashIdx = afterPrefix.indexOf('/')
+    if (slashIdx === -1) {
+      return { path: '/', drive: afterPrefix }
+    }
+
+    return {
+      path: afterPrefix.slice(slashIdx) || '/',
+      drive: afterPrefix.slice(0, slashIdx) || undefined,
+    }
+  }
+
+  return { path: raw, drive: undefined }
+}
+
+export function groupTreeMetricTargetsByDrive(targets) {
+  const groups = new Map()
+
+  targets.forEach(target => {
+    const driveKey = target.drive || ''
+    if (!groups.has(driveKey)) groups.set(driveKey, [])
+    groups.get(driveKey).push(target)
+  })
+
+  return Array.from(groups.entries()).map(([drive, items]) => ({
+    drive,
+    targets: items,
+  }))
+}
+
 /**
  * Sort FileTable rows derived from FileEntry[] (no dirs; simpler than sortEntries).
  */

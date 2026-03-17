@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { api, subscribeInFlightCount } from './api.js'
-import { ALL_FILE_CATEGORIES, joinPath, mergeEntries, sortEntries, hostColor, fileEntryToRow, sortFileEntries, logPerf, formatClipboardPath, hasSelectedOtherHost, shouldApplyOnlyDupsInSearch, parseDirQuery, dirResultToUiPath, buildUiAncestors } from './utils.js'
+import { ALL_FILE_CATEGORIES, joinPath, mergeEntries, sortEntries, hostColor, fileEntryToRow, sortFileEntries, logPerf, formatClipboardPath, hasSelectedOtherHost, shouldApplyOnlyDupsInSearch, parseDirQuery, dirResultToUiPath, buildUiAncestors, uiPathToCacheContext, groupTreeMetricTargetsByDrive } from './utils.js'
 import Header from './components/Header.jsx'
 import StatsBar from './components/StatsBar.jsx'
 import FileTable from './components/FileTable.jsx'
@@ -132,6 +132,11 @@ export default function App() {
     activeHosts.some(h => h.drives && h.drives.length > 1),
     [activeHosts],
   )
+
+  const getHostsForDrive = useCallback((drive) => {
+    if (!drive) return activeHosts
+    return activeHosts.filter(h => Array.isArray(h.drives) && h.drives.includes(drive))
+  }, [activeHosts])
 
   // ── Debounce dir + filename queries ─────────────────────────────────────
   useEffect(() => {
@@ -363,7 +368,8 @@ export default function App() {
     dupMetricSegmentsRef.current.clear()
     dupMetricsInFlightRef.current.clear()
     clearCachedTreeDupMetrics()
-  }, [selectedHosts, categoryFilter, clearCachedTreeDupMetrics])
+    if (viewMode === 'tree' && onlyDupsRef.current) setTreeMetricsRefreshing(true)
+  }, [selectedHosts, categoryFilter, viewMode, clearCachedTreeDupMetrics])
 
   useEffect(() => {
     if (viewMode !== 'tree' || !onlyDups) setTreeMetricsRefreshing(false)
@@ -492,47 +498,46 @@ export default function App() {
 
     if (metricsTargets.length === 0) return
 
-    const hostNames = [...new Set(hostList.map(h => h.host).filter(Boolean))]
     const selectedHostNames = [...new Set([...selectedHosts].filter(Boolean))]
     const useHostSetMetrics = selectedHostNames.length > 0
 
     let metricPromises = []
     if (useHostSetMetrics) {
       metricsTargets.forEach(target => dupMetricsInFlightRef.current.add(target.metricKey))
-      const unionMissing = [...new Set(metricsTargets.flatMap(t => t.missing))]
       const hostsCsv = selectedHostNames.join(',')
-      const driveForSet = forceDrive !== undefined ? forceDrive : (metricsTargets[0]?.drive || hostDrive(hostNames[0]))
-      const p = api.treeDupMetrics(path, '', minAtRequest, unionMissing, driveForSet, {}, hostsCsv)
-        .then(data => {
-          if (minSizeRef.current !== minAtRequest) return
-          const metrics = data?.metrics || {}
-          metricsTargets.forEach(target => {
-            const existing = cacheRef.current.get(target.key) || []
-            const merged = existing.map(entry => {
-              const m = metrics[entry.segment]
-              if (!m) return entry
-              return {
-                ...entry,
-                dup_count: m.dup_count ?? 0,
-                dup_hash_count: m.dup_hash_count ?? 0,
-                other_hosts: m.other_hosts ?? null,
-                is_hard_linked: Boolean(m.is_hard_linked),
-                ...(m.file_count != null ? { file_count: m.file_count } : {}),
-                ...(m.total_bytes != null ? { total_bytes: m.total_bytes } : {}),
-              }
+      metricPromises = groupTreeMetricTargetsByDrive(metricsTargets).map(({ drive, targets }) => {
+        const unionMissing = [...new Set(targets.flatMap(target => target.missing))]
+        return api.treeDupMetrics(path, '', minAtRequest, unionMissing, drive, {}, hostsCsv)
+          .then(data => {
+            if (minSizeRef.current !== minAtRequest) return
+            const metrics = data?.metrics || {}
+            targets.forEach(target => {
+              const existing = cacheRef.current.get(target.key) || []
+              const merged = existing.map(entry => {
+                const m = metrics[entry.segment]
+                if (!m) return entry
+                return {
+                  ...entry,
+                  dup_count: m.dup_count ?? 0,
+                  dup_hash_count: m.dup_hash_count ?? 0,
+                  other_hosts: m.other_hosts ?? null,
+                  is_hard_linked: Boolean(m.is_hard_linked),
+                  ...(m.file_count != null ? { file_count: m.file_count } : {}),
+                  ...(m.total_bytes != null ? { total_bytes: m.total_bytes } : {}),
+                }
+              })
+              cacheRef.current.set(target.key, merged)
+              const loaded = dupMetricSegmentsRef.current.get(target.metricKey) || new Set()
+              target.missing.forEach(seg => loaded.add(seg))
+              dupMetricSegmentsRef.current.set(target.metricKey, loaded)
             })
-            cacheRef.current.set(target.key, merged)
-            const loaded = dupMetricSegmentsRef.current.get(target.metricKey) || new Set()
-            target.missing.forEach(seg => loaded.add(seg))
-            dupMetricSegmentsRef.current.set(target.metricKey, loaded)
+            setMetadataVersion(v => v + 1)
           })
-          setMetadataVersion(v => v + 1)
-        })
-        .catch(() => {})
-        .finally(() => {
-          metricsTargets.forEach(target => dupMetricsInFlightRef.current.delete(target.metricKey))
-        })
-      metricPromises = [p]
+          .catch(() => {})
+          .finally(() => {
+            targets.forEach(target => dupMetricsInFlightRef.current.delete(target.metricKey))
+          })
+      })
     } else {
       metricPromises = metricsTargets.map(target => {
       const { host, drive, key, metricKey, missing } = target
@@ -576,19 +581,37 @@ export default function App() {
       setStructureVersion(v => v + 1)
       setPaginationVersion(v => v + 1)
     }
-  }, [hostDrive, selectedHosts])
+  }, [hostDrive, selectedHosts, categoryFilter])
 
-  // Keep user context on min size changes: refresh metrics for visible
-  // paths (current path + expanded dirs) instead of resetting expansion state.
+  // Keep user context when duplicate-sensitive filters change: refresh metrics
+  // for visible tree paths (including drive-scoped expansions) instead of
+  // resetting expansion state.
   useEffect(() => {
     if (hosts.length === 0 || viewMode !== 'tree') return
     let cancelled = false
-    const expanded = [...effectiveExpanded].filter(p => !p.startsWith('__drive__:'))
-    const paths = Array.from(new Set([currentPath, ...expanded])).slice(0, 60)
+    const visibleUiPaths = Array.from(new Set([currentPath, ...effectiveExpanded])).slice(0, 60)
+    const metricTargets = []
+    const seenTargets = new Set()
+
+    visibleUiPaths.forEach(uiPath => {
+      const { path, drive } = uiPathToCacheContext(uiPath)
+      const targetKey = `${drive || ''}:${path}`
+      if (seenTargets.has(targetKey)) return
+      seenTargets.add(targetKey)
+      metricTargets.push({ path, drive })
+    })
 
     const run = async () => {
       try {
-        await Promise.all(paths.map(p => fetchPath(p, activeHosts, { enrichDupMetrics: true, awaitDupMetrics: true })))
+        await Promise.all(metricTargets.map(({ path, drive }) => {
+          const scopedHosts = getHostsForDrive(drive)
+          if (scopedHosts.length === 0) return null
+          return fetchPath(path, scopedHosts, {
+            enrichDupMetrics: true,
+            awaitDupMetrics: true,
+            ...(drive !== undefined ? { drive } : {}),
+          })
+        }))
       } finally {
         if (!cancelled) setTreeMetricsRefreshing(false)
       }
@@ -598,7 +621,7 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [minSize, hosts.length, viewMode, currentPath, effectiveExpanded, activeHosts, fetchPath])
+  }, [minSize, selectedHosts, categoryFilter, hosts.length, viewMode, currentPath, effectiveExpanded, fetchPath, getHostsForDrive])
 
   const listSortBy = useMemo(() => {
     const map = { name: 'name', size: 'size', date: 'date', seen: 'seen', type: 'type', hash: 'hash' }

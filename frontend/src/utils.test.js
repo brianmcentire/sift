@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatClipboardPath, shouldApplyOnlyDupsInSearch, parseDirQuery, dirResultToUiPath, buildUiAncestors } from './utils.js'
+import { formatClipboardPath, shouldApplyOnlyDupsInSearch, parseDirQuery, dirResultToUiPath, buildUiAncestors, uiPathToCacheContext, groupTreeMetricTargetsByDrive } from './utils.js'
 
 describe('formatClipboardPath', () => {
   it('formats windows drive paths with backslashes', () => {
@@ -157,5 +157,34 @@ describe('buildUiAncestors', () => {
   it('returns drive node and itself as ancestor for path one level under drive', () => {
     expect(buildUiAncestors('__drive__:C/users'))
       .toEqual({ ancestors: ['__drive__:C'], driveNode: '__drive__:C' })
+  })
+})
+
+describe('uiPathToCacheContext', () => {
+  it('keeps plain POSIX paths unchanged', () => {
+    expect(uiPathToCacheContext('/mnt/media')).toEqual({ path: '/mnt/media', drive: undefined })
+  })
+
+  it('maps bare drive nodes to drive root context', () => {
+    expect(uiPathToCacheContext('__drive__:C')).toEqual({ path: '/', drive: 'C' })
+  })
+
+  it('maps drive-namespaced descendants to cache path plus drive', () => {
+    expect(uiPathToCacheContext('__drive__:C/tmp')).toEqual({ path: '/tmp', drive: 'C' })
+  })
+})
+
+describe('groupTreeMetricTargetsByDrive', () => {
+  it('splits mixed drive scopes into separate groups', () => {
+    expect(groupTreeMetricTargetsByDrive([
+      { key: 'mac::/', drive: '' },
+      { key: 'unraid::/', drive: '' },
+      { key: 'pc:C:/', drive: 'C' },
+      { key: 'pc:D:/', drive: 'D' },
+    ])).toEqual([
+      { drive: '', targets: [{ key: 'mac::/', drive: '' }, { key: 'unraid::/', drive: '' }] },
+      { drive: 'C', targets: [{ key: 'pc:C:/', drive: 'C' }] },
+      { drive: 'D', targets: [{ key: 'pc:D:/', drive: 'D' }] },
+    ])
   })
 })
