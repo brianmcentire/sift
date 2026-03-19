@@ -974,6 +974,43 @@ def get_cache_stream(host: str, root: str, drive: str = Query("")):
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
+@app.get("/files/hashes")
+def stream_hashes(
+    host: str = Query(""),
+    path_prefix: str = Query(""),
+    drive: str = Query(""),
+    min_size: int = Query(0, ge=0),
+):
+    """Stream file hashes as tab-separated text (hash\\tpath), one per line.
+
+    Only includes entries where hash IS NOT NULL.  No result limit.
+    Payload is compact (~70 bytes/row) — suitable for building large hash sets.
+    """
+    conditions = ["hash IS NOT NULL"]
+    params: list = []
+    if host:
+        conditions.append("host = ?")
+        params.append(host)
+    if path_prefix:
+        p = path_prefix.lower().rstrip("/")
+        conditions.append("(path LIKE ? OR path = ?)")
+        params.extend([p + "/%", p])
+    if drive:
+        conditions.append("drive = ?")
+        params.append(drive)
+    if min_size:
+        conditions.append("size_bytes >= ?")
+        params.append(min_size)
+    where = " AND ".join(conditions)
+    rows = db.query(f"SELECT hash, path FROM files WHERE {where}", params)
+
+    def generate():
+        for r in rows:
+            yield r[0] + "\t" + r[1] + "\n"
+
+    return StreamingResponse(generate(), media_type="text/plain")
+
+
 # ---------------------------------------------------------------------------
 # File listing
 # ---------------------------------------------------------------------------

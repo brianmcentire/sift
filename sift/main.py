@@ -1,6 +1,7 @@
 """CLI entry point — dispatches sift subcommands."""
 
 import argparse
+import re
 import sys
 
 
@@ -349,6 +350,59 @@ def main() -> None:
         help="Human-readable sizes",
     )
 
+    # sift sets
+    p_sets = sub.add_parser(
+        "sets", help="Hash-based set operations between directories",
+    )
+    p_sets.add_argument(
+        "paths", nargs="*",
+        help="Paths: first = source (A), rest = targets (B)",
+    )
+    p_sets.add_argument(
+        "-a", dest="a_paths", nargs="+", metavar="PATH",
+        help="Explicit source paths (set A)",
+    )
+    p_sets.add_argument(
+        "-b", dest="b_paths", nargs="+", metavar="PATH",
+        help="Explicit target paths (set B)",
+    )
+    p_sets.add_argument(
+        "--covered", nargs="*", metavar="HOST", default=None,
+        help="B = all hashes in datastore (optionally limited to specified hosts)",
+    )
+    p_sets.add_argument(
+        "--min-size", default=None,
+        help="Ignore files below threshold (e.g., 1M, 500k)",
+    )
+    p_sets.add_argument(
+        "-n", type=int, default=None, metavar="N",
+        help="Limit file list output to N entries",
+    )
+    p_sets.add_argument(
+        "--summary", action="store_true",
+        help="Summary only, no file list",
+    )
+    p_sets.add_argument(
+        "--no-summary", action="store_true",
+        help="Suppress summary (file list only)",
+    )
+    p_sets.add_argument(
+        "-l", "--long", dest="long", action="store_true",
+        help="Show size and date in file list",
+    )
+    p_sets.add_argument(
+        "--reverse", action="store_true",
+        help="Show B-A instead of A-B",
+    )
+    p_sets.add_argument(
+        "--common", action="store_true",
+        help="Show A∩B (intersection)",
+    )
+    p_sets.add_argument(
+        "--json", action="store_true",
+        help="JSON output to stdout",
+    )
+
     # sift report
     sub.add_parser("report", help="Show datastore report across all hosts")
 
@@ -358,7 +412,16 @@ def main() -> None:
     # sift upgrade
     sub.add_parser("upgrade", help="Upgrade sift to the latest version from GitHub")
 
-    args = parser.parse_args()
+    # Preprocess -NUMBER shorthand for 'sift sets' (e.g., -10 → -n 10)
+    _argv = sys.argv[1:]
+    if _argv and _argv[0] == "sets":
+        for _i in range(1, len(_argv)):
+            if re.match(r"^-\d+$", _argv[_i]):
+                _argv[_i : _i + 1] = ["-n", _argv[_i][1:]]
+                break
+        args = parser.parse_args(_argv)
+    else:
+        args = parser.parse_args()
 
     if args.command is None:
         parser.print_help()
@@ -417,6 +480,10 @@ def main() -> None:
             from sift.commands.comm import cmd_comm
 
             cmd_comm(args)
+        elif args.command == "sets":
+            from sift.commands.sets import cmd_sets
+
+            cmd_sets(args)
         else:
             parser.print_help()
             sys.exit(1)
