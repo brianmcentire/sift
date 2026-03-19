@@ -274,6 +274,81 @@ def main() -> None:
         help="With --dry-run, list matching paths",
     )
 
+    # sift locate
+    p_locate = sub.add_parser("locate", help="Search the inventory by filename pattern")
+    p_locate.add_argument("pattern", help="Glob pattern, e.g. '*.mp4'")
+    p_locate.add_argument(
+        "-i", dest="case_insensitive", action="store_true",
+        help="Case-insensitive matching",
+    )
+    p_locate.add_argument(
+        "--host", default=None, help="Host to query (default: local hostname)",
+    )
+    p_locate.add_argument(
+        "--all-hosts", action="store_true", help="Search all hosts",
+    )
+    p_locate.add_argument(
+        "--limit", type=int, default=1000, help="Max results (default: 1000, 0 = unlimited)",
+    )
+    p_locate.add_argument(
+        "-a", "--all", dest="all_results", action="store_true",
+        help="Shorthand for --limit 0",
+    )
+    p_locate.add_argument(
+        "-l", dest="long", action="store_true", help="Long format: size, date, path",
+    )
+    p_locate.add_argument(
+        "-c", "--count", dest="count", action="store_true",
+        help="Print match count only",
+    )
+
+    # sift diff
+    p_diff = sub.add_parser("diff", help="Compare two directories in the inventory")
+    p_diff.add_argument("dir1", help="First directory or host:/path")
+    p_diff.add_argument("dir2", help="Second directory or host:/path")
+    p_diff.add_argument(
+        "-r", dest="recursive", action="store_true", help="Recursive comparison",
+    )
+
+    # sift comm
+    p_comm = sub.add_parser(
+        "comm", help="Compare two directories, three-column output",
+        conflict_handler="resolve",
+    )
+    p_comm.add_argument("dir1", help="First directory or host:/path")
+    p_comm.add_argument("dir2", help="Second directory or host:/path")
+    p_comm.add_argument(
+        "-r", dest="recursive", action="store_true", help="Recursive comparison",
+    )
+    p_comm.add_argument(
+        "--depth", type=int, default=None,
+        help="Max depth (1 = immediate contents)",
+    )
+    p_comm.add_argument(
+        "--hashes", action="store_true",
+        help="Compare by sorted hashes instead of filenames",
+    )
+    p_comm.add_argument(
+        "-1", dest="suppress_1", action="store_true",
+        help="Suppress column 1 (only-in-dir1)",
+    )
+    p_comm.add_argument(
+        "-2", dest="suppress_2", action="store_true",
+        help="Suppress column 2 (only-in-dir2)",
+    )
+    p_comm.add_argument(
+        "-3", dest="suppress_3", action="store_true",
+        help="Suppress column 3 (common files)",
+    )
+    p_comm.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Suppress large-output warning",
+    )
+    p_comm.add_argument(
+        "-h", "--human", dest="human", action="store_true",
+        help="Human-readable sizes",
+    )
+
     # sift report
     sub.add_parser("report", help="Show datastore report across all hosts")
 
@@ -330,6 +405,18 @@ def main() -> None:
             from sift.commands.upgrade import cmd_upgrade
 
             cmd_upgrade(args)
+        elif args.command == "locate":
+            from sift.commands.locate import cmd_locate
+
+            cmd_locate(args)
+        elif args.command == "diff":
+            from sift.commands.diff import cmd_diff
+
+            cmd_diff(args)
+        elif args.command == "comm":
+            from sift.commands.comm import cmd_comm
+
+            cmd_comm(args)
         else:
             parser.print_help()
             sys.exit(1)

@@ -3,7 +3,7 @@
 # Local targets (sync-db, deploy, etc.) live in local.mk — see bottom of this file
 
 help: ## Show available targets
-	@grep -h '^[a-zA-Z_-]*:.*## ' Makefile local.mk 2>/dev/null | \
+	@grep -h '^[a-zA-Z0-9_-]*:.*## ' Makefile local.mk 2>/dev/null | \
 		sed 's/:.*## /\t/' | sort | \
 		awk -F'\t' '{printf "  %-20s %s\n", $$1, $$2}'
 

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from sift import client
-from sift.commands import print_config_hint, print_server_info, resolve_host
+from sift.commands import extract_drive_path, print_config_hint, print_server_info, resolve_host
 from sift.config import get_cli_config
 from sift.normalize import local_hostname, normalize_query_path
 
@@ -129,9 +129,15 @@ def cmd_ls(args) -> None:
     host = resolve_host(_user_host) if _user_host else local_hostname()
     all_hosts = getattr(args, "all_hosts", False)
 
-    # Normalize path
+    # Normalize path — handle Windows drive paths passed from non-Windows shells
     raw_path = getattr(args, "path", "/") or "/"
-    path = normalize_query_path(raw_path)
+    # _drive is set by recursive calls to carry drive context through without re-parsing
+    drive = getattr(args, "_drive", "")
+    if drive:
+        # Already normalized by parent call — path is already lowercased POSIX without drive
+        path = raw_path
+    else:
+        drive, path = extract_drive_path(raw_path)
 
     # Flags
     full_hash = getattr(args, "full_hash", False)
@@ -166,6 +172,7 @@ def cmd_ls(args) -> None:
             entries = _fetch_tree_entries(
                 path=path,
                 host=h,
+                drive=drive,
                 min_size=min_size,
                 depth=max(depth, 1),
             )
@@ -188,6 +195,7 @@ def cmd_ls(args) -> None:
                     entries = _fetch_tree_entries(
                         path=parent,
                         host=h,
+                        drive=drive,
                         min_size=min_size,
                         depth=1,
                     )
@@ -245,7 +253,8 @@ def cmd_ls(args) -> None:
         dirs = [e for e in all_entries if e["entry_type"] == "dir"]
         for d in dirs:
             child_path = path.rstrip("/") + "/" + d["segment"]
-            print(f"\n{child_path}:")
+            drive_prefix = f"{drive}:" if drive else ""
+            print(f"\n{drive_prefix}{child_path}:")
             child_args = type(
                 "A",
                 (),
@@ -262,6 +271,7 @@ def cmd_ls(args) -> None:
                     "recursive": recursive,
                     "duplicates": duplicates_only,
                     "full_hash": full_hash,
+                    "_drive": drive,
                 },
             )()
             cmd_ls(child_args)

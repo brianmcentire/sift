@@ -7,7 +7,7 @@ import sys
 from typing import Optional
 
 from sift import client
-from sift.commands import print_config_hint, print_server_info, resolve_host
+from sift.commands import extract_drive_path, print_config_hint, print_server_info, resolve_host
 from sift.config import get_cli_config
 from sift.normalize import local_hostname, normalize_query_path
 
@@ -106,7 +106,7 @@ def cmd_du(args) -> None:
     all_hosts = getattr(args, "all_hosts", False)
 
     raw_path = getattr(args, "path", "/") or "/"
-    path_prefix = normalize_query_path(raw_path)
+    drive, path_prefix = extract_drive_path(raw_path)
 
     human = getattr(args, "human", False)
     summarize = getattr(args, "summarize", False)
@@ -142,6 +142,7 @@ def cmd_du(args) -> None:
                 _fetch_tree_entries(
                     path=path_prefix,
                     host=h,
+                    drive=drive,
                     min_size=0,
                     depth=max(depth, 1),
                 )
@@ -152,7 +153,8 @@ def cmd_du(args) -> None:
     if summarize:
         total = sum(e.get("total_bytes") or 0 for e in entries)
         size_str = _human_size(total) if human else str(total)
-        print(f"{size_str}\t{path_prefix}")
+        drive_prefix = f"{drive}:" if drive else ""
+        print(f"{size_str}\t{drive_prefix}{path_prefix}")
         return
 
     if duplicates_only:
@@ -164,12 +166,13 @@ def cmd_du(args) -> None:
     else:
         entries.sort(key=lambda e: e.get("segment", ""))
 
+    drive_prefix = f"{drive}:" if drive else ""
     for entry in entries:
         size_bytes = entry.get("total_bytes")
         size_str = _human_size(size_bytes) if human else str(size_bytes or 0)
         segment = entry.get("segment", "")
         entry_type = entry.get("entry_type", "file")
-        full_path = path_prefix.rstrip("/") + "/" + segment
+        full_path = drive_prefix + path_prefix.rstrip("/") + "/" + segment
         if entry_type == "dir":
             full_path += "/"
         print(f"{size_str}\t{full_path}")

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from sift import client
-from sift.commands import print_server_info, resolve_host
+from sift.commands import extract_drive_path, print_server_info, resolve_host
 from sift.config import get_cli_config
 from sift.normalize import local_hostname, normalize_query_path
 
@@ -88,7 +88,7 @@ def cmd_find(args) -> None:
     all_hosts = getattr(args, "all_hosts", False)
 
     raw_path = getattr(args, "path", "/") or "/"
-    path_prefix = normalize_query_path(raw_path)
+    _, path_prefix = extract_drive_path(raw_path)  # drive ignored: /files has no drive param
 
     limit = max(1, int(getattr(args, "limit", 2000) or 2000))
     params: dict = {

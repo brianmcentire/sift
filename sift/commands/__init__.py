@@ -1,7 +1,79 @@
 import os
 import sys
 from sift.config import get_cli_config, get_server_url
-from sift.normalize import local_hostname
+from sift.normalize import local_hostname, normalize_query_path
+
+
+def extract_drive_path(raw_path: str) -> tuple[str, str]:
+    """Detect a Windows drive letter in a user-supplied path and split it out.
+
+    Returns (drive, normalized_posix_path) where drive is '' for POSIX paths.
+    Examples:
+      'D:/Users/Brian'  → ('D', '/users/brian')
+      'C:\\temp'        → ('C', '/temp')
+      '/mnt/data'       → ('', '/mnt/data')
+      '.'               → ('', <cwd resolved by normalize_query_path>)
+    """
+    raw = raw_path.strip().replace("\\", "/")
+    if len(raw) >= 2 and raw[1] == ":" and raw[0].isalpha():
+        drive = raw[0].upper()
+        path = raw[2:].lower() or "/"
+        if not path.startswith("/"):
+            path = "/" + path
+        return drive, path
+    return "", normalize_query_path(raw_path)
+
+
+def parse_host_path(arg: str, default_host: str) -> tuple[str, str]:
+    """Parse 'host:/path', 'host:C:/path', or '/path' into (host, normalized_path).
+
+    Rules:
+    1. Starts with '/' or '.' → local path (default_host)
+    2. Single alpha char before ':' → Windows drive letter, local path (default_host)
+    3. Multi-char prefix before ':' where remainder starts with drive letter
+       (e.g. host:C:/) → host + drive path
+    4. Multi-char prefix before ':/' → host + path
+    5. 'localhost' as host → resolves to local_hostname()
+    """
+    # Normalize backslashes to forward slashes for consistent parsing
+    arg = arg.replace("\\", "/")
+
+    # Rule 1: starts with / or . → local path
+    if arg.startswith("/") or arg.startswith("."):
+        return (resolve_host(default_host), normalize_query_path(arg))
+
+    # Find first colon
+    colon_idx = arg.find(":")
+    if colon_idx < 0:
+        # No colon at all — treat as local relative path
+        return (resolve_host(default_host), normalize_query_path(arg))
+
+    prefix = arg[:colon_idx]
+    remainder = arg[colon_idx + 1:]
+
+    # Rule 2: single alpha char before ':' → Windows drive letter (e.g. C:/Users)
+    if len(prefix) == 1 and prefix.isalpha():
+        return (resolve_host(default_host), normalize_query_path(arg))
+
+    # Multi-char prefix → host:path
+    host_part = prefix
+
+    # Rule 3: remainder starts with drive letter (e.g. C:/ or C:)
+    if len(remainder) >= 2 and remainder[0].isalpha() and remainder[1] == ":":
+        # host:C:/path → path is the drive path portion
+        path_part = remainder
+    elif remainder.startswith("/"):
+        # Rule 4: host:/path
+        path_part = remainder
+    else:
+        # Ambiguous — treat entire arg as local path
+        return (resolve_host(default_host), normalize_query_path(arg))
+
+    # Rule 5: 'localhost' → local hostname
+    resolved_host = resolve_host(host_part)
+    # For Windows drive paths, normalize just converts \ to / and lowercases
+    normalized = path_part.replace("\\", "/").lower()
+    return (resolved_host, normalized)
 
 
 def _effective_hostname() -> str:
