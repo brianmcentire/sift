@@ -56,6 +56,18 @@ def load_config() -> dict[str, Any]:
     if db_path := os.environ.get("SIFT_DB_PATH"):
         cfg["_db_path"] = db_path
 
+    # Normalize server.url: prepend http:// if no scheme, append default port
+    url = cfg.get("server", {}).get("url", "")
+    if url and "://" not in url:
+        url = "http://" + url
+    if url:
+        # If URL has no port (e.g. http://localhost), append default :8765
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.port is None and parsed.hostname:
+            url = f"{parsed.scheme}://{parsed.hostname}:8765"
+        cfg["server"]["url"] = url
+
     _validate(cfg)
     return cfg
 
