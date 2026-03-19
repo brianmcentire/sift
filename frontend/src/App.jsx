@@ -604,9 +604,9 @@ export default function App() {
     const run = async () => {
       try {
         await Promise.all(metricTargets.map(({ path, drive }) => {
-          const scopedHosts = getHostsForDrive(drive)
-          if (scopedHosts.length === 0) return null
-          return fetchPath(path, scopedHosts, {
+          const driveHosts = getHostsForDrive(drive)
+          if (driveHosts.length === 0) return null
+          return fetchPath(path, activeHosts, {
             enrichDupMetrics: true,
             awaitDupMetrics: true,
             ...(drive !== undefined ? { drive } : {}),
@@ -621,7 +621,7 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [minSize, selectedHosts, categoryFilter, hosts.length, viewMode, currentPath, effectiveExpanded, fetchPath, getHostsForDrive])
+  }, [minSize, selectedHosts, categoryFilter, hosts.length, viewMode, currentPath, effectiveExpanded, fetchPath, getHostsForDrive, activeHosts])
 
   const listSortBy = useMemo(() => {
     const map = { name: 'name', size: 'size', date: 'date', seen: 'seen', type: 'type', hash: 'hash' }
@@ -907,7 +907,7 @@ export default function App() {
         setExpandedPaths(prev => {
           const next = new Set(prev)
           toExpand.forEach(p => { if (!matched.has(p)) next.add(p) })
-          matched.forEach(p => next.delete(p)) // collapse matched dirs even if previously open
+          matched.forEach(p => { if (!prev.has(p)) next.delete(p) }) // collapse new matches but keep user-expanded ones
           return next
         })
         toExpand.forEach(p => {

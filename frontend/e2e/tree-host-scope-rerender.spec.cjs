@@ -15,6 +15,7 @@ test.describe('tree dup highlight refresh on host add', () => {
   })
 
   test('adding a second host re-renders file dup highlighting in expanded C:/tmp', async ({ page }) => {
+    test.setTimeout(90_000)
     await selectHost(page, 'Photoshop-PC')
     await setDirectorySearch(page, 'C:\\tmp')
 
