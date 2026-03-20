@@ -71,12 +71,14 @@ sift sets: /mnt/disks/backup2012 → /mnt/backups, /mnt/media
 
   source (A):     15,234 files    145.2 GB   (14,890 unique hashes, 344 unhashed)
   A only:            690 hashes   (   778 files)    12.4 GB
-  B only:         45,200 hashes
   A ∩ B:          14,200 hashes   (14,456 files)   132.8 GB   95.4% of A covered
   unhashed:          200 covered by size+mtime, 144 unverifiable
 
   result: NOT FULLY COVERED — 690 unique hashes only in source
 ```
+
+The `B only` line is shown only when `--reverse` is used (since it requires fetching
+all of B's entries).
 
 ### File list (stdout)
 
@@ -87,11 +89,13 @@ Pipeable. Shows A-B by default (files in source not in target).
 /mnt/disks/backup2012/Documents/taxes_2012.pdf
 ```
 
-With `-l` (long format):
+With `-l` (long format — includes host locations showing where else each file exists):
 ```
-  4.2M  2012-07-15  /mnt/disks/backup2012/Photos/vacation2012/IMG_0001.jpg
-  1.2M  2013-04-10  /mnt/disks/backup2012/Documents/taxes_2012.pdf
+  4.2M  2012-07-15  /mnt/disks/backup2012/Photos/vacation2012/IMG_0001.jpg  [Unraid,familyimac]
+  1.2M  2013-04-10  /mnt/disks/backup2012/Documents/taxes_2012.pdf  [Unraid]
 ```
+
+The source host is excluded from the host list (you already know it's there).
 
 ### Exit codes
 
@@ -182,19 +186,23 @@ tiered treatment:
 3. **Unhashed in source, no match** — reported as "unverifiable"
 
 The summary reports these separately. Size+mtime matching is only available when B
-entries are fully fetched (e.g. with `--reverse`); in streaming mode (default),
-unhashed source files are reported as unverifiable.
+entries are fully fetched (i.e. with `--reverse`); otherwise unhashed source files
+are reported as unverifiable.
 
 To minimize unhashed files, run `sift scan` on all relevant paths first.
 
 ## Performance
 
-- **Streaming**: Large target sets (e.g. `--covered` across 800k+ files) use a
-  streaming `/files/hashes` endpoint (~70 bytes/row) instead of loading full entries
-  (~300 bytes/row). Progress is printed to stderr.
-- **Memory**: Hash sets are built incrementally from the stream. Even 1M+ files
-  use modest memory (~100MB for the hash set).
+- **POST-based checking**: Source hashes are POSTed to the server in batches of 50k
+  for intersection checking against the target scope. This is much faster than
+  fetching all target hashes when the source is smaller than the target (the common
+  case for backup verification).
+- **Progress feedback**: Incremental progress is shown on stderr during hash checking,
+  updating every 50k hashes. A status line also appears during the initial source
+  file fetch.
 - **Min-size filter**: Applied server-side on both sides, reducing data transfer.
+- **Early exit**: When checking multiple targets, remaining targets are skipped once
+  all source hashes are found.
 
 ## Comparison with Other Commands
 
