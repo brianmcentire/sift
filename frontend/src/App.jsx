@@ -16,6 +16,7 @@ export default function App() {
   // ── Host state ──────────────────────────────────────────────────────────
   const [hosts, setHosts] = useState([])
   const [selectedHosts, setSelectedHosts] = useState(new Set())
+  const [promotedHiddenHosts, setPromotedHiddenHosts] = useState(new Set()) // session-only: hidden hosts shown in chip bar
 
   // ── Navigation state ────────────────────────────────────────────────────
   const [currentPath, setCurrentPath] = useState('/')
@@ -101,6 +102,9 @@ export default function App() {
     hosts.forEach((h, i) => m.set(h.host, hostColor(i)))
     return m
   }, [hosts])
+
+  const visibleHosts = useMemo(() => hosts.filter(h => !h.hidden), [hosts])
+  const hiddenHosts = useMemo(() => hosts.filter(h => h.hidden), [hosts])
 
   const activeHosts = useMemo(
     () => hosts.filter(h => selectedHosts.has(h.host)),
@@ -245,12 +249,13 @@ export default function App() {
         const validStored = Array.isArray(storedHosts)
           ? storedHosts.filter(h => data.some(x => x.host === h))
           : []
+        const visibleData = data.filter(h => !h.hidden)
         setSelectedHosts(
           validStored.length > 0
             ? new Set(validStored)
-            : matched
+            : matched && !matched.hidden
               ? new Set([matched.host])
-              : new Set(data.map(h => h.host)),
+              : new Set(visibleData.map(h => h.host)),
         )
       })
       .catch(() => {})
@@ -386,12 +391,14 @@ export default function App() {
         sortBy,
         sortDir,
       }
-      if (selectedHosts.size > 0) toSave.selectedHosts = [...selectedHosts]
+      const hiddenNames = new Set(hiddenHosts.map(h => h.host))
+      const persistableHosts = [...selectedHosts].filter(h => !hiddenNames.has(h))
+      if (persistableHosts.length > 0) toSave.selectedHosts = persistableHosts
       window.localStorage?.setItem('sift-filters', JSON.stringify(toSave))
     } catch {
       // ignore quota exceeded / private browsing / security errors
     }
-  }, [categoryFilter, minSize, onlyDups, visibleColumns, sortBy, sortDir, selectedHosts])
+  }, [categoryFilter, minSize, onlyDups, visibleColumns, sortBy, sortDir, selectedHosts, hiddenHosts])
 
   // ── Fetch ls data for a path (all hosts) ─────────────────────────────────
   const fetchPath = useCallback(async (path, hostList, opts = {}) => {
@@ -1005,15 +1012,16 @@ export default function App() {
     setListPendingDetail('')
     setOverlayNotice('')
     setListActionStack([])
+    setPromotedHiddenHosts(new Set())
     const detectedHost = clientHostRef.current
-    const stillAvailable = detectedHost && hosts.some(h => h.host === detectedHost)
-    setSelectedHosts(stillAvailable ? new Set([detectedHost]) : new Set(hosts.map(h => h.host)))
+    const isVisible = detectedHost && visibleHosts.some(h => h.host === detectedHost)
+    setSelectedHosts(isVisible ? new Set([detectedHost]) : new Set(visibleHosts.map(h => h.host)))
     setExpandedPaths(new Set())
     setDupAutoExpanded(new Map())
     setActiveDrive('')
     setSortBy('name')
     setSortDir('asc')
-  }, [hosts])
+  }, [visibleHosts])
 
   // ── Toggle dir expansion ─────────────────────────────────────────────────
   const toggleDir = useCallback((fullPath, entry) => {
@@ -2055,9 +2063,12 @@ export default function App() {
       <Header
         viewMode={viewMode}
         onToggleViewMode={handleToggleViewMode}
-        hosts={hosts}
+        hosts={visibleHosts}
+        hiddenHosts={hiddenHosts}
         selectedHosts={selectedHosts}
         setSelectedHosts={setSelectedHosts}
+        promotedHiddenHosts={promotedHiddenHosts}
+        setPromotedHiddenHosts={setPromotedHiddenHosts}
         hostColorMap={hostColorMap}
         dirQuery={dirQuery}
         setDirQuery={setDirQuery}

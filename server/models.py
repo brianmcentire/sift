@@ -183,6 +183,15 @@ class HostEntry(BaseModel):
     total_hashed: int
     drives: list[str] = []
     is_scanning: bool = False
+    hidden: bool = False
+    label: Optional[str] = None
+    description: Optional[str] = None
+
+
+class HostMetaPatch(BaseModel):
+    hidden: Optional[bool] = None
+    label: Optional[str] = None
+    description: Optional[str] = None
 
 
 class HostRootEntry(BaseModel):

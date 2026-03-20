@@ -1,4 +1,4 @@
-export default function HostChips({ hosts, selectedHosts, setSelectedHosts, hostColorMap }) {
+export default function HostChips({ hosts, promotedHiddenHosts = [], selectedHosts, setSelectedHosts, hostColorMap }) {
   const allSelected = selectedHosts.size === hosts.length
 
   function toggleAll() {
@@ -45,6 +45,24 @@ export default function HostChips({ hosts, selectedHosts, setSelectedHosts, host
               <span className="inline-block w-2 h-2 rounded-full bg-current animate-[scanning-pulse_2s_ease-in-out_infinite]" />
               <span className="invisible group-hover/dot:visible absolute left-0 bottom-full mb-1.5 px-2 py-0.5 text-[10px] font-normal normal-case tracking-normal text-white bg-slate-800 rounded whitespace-nowrap">Scan in progress</span>
             </span>}
+            {h.host}
+          </button>
+        )
+      })}
+      {promotedHiddenHosts.map(h => {
+        const colors = hostColorMap.get(h.host)
+        const isActive = selectedHosts.has(h.host)
+        return (
+          <button
+            key={h.host}
+            onClick={e => toggleHost(h.host, e.shiftKey)}
+            className={`
+              rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-widest
+              cursor-pointer transition-all duration-150 whitespace-nowrap border border-dashed
+              ${isActive ? colors.active : colors.inactive}
+            `}
+            title={`Hidden host${h.label ? ': ' + h.label : ''}`}
+          >
             {h.host}
           </button>
         )

@@ -262,6 +262,14 @@ CREATE TABLE IF NOT EXISTS maintenance_jobs (
     last_error      TEXT
 );
 
+CREATE TABLE IF NOT EXISTS host_meta (
+    host        TEXT PRIMARY KEY,
+    hidden      BOOLEAN DEFAULT FALSE,
+    label       TEXT,
+    description TEXT,
+    hidden_at   TIMESTAMPTZ
+);
+
 CREATE INDEX IF NOT EXISTS idx_files_hash      ON files(hash);
 CREATE INDEX IF NOT EXISTS idx_files_size      ON files(size_bytes);
 CREATE INDEX IF NOT EXISTS idx_files_host      ON files(host);

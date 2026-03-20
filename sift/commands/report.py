@@ -94,7 +94,6 @@ def _fetch(path: str, params: dict | None = None) -> dict:
 
 
 def cmd_report(args) -> None:
-    del args
 
     print()
     print(f"sift server: {get_server_url()}")
@@ -108,8 +107,10 @@ def cmd_report(args) -> None:
     t0 = time.monotonic()
     inventory = _fetch("/stats/report/inventory")
     hosts_payload = client.get("/hosts")
+    include_hidden = getattr(args, "include_hidden", False)
     host_names = sorted(
-        [str(h.get("host") or "") for h in hosts_payload if h.get("host")],
+        [str(h.get("host") or "") for h in hosts_payload
+         if h.get("host") and (include_hidden or not h.get("hidden", False))],
         key=lambda h: h.lower(),
     )
     _progress_done(1, total_steps, label, time.monotonic() - t0)

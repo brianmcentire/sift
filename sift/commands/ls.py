@@ -162,7 +162,9 @@ def cmd_ls(args) -> None:
             print(f"sift: cannot reach server: {e}", file=sys.stderr)
             print_config_hint()
             sys.exit(1)
-        host_names = [h["host"] for h in hosts_resp]
+        include_hidden = getattr(args, "include_hidden", False)
+        host_names = [h["host"] for h in hosts_resp
+                      if include_hidden or not h.get("hidden", False)]
     else:
         host_names = [host]
 

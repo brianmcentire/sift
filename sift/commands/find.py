@@ -152,6 +152,15 @@ def cmd_find(args) -> None:
         )
         sys.exit(1)
 
+    # Filter out hidden hosts in --all-hosts mode unless --include-hidden
+    if all_hosts and not getattr(args, "include_hidden", False):
+        try:
+            hidden_hosts = {h["host"] for h in client.get("/hosts") if h.get("hidden")}
+        except Exception:
+            hidden_hosts = set()
+        if hidden_hosts:
+            entries = [e for e in entries if e.get("host") not in hidden_hosts]
+
     ls_mode = getattr(args, "ls", False)
 
     for entry in entries:

@@ -63,6 +63,9 @@ def cmd_status(args) -> None:
         # Hosts that have been fully trimmed (0 files) still appear in -v
         # scan-run history below.
         hosts = [h for h in hosts if h.get("total_files", 0) > 0]
+        verbose = getattr(args, "verbose", False)
+        if not verbose:
+            hosts = [h for h in hosts if not h.get("hidden", False)]
 
     # Compute totals from /hosts response (no full-table scan needed)
     total_hosts = len(hosts)
@@ -126,9 +129,12 @@ def cmd_status(args) -> None:
             last = "scanning..." if host in scanning else _fmt_dt(h.get("last_scan_at"))
             root = h.get("last_scan_root") or "?"
 
+            host_label = host
+            if h.get("hidden"):
+                host_label = f"{host} (hidden)"
             rows.append(
                 {
-                    "host": host,
+                    "host": host_label,
                     "files": f"{h.get('total_files', 0):,}",
                     "size": _human_size(h.get("total_bytes")),
                     "hashed": f"{h.get('total_hashed', 0):,}",

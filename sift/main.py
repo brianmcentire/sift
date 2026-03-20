@@ -48,6 +48,14 @@ def main() -> None:
         help="Retry hashing unchanged files that currently have null hash in datastore",
     )
     p_scan.add_argument("--yolo", action="store_true", help=argparse.SUPPRESS)
+    p_scan.add_argument(
+        "--as", dest="as_host", default=None,
+        help="Scan as a named virtual host (e.g. laptop-backup-2018)",
+    )
+    p_scan.add_argument(
+        "--root", default=None,
+        help="Scan root prefix to strip from stored paths (required with --as)",
+    )
 
     # sift ls
     p_ls = sub.add_parser(
@@ -82,6 +90,10 @@ def main() -> None:
     )
     p_ls.add_argument(
         "--duplicates", action="store_true", help="Show only files with duplicates"
+    )
+    p_ls.add_argument(
+        "--include-hidden", action="store_true",
+        help="Include hidden hosts in results",
     )
     p_ls.add_argument(
         "--full-hash",
@@ -146,6 +158,10 @@ def main() -> None:
         action="store_true",
         help="Include cross-host enrichment in results (slower on very large datasets)",
     )
+    p_find.add_argument(
+        "--include-hidden", action="store_true",
+        help="Include hidden hosts in results",
+    )
 
     # sift du
     p_du = sub.add_parser("du", help="Disk usage summary", conflict_handler="resolve")
@@ -183,6 +199,10 @@ def main() -> None:
         dest="by_category",
         action="store_true",
         help="Break down by file category",
+    )
+    p_du.add_argument(
+        "--include-hidden", action="store_true",
+        help="Include hidden hosts in results",
     )
 
     # sift server
@@ -302,6 +322,10 @@ def main() -> None:
         "-c", "--count", dest="count", action="store_true",
         help="Print match count only",
     )
+    p_locate.add_argument(
+        "--include-hidden", action="store_true",
+        help="Include hidden hosts in results",
+    )
 
     # sift diff
     p_diff = sub.add_parser("diff", help="Compare two directories in the inventory")
@@ -403,8 +427,33 @@ def main() -> None:
         help="JSON output to stdout",
     )
 
+    # sift host
+    p_host = sub.add_parser("host", help="Manage host visibility and metadata")
+    host_sub = p_host.add_subparsers(dest="host_action", metavar="ACTION")
+
+    p_host_list = host_sub.add_parser("list", help="Show all hosts with status")
+    p_host_list.add_argument("-v", "--verbose", action="store_true", help="Show descriptions")
+
+    p_hide = host_sub.add_parser("hide", help="Hide host from default views")
+    p_hide.add_argument("name", help="Host name")
+
+    p_unhide = host_sub.add_parser("unhide", help="Restore host to default views")
+    p_unhide.add_argument("name", help="Host name")
+
+    p_label = host_sub.add_parser("label", help="Set or show host label")
+    p_label.add_argument("name", help="Host name")
+    p_label.add_argument("value", nargs="?", default=None, help="Label text (omit to show)")
+
+    p_describe = host_sub.add_parser("describe", help="Set or show host description")
+    p_describe.add_argument("name", help="Host name")
+    p_describe.add_argument("value", nargs="?", default=None, help="Description (omit to show)")
+
     # sift report
-    sub.add_parser("report", help="Show datastore report across all hosts")
+    p_report = sub.add_parser("report", help="Show datastore report across all hosts")
+    p_report.add_argument(
+        "--include-hidden", action="store_true",
+        help="Include hidden hosts in results",
+    )
 
     # sift config
     sub.add_parser("config", help="Configure the sift server URL")
@@ -456,6 +505,10 @@ def main() -> None:
             from sift.commands.trim import cmd_trim
 
             cmd_trim(args)
+        elif args.command == "host":
+            from sift.commands.host import cmd_host
+
+            cmd_host(args)
         elif args.command == "report":
             from sift.commands.report import cmd_report
 

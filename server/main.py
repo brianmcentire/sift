@@ -134,6 +134,7 @@ from server.models import (
     FileRecord,
     HashCheckRequest,
     HostEntry,
+    HostMetaPatch,
     HostRootEntry,
     LsEntry,
     ScanRunCreate,
@@ -3049,11 +3050,13 @@ def list_hosts():
         )
         SELECT ah.host, lc.last_scan_at,
                COALESCE(lr.root_path_display, lr.root_path) AS last_scan_root,
-               COALESCE(hs.total_files, 0), hs.total_bytes, COALESCE(hs.total_hashed, 0)
+               COALESCE(hs.total_files, 0), hs.total_bytes, COALESCE(hs.total_hashed, 0),
+               COALESCE(hm.hidden, FALSE), hm.label, hm.description
         FROM all_hosts ah
         LEFT JOIN host_stats hs ON hs.host = ah.host
         LEFT JOIN latest_run lr ON lr.host = ah.host AND lr.rn = 1
         LEFT JOIN latest_complete lc ON lc.host = ah.host
+        LEFT JOIN host_meta hm ON hm.host = ah.host
         ORDER BY ah.host
     """)
     # Collect distinct non-empty drives per host from files table
@@ -3078,11 +3081,69 @@ def list_hosts():
             total_hashed=r[5],
             drives=drives_by_host.get(r[0], []),
             is_scanning=r[0] in scanning_hosts,
+            hidden=bool(r[6]),
+            label=r[7],
+            description=r[8],
         )
         for r in rows
     ]
     _cache_set(_hosts_cache, cache_key, result)
     return result
+
+
+@app.patch("/hosts/{host_name}")
+def patch_host(host_name: str, body: HostMetaPatch):
+    # Validate host exists (case-insensitive match against known hosts)
+    known = db.query(
+        "SELECT host FROM host_stats WHERE LOWER(host) = LOWER(?)"
+        " UNION SELECT DISTINCT host FROM scan_runs WHERE LOWER(host) = LOWER(?)",
+        [host_name, host_name],
+    )
+    if not known:
+        raise HTTPException(status_code=404, detail=f"Host '{host_name}' not found")
+    canonical = known[0][0]
+
+    # Read existing row (if any)
+    existing = db.query("SELECT hidden, label, description FROM host_meta WHERE host = ?", [canonical])
+    cur_hidden = bool(existing[0][0]) if existing else False
+    cur_label = existing[0][1] if existing else None
+    cur_description = existing[0][2] if existing else None
+
+    new_hidden = body.hidden if body.hidden is not None else cur_hidden
+    new_label = (body.label if body.label != "" else None) if body.label is not None else cur_label
+    new_description = (body.description if body.description != "" else None) if body.description is not None else cur_description
+
+    # Determine hidden_at
+    if body.hidden is True and not cur_hidden:
+        hidden_at_expr = "CURRENT_TIMESTAMP"
+    elif body.hidden is False:
+        hidden_at_expr = "NULL"
+    else:
+        hidden_at_expr = "(SELECT hidden_at FROM host_meta WHERE host = ?)"
+
+    if existing:
+        if hidden_at_expr.startswith("("):
+            db.execute(
+                "UPDATE host_meta SET hidden = ?, label = ?, description = ?, "
+                f"hidden_at = {hidden_at_expr} WHERE host = ?",
+                [new_hidden, new_label, new_description, canonical, canonical],
+            )
+        else:
+            db.execute(
+                "UPDATE host_meta SET hidden = ?, label = ?, description = ?, "
+                f"hidden_at = {hidden_at_expr} WHERE host = ?",
+                [new_hidden, new_label, new_description, canonical],
+            )
+    else:
+        h_at = "CURRENT_TIMESTAMP" if new_hidden else "NULL"
+        db.execute(
+            f"INSERT INTO host_meta (host, hidden, label, description, hidden_at) "
+            f"VALUES (?, ?, ?, ?, {h_at})",
+            [canonical, new_hidden, new_label, new_description],
+        )
+
+    _hosts_cache.clear()
+    return {"ok": True}
 
 
 def _root_covers(ancestor: str, candidate: str) -> bool:

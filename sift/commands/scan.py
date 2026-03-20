@@ -34,6 +34,19 @@ from sift.normalize import (
 )
 
 
+def _strip_root_prefix(path, path_display, root_norm, root_display_norm):
+    """Strip scan root prefix, replacing with /."""
+    if path.startswith(root_norm + "/"):
+        path = path[len(root_norm):]
+    elif path == root_norm:
+        path = "/"
+    if path_display.startswith(root_display_norm + "/"):
+        path_display = path_display[len(root_display_norm):]
+    elif path_display == root_display_norm:
+        path_display = "/"
+    return path, path_display
+
+
 def _chunks(lst: list, n: int):
     for i in range(0, len(lst), n):
         yield lst[i : i + n]
@@ -401,6 +414,11 @@ def cmd_scan(args) -> None:
     one_filesystem = getattr(args, "one_filesystem", False)
     allow_unraid_disks = getattr(args, "yolo", False)
     null_hash_retry = getattr(args, "null_hash_retry", False)
+    virtual_host = getattr(args, "as_host", None)
+    virtual_root_arg = getattr(args, "root", None)
+
+    if virtual_host:
+        host = virtual_host
 
     if debug:
         enable_request_log()
@@ -436,12 +454,61 @@ def cmd_scan(args) -> None:
     if drive:
         root_path_display = f"{drive}:{root_path_display}"
 
+    # ── Virtual host root-stripping setup ──────────────────────────────────
+    scan_root_normalized = None  # set when --as is active
+    scan_root_display_normalized = None
+    if virtual_host:
+        if virtual_root_arg:
+            scan_root_resolved = os.path.realpath(os.path.expanduser(virtual_root_arg))
+        else:
+            # Interactive prompt
+            print(file=sys.stderr)
+            print(f"  Scan path : {root}", file=sys.stderr)
+            print(file=sys.stderr)
+            try:
+                answer = input(f"Use {root} as scan root? [Y/n] ").strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                print(file=sys.stderr)
+                sys.exit(0)
+            if answer in ("", "y", "yes"):
+                scan_root_resolved = root
+            else:
+                try:
+                    user_root = input("Scan root path: ").strip()
+                except (KeyboardInterrupt, EOFError):
+                    print(file=sys.stderr)
+                    sys.exit(0)
+                if not user_root:
+                    sys.exit(0)
+                scan_root_resolved = os.path.realpath(os.path.expanduser(user_root))
+
+        # Validate: scan path must be under scan root
+        if not (root == scan_root_resolved or root.startswith(scan_root_resolved + os.sep)):
+            print(
+                f"sift: scan path {root} is not under scan root {scan_root_resolved}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        sr_norm, sr_display, _ = normalize_path_for_storage(scan_root_resolved, source_os)
+        scan_root_normalized = sr_norm
+        scan_root_display_normalized = sr_display
+        # Apply root-stripping to the root path itself
+        root_path, root_path_display = _strip_root_prefix(
+            root_path, root_path_display, scan_root_normalized, scan_root_display_normalized
+        )
+        drive = ""
+
     if getattr(args, "ask", False):
         from sift.config import get_server_url
 
         print(file=sys.stderr)
         print(f"  Directory : {root}", file=sys.stderr)
-        print(f"  Host tag  : {host}", file=sys.stderr)
+        if virtual_host:
+            print(f"  Host tag  : {host} (virtual)", file=sys.stderr)
+            print(f"  Scan root : {scan_root_resolved}", file=sys.stderr)
+        else:
+            print(f"  Host tag  : {host}", file=sys.stderr)
         print(f"  Sift server: {get_server_url()}", file=sys.stderr)
         print(file=sys.stderr)
         try:
@@ -871,9 +938,15 @@ def cmd_scan(args) -> None:
                             _debug(f"[excluded file] {raw_path}")
                         continue
 
-                    path_lower, path_display, drive = normalize_path_for_storage(
+                    path_lower, path_display, file_drive = normalize_path_for_storage(
                         raw_path, source_os
                     )
+                    if scan_root_normalized:
+                        path_lower, path_display = _strip_root_prefix(
+                            path_lower, path_display,
+                            scan_root_normalized, scan_root_display_normalized,
+                        )
+                        file_drive = ""
                     cached = cache.get(path_lower)
                     mtime_val = math.floor(stat_result.st_mtime)
 
@@ -906,7 +979,7 @@ def cmd_scan(args) -> None:
                     if (not force_null_hash_retry) and (
                         not needs_rehash(stat_result, cached)
                     ):
-                        _queue_seen({"drive": drive, "path": path_lower})
+                        _queue_seen({"drive": file_drive, "path": path_lower})
                         stats["files_cached"] += 1
                         stats["files_scanned"] += 1
                         now = time.time()
@@ -935,7 +1008,7 @@ def cmd_scan(args) -> None:
                         _queue_upsert(
                             _make_record(
                                 host=host,
-                                drive=drive,
+                                drive=file_drive,
                                 path=path_lower,
                                 path_display=path_display,
                                 filename=filename,
@@ -963,7 +1036,7 @@ def cmd_scan(args) -> None:
                         _queue_upsert(
                             _make_record(
                                 host=host,
-                                drive=drive,
+                                drive=file_drive,
                                 path=path_lower,
                                 path_display=path_display,
                                 filename=filename,
@@ -991,7 +1064,7 @@ def cmd_scan(args) -> None:
                         _queue_upsert(
                             _make_record(
                                 host=host,
-                                drive=drive,
+                                drive=file_drive,
                                 path=path_lower,
                                 path_display=path_display,
                                 filename=filename,
@@ -1024,7 +1097,7 @@ def cmd_scan(args) -> None:
                         _queue_upsert(
                             _make_record(
                                 host=host,
-                                drive=drive,
+                                drive=file_drive,
                                 path=path_lower,
                                 path_display=path_display,
                                 filename=filename,
@@ -1052,7 +1125,7 @@ def cmd_scan(args) -> None:
                             _queue_upsert(
                                 _make_record(
                                     host=host,
-                                    drive=drive,
+                                    drive=file_drive,
                                     path=path_lower,
                                     path_display=path_display,
                                     filename=filename,
@@ -1079,7 +1152,7 @@ def cmd_scan(args) -> None:
                             _queue_upsert(
                                 _make_record(
                                     host=host,
-                                    drive=drive,
+                                    drive=file_drive,
                                     path=path_lower,
                                     path_display=path_display,
                                     filename=filename,
@@ -1110,7 +1183,7 @@ def cmd_scan(args) -> None:
                                 _queue_upsert(
                                     _make_record(
                                         host=host,
-                                        drive=drive,
+                                        drive=file_drive,
                                         path=path_lower,
                                         path_display=path_display,
                                         filename=filename,
@@ -1136,7 +1209,7 @@ def cmd_scan(args) -> None:
                                 _queue_upsert(
                                     _make_record(
                                         host=host,
-                                        drive=drive,
+                                        drive=file_drive,
                                         path=path_lower,
                                         path_display=path_display,
                                         filename=filename,

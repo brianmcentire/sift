@@ -1,4 +1,5 @@
 import HostChips from './HostChips.jsx'
+import HiddenHostDropdown from './HiddenHostDropdown.jsx'
 import SearchBar from './SearchBar.jsx'
 import DirectorySearch from './DirectorySearch.jsx'
 import FileTypeFilter from './FileTypeFilter.jsx'
@@ -10,8 +11,11 @@ export default function Header({
   viewMode,
   onToggleViewMode,
   hosts,
+  hiddenHosts,
   selectedHosts,
   setSelectedHosts,
+  promotedHiddenHosts,
+  setPromotedHiddenHosts,
   hostColorMap,
   dirQuery,
   setDirQuery,
@@ -122,13 +126,24 @@ export default function Header({
         {/* Bottom row: host chips + API activity */}
         {hosts.length > 0 && (
           <div className="mt-2 flex items-center justify-between gap-3">
-            <div className="min-w-0 flex-1">
+            <div className="min-w-0 flex-1 flex items-center gap-2">
               <HostChips
                 hosts={hosts}
+                promotedHiddenHosts={hiddenHosts.filter(h => promotedHiddenHosts.has(h.host))}
                 selectedHosts={selectedHosts}
                 setSelectedHosts={setSelectedHosts}
                 hostColorMap={hostColorMap}
               />
+              {hiddenHosts.length > 0 && (
+                <HiddenHostDropdown
+                  hiddenHosts={hiddenHosts}
+                  selectedHosts={selectedHosts}
+                  setSelectedHosts={setSelectedHosts}
+                  promotedHiddenHosts={promotedHiddenHosts}
+                  setPromotedHiddenHosts={setPromotedHiddenHosts}
+                  hostColorMap={hostColorMap}
+                />
+              )}
             </div>
 
             <div
