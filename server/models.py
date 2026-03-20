@@ -283,3 +283,22 @@ class ReportSizeBucketRow(BaseModel):
 class ReportSizeDistributionResponse(BaseModel):
     total_files: int
     buckets: list[ReportSizeBucketRow]
+
+
+# ---------------------------------------------------------------------------
+# Hash check models
+# ---------------------------------------------------------------------------
+
+
+class HashCheckExclude(BaseModel):
+    host: str
+    prefix: str
+
+
+class HashCheckRequest(BaseModel):
+    hashes: list[str]
+    host: str = ""
+    path_prefix: str = ""
+    drive: str = ""
+    min_size: int = 0
+    exclude: list[HashCheckExclude] = Field(default_factory=list)

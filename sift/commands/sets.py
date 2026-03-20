@@ -65,24 +65,31 @@ def cmd_sets(args) -> None:
     a_hashes = set(a_hash_index.keys())
 
     # --- Fetch B -----------------------------------------------------------
-    # Only need full B entries for --reverse; otherwise streaming hashes suffice
+    # --reverse needs full B entries to list B-only files.
+    # All other modes POST A's hashes to the server and get back the
+    # intersection — much faster than streaming all of B.
     need_b_entries = reverse_mode
+    b_complete = False  # do we know ALL of B's hashes?
 
     try:
-        if b_mode[0] == "covered":
-            if reverse_mode:
+        if need_b_entries:
+            # Must fetch full B entries for --reverse file list
+            if b_mode[0] == "covered":
                 print(
                     "sift sets: error: --reverse with --covered is not supported "
                     "(target set too large to enumerate)",
                     file=sys.stderr,
                 )
                 sys.exit(2)
-            b_hashes, b_entries = _build_covered_hashes(
-                a_specs, b_mode[1], min_size,
+            b_hashes, b_entries = _fetch_b_entries(b_mode[1], min_size)
+            b_complete = True
+        elif b_mode[0] == "covered":
+            b_hashes, b_entries = _check_covered(
+                a_specs, a_hashes, b_mode[1], min_size,
             )
         else:
-            b_hashes, b_entries = _build_target_hashes(
-                b_mode[1], min_size, need_b_entries,
+            b_hashes, b_entries = _check_targets(
+                b_mode[1], a_hashes, min_size,
             )
     except Exception as e:
         print(f"sift sets: error: {e}", file=sys.stderr)
@@ -90,7 +97,7 @@ def cmd_sets(args) -> None:
 
     # --- Set operations ----------------------------------------------------
     a_only_hashes = a_hashes - b_hashes
-    b_only_hashes = b_hashes - a_hashes
+    b_only_hashes = b_hashes - a_hashes if b_complete else set()
     common_hashes = a_hashes & b_hashes
 
     # --- Unhashed handling -------------------------------------------------
@@ -148,7 +155,7 @@ def cmd_sets(args) -> None:
                 "files": len(a_only_files),
                 "size_bytes": a_only_size,
             },
-            "b_only_hashes": len(b_only_hashes),
+            "b_only_hashes": len(b_only_hashes) if b_complete else None,
             "common": {
                 "hashes": len(common_hashes),
                 "files_in_a": len(common_files_a),
@@ -184,7 +191,7 @@ def cmd_sets(args) -> None:
             a_specs, b_mode,
             a_total_files, a_total_size, a_unique_hashes, a_unhashed_count,
             len(a_only_hashes), len(a_only_files), a_only_size,
-            len(b_only_hashes),
+            len(b_only_hashes) if b_complete else None,
             len(common_hashes), len(common_files_a), common_size_a,
             covered_pct,
             unhashed_covered, unhashed_unverifiable,
@@ -314,111 +321,120 @@ def _fetch_entries(host: str, path: str, drive: str, min_size: int) -> list[dict
     return entries if isinstance(entries, list) else []
 
 
-def _fetch_hashes_streaming(
-    host: str,
-    path_prefix: str,
-    drive: str,
-    min_size: int,
-    exclude_prefixes: list[str] | None = None,
-) -> tuple[set[str], int]:
-    """Fetch hashes via streaming /files/hashes endpoint.
-
-    Returns (hash_set, count_of_hashes_added).
-    """
-    params: dict = {}
+def _check_hashes_remote(
+    a_hashes: set[str],
+    host: str = "",
+    path_prefix: str = "",
+    drive: str = "",
+    min_size: int = 0,
+    exclude: list[dict] | None = None,
+) -> set[str]:
+    """POST A hashes to server, get back the subset that exist in scope."""
+    if not a_hashes:
+        return set()
+    body: dict = {"hashes": list(a_hashes)}
     if host:
-        params["host"] = host
+        body["host"] = host
     if path_prefix:
-        params["path_prefix"] = path_prefix
+        body["path_prefix"] = path_prefix
     if drive:
-        params["drive"] = drive
+        body["drive"] = drive
     if min_size:
-        params["min_size"] = min_size
-
-    hashes: set[str] = set()
-    resp = client.get_stream("/files/hashes", params=params)
-    count = 0
-    for line in resp.iter_lines(decode_unicode=True):
-        if not line:
-            continue
-        parts = line.split("\t", 1)
-        h = parts[0]
-        if exclude_prefixes and len(parts) > 1:
-            p = parts[1]
-            if any(p == ep or p.startswith(ep + "/") for ep in exclude_prefixes):
-                continue
-        hashes.add(h)
-        count += 1
-    return hashes, count
+        body["min_size"] = min_size
+    if exclude:
+        body["exclude"] = exclude
+    result = client.post("/files/hashes/check", body, timeout=(5, 120))
+    return set(result)
 
 
-def _build_target_hashes(
+def _fetch_b_entries(
     b_specs: list[tuple[str, str, str]],
     min_size: int,
-    need_entries: bool,
-) -> tuple[set[str], list[dict] | None]:
-    """Build B hash set from explicit targets."""
-    if need_entries:
-        all_entries: list[dict] = []
-        for host, path, drive in b_specs:
-            entries = _fetch_entries(host, path, drive, min_size)
-            all_entries.extend(entries)
-        b_hashes = {e["hash"] for e in all_entries if e.get("hash")}
-        return b_hashes, all_entries
-
-    # Streaming mode
-    all_hashes: set[str] = set()
+) -> tuple[set[str], list[dict]]:
+    """Fetch full B entries via /files (needed for --reverse file list)."""
+    all_entries: list[dict] = []
     for host, path, drive in b_specs:
-        hashes, count = _fetch_hashes_streaming(host, path, drive, min_size)
+        entries = _fetch_entries(host, path, drive, min_size)
+        all_entries.extend(entries)
+    b_hashes = {e["hash"] for e in all_entries if e.get("hash")}
+    return b_hashes, all_entries
+
+
+def _check_targets(
+    b_specs: list[tuple[str, str, str]],
+    a_hashes: set[str],
+    min_size: int,
+) -> tuple[set[str], None]:
+    """Check which A hashes exist in explicit B targets (POST approach)."""
+    found: set[str] = set()
+    for host, path, drive in b_specs:
+        batch_found = _check_hashes_remote(
+            a_hashes - found,  # only check hashes not yet found
+            host, path, drive, min_size,
+        )
+        found |= batch_found
         label = f"{host}:{path}" if host else path
         if sys.stderr.isatty():
-            print(f"  Fetching {label} ... {count:,} hashes", file=sys.stderr)
-        all_hashes |= hashes
-    return all_hashes, None
+            print(
+                f"  Checked {label} ... {len(found):,} of {len(a_hashes):,} found",
+                file=sys.stderr,
+            )
+        if found == a_hashes:
+            break  # all found, skip remaining targets
+    return found, None
 
 
-def _build_covered_hashes(
+def _check_covered(
     a_specs: list[tuple[str, str, str]],
+    a_hashes: set[str],
     covered_hosts: list[str],
     min_size: int,
 ) -> tuple[set[str], None]:
-    """Build B hash set for --covered mode (always streaming)."""
-    try:
-        all_hosts_data = client.get("/hosts")
-        all_host_names = [h["host"] for h in all_hosts_data]
-    except Exception as e:
-        raise RuntimeError(f"cannot fetch host list: {e}")
+    """Check which A hashes exist elsewhere in the datastore (POST approach)."""
+    # Build exclusion list so source files don't cover themselves
+    exclude = [{"host": h, "prefix": p} for h, p, _d in a_specs]
 
     if covered_hosts:
-        target_hosts = []
+        # Resolve specified hosts
+        try:
+            all_hosts_data = client.get("/hosts")
+            all_host_names = [h["host"] for h in all_hosts_data]
+        except Exception as e:
+            raise RuntimeError(f"cannot fetch host list: {e}")
+
+        found: set[str] = set()
         for ch in covered_hosts:
             resolved = resolve_host(ch)
-            if resolved in all_host_names:
-                target_hosts.append(resolved)
-            else:
+            if resolved not in all_host_names:
                 print(
                     f"sift sets: warning: host '{ch}' not found in datastore",
                     file=sys.stderr,
                 )
+                continue
+            batch_found = _check_hashes_remote(
+                a_hashes - found, host=resolved, min_size=min_size,
+                exclude=exclude,
+            )
+            found |= batch_found
+            if sys.stderr.isatty():
+                print(
+                    f"  Checked {resolved} ... {len(found):,} of {len(a_hashes):,} found",
+                    file=sys.stderr,
+                )
+            if found == a_hashes:
+                break
     else:
-        target_hosts = list(all_host_names)
-
-    if not target_hosts:
-        return set(), None
-
-    # Build source exclusion prefixes per host
-    exclude_map: dict[str, list[str]] = {}
-    for a_host, a_path, _drive in a_specs:
-        exclude_map.setdefault(a_host, []).append(a_path)
-
-    all_hashes: set[str] = set()
-    for host in target_hosts:
-        excludes = exclude_map.get(host)
-        hashes, count = _fetch_hashes_streaming(host, "", "", min_size, excludes)
+        # All hosts — single call, no host filter
+        found = _check_hashes_remote(
+            a_hashes, min_size=min_size, exclude=exclude,
+        )
         if sys.stderr.isatty():
-            print(f"  Fetching {host} ... {count:,} hashes", file=sys.stderr)
-        all_hashes |= hashes
-    return all_hashes, None
+            print(
+                f"  Checked all hosts ... {len(found):,} of {len(a_hashes):,} found",
+                file=sys.stderr,
+            )
+
+    return found, None
 
 
 # ---------------------------------------------------------------------------
@@ -625,7 +641,8 @@ def _print_summary(
         f"  A only:      {a_only_hash_count:>10,} hashes  "
         f"({a_only_file_count:,} files)   {_human_size(a_only_size):>10}\n"
     )
-    w(f"  B only:      {b_only_hash_count:>10,} hashes\n")
+    if b_only_hash_count is not None:
+        w(f"  B only:      {b_only_hash_count:>10,} hashes\n")
     w(
         f"  A \u2229 B:       {common_hash_count:>10,} hashes  "
         f"({common_file_count_a:,} files)   {_human_size(common_size_a):>10}"

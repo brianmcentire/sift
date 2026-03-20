@@ -132,6 +132,7 @@ from server.models import (
     FilePageResponse,
     DuplicateHashCountResponse,
     FileRecord,
+    HashCheckRequest,
     HostEntry,
     HostRootEntry,
     LsEntry,
@@ -1009,6 +1010,63 @@ def stream_hashes(
             yield r[0] + "\t" + r[1] + "\n"
 
     return StreamingResponse(generate(), media_type="text/plain")
+
+
+@app.post("/files/hashes/check")
+def check_hashes(req: HashCheckRequest):
+    """Check which of the provided hashes exist in the specified scope.
+
+    Accepts a list of hashes and returns the subset found in the datastore,
+    optionally filtered by host, path prefix, drive, min size, and with
+    path-level exclusions.  Batches the IN clause to keep query plans fast.
+    """
+    if not req.hashes:
+        return []
+
+    req_start = time.monotonic()
+
+    # Build scope conditions
+    scope_conds = ["hash IS NOT NULL"]
+    scope_params: list = []
+
+    if req.host:
+        scope_conds.append("host = ?")
+        scope_params.append(req.host)
+    if req.path_prefix:
+        p = req.path_prefix.lower().rstrip("/")
+        scope_conds.append("(path LIKE ? OR path = ?)")
+        scope_params.extend([p + "/%", p])
+    if req.drive:
+        scope_conds.append("drive = ?")
+        scope_params.append(req.drive)
+    if req.min_size:
+        scope_conds.append("size_bytes >= ?")
+        scope_params.append(req.min_size)
+
+    for exc in req.exclude:
+        prefix = exc.prefix.lower().rstrip("/")
+        scope_conds.append("NOT (host = ? AND (path LIKE ? OR path = ?))")
+        scope_params.extend([exc.host, prefix + "/%", prefix])
+
+    where = " AND ".join(scope_conds)
+
+    BATCH = 10_000
+    found: set[str] = set()
+    for i in range(0, len(req.hashes), BATCH):
+        batch = req.hashes[i : i + BATCH]
+        placeholders = ",".join(["?"] * len(batch))
+        sql = (
+            f"SELECT DISTINCT hash FROM files "
+            f"WHERE hash IN ({placeholders}) AND {where}"
+        )
+        rows = db.query(sql, batch + scope_params)
+        found.update(r[0] for r in rows)
+
+    _log_perf(
+        "/files/hashes/check", req_start,
+        input_hashes=len(req.hashes), found=len(found),
+    )
+    return sorted(found)
 
 
 # ---------------------------------------------------------------------------

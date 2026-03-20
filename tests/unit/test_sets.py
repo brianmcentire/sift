@@ -24,28 +24,19 @@ def _make_args(**overrides):
     return SimpleNamespace(**defaults)
 
 
-class FakeStreamResponse:
-    """Minimal mock for client.get_stream() return value."""
-
-    def __init__(self, lines):
-        self._lines = lines
-
-    def iter_lines(self, decode_unicode=False):
-        return iter(self._lines)
-
-
-def _setup(monkeypatch, entries_map=None, stream_map=None, hosts=None):
+def _setup(monkeypatch, entries_map=None, b_hashes_map=None, hosts=None):
     """Set up monkeypatched sift.commands.sets module.
 
     entries_map: dict[path_prefix → list[entry]] for /files calls
-    stream_map: dict[key → list[str]] for /files/hashes streaming calls
-                Keys tried in order: "host:prefix", "host:", prefix, ""
+    b_hashes_map: dict[key → set[str]] for POST /files/hashes/check calls.
+                  Keys tried: "host:prefix", "host:", prefix, ""
+                  Values are sets of hashes that "exist" in that scope.
     hosts: list of host dicts for /hosts
     """
     from sift.commands import sets as mod
 
     entries_map = entries_map or {}
-    stream_map = stream_map or {}
+    b_hashes_map = b_hashes_map or {}
     hosts = hosts or [{"host": "mac"}]
 
     def fake_get(path, params=None):
@@ -56,15 +47,35 @@ def _setup(monkeypatch, entries_map=None, stream_map=None, hosts=None):
             return entries_map.get(pp, [])
         return []
 
-    def fake_get_stream(path, params=None):
-        if path == "/files/hashes":
-            host = (params or {}).get("host", "")
-            pp = (params or {}).get("path_prefix", "")
+    def fake_post(path, data, timeout=None):
+        if path == "/files/hashes/check":
+            input_hashes = set(data.get("hashes", []))
+            host = data.get("host", "")
+            pp = data.get("path_prefix", "")
+            excludes = data.get("exclude", [])
+
+            # Find matching hash pool
+            pool = set()
             for k in [f"{host}:{pp}", f"{host}:", pp, ""]:
-                if k in stream_map:
-                    return FakeStreamResponse(stream_map[k])
-            return FakeStreamResponse([])
-        return FakeStreamResponse([])
+                if k in b_hashes_map:
+                    pool = b_hashes_map[k]
+                    break
+
+            # Apply exclusions (remove hashes that ONLY exist under excluded paths)
+            # For simplicity in tests, exclusions just remove exact hash matches
+            # from an optional exclude set
+            exclude_key = None
+            for exc in excludes:
+                ek = f"exclude:{exc['host']}:{exc['prefix']}"
+                if ek in b_hashes_map:
+                    exclude_key = ek
+                    break
+
+            if exclude_key:
+                pool = pool - b_hashes_map[exclude_key]
+
+            return sorted(input_hashes & pool)
+        return []
 
     monkeypatch.setattr(mod, "print_server_info", lambda: None)
     monkeypatch.setattr(mod, "get_cli_config", lambda: {})
@@ -73,7 +84,7 @@ def _setup(monkeypatch, entries_map=None, stream_map=None, hosts=None):
     monkeypatch.setattr(mod, "parse_host_path", lambda arg, dh: (dh, arg))
     monkeypatch.setattr(mod, "extract_drive_path", lambda p: ("", p))
     monkeypatch.setattr(mod.client, "get", fake_get)
-    monkeypatch.setattr(mod.client, "get_stream", fake_get_stream)
+    monkeypatch.setattr(mod.client, "post", fake_post)
     monkeypatch.setenv("SIFT_HOST", "")
 
     return mod
@@ -86,8 +97,9 @@ def _file(path, hash=None, size=100, mtime=1000):
             "size_bytes": size, "mtime": mtime, "drive": ""}
 
 
-def _stream_line(hash, path):
-    return f"{hash}\t{path}"
+def _hashes(*hashes):
+    """Build a set of hashes for b_hashes_map."""
+    return set(hashes)
 
 
 # ---------------------------------------------------------------------------
@@ -99,11 +111,7 @@ def test_fully_covered(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/src": a},
-        stream_map={"/tgt": [
-            _stream_line("aaa", "/tgt/x.txt"),
-            _stream_line("bbb", "/tgt/y.txt"),
-            _stream_line("ccc", "/tgt/z.txt"),
-        ]},
+        b_hashes_map={"mac:/tgt": _hashes("aaa", "bbb", "ccc")},
     )
     with pytest.raises(SystemExit) as exc:
         mod.cmd_sets(_make_args(paths=["/src", "/tgt"]))
@@ -126,9 +134,7 @@ def test_partially_covered(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/src": a},
-        stream_map={"/tgt": [
-            _stream_line("aaa", "/tgt/x.txt"),
-        ]},
+        b_hashes_map={"mac:/tgt": _hashes("aaa")},
     )
     with pytest.raises(SystemExit) as exc:
         mod.cmd_sets(_make_args(paths=["/src", "/tgt"]))
@@ -149,7 +155,7 @@ def test_completely_disjoint(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/src": a},
-        stream_map={"/tgt": [_stream_line("zzz", "/tgt/z.txt")]},
+        b_hashes_map={"mac:/tgt": _hashes("zzz")},
     )
     with pytest.raises(SystemExit) as exc:
         mod.cmd_sets(_make_args(paths=["/src", "/tgt"]))
@@ -167,7 +173,7 @@ def test_empty_source(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/src": []},
-        stream_map={"/tgt": [_stream_line("aaa", "/tgt/x.txt")]},
+        b_hashes_map={"mac:/tgt": _hashes("aaa")},
     )
     with pytest.raises(SystemExit) as exc:
         mod.cmd_sets(_make_args(paths=["/src", "/tgt"]))
@@ -184,7 +190,7 @@ def test_unhashed_a_hashed_b(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/src": a},
-        stream_map={"/tgt": [_stream_line("aaa", "/tgt/a.txt")]},
+        b_hashes_map={"mac:/tgt": _hashes("aaa")},
     )
     with pytest.raises(SystemExit) as exc:
         mod.cmd_sets(_make_args(paths=["/src", "/tgt"]))
@@ -204,7 +210,6 @@ def test_unhashed_both_sizemtime_match(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/src": a, "/tgt": b},
-        stream_map={},
     )
     # Use --reverse so B entries are fetched via /files (enabling unhashed matching)
     with pytest.raises(SystemExit) as exc:
@@ -219,12 +224,12 @@ def test_unhashed_both_sizemtime_match(monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 def test_unhashed_both_no_match(monkeypatch, capsys):
-    # In default (streaming) mode, unhashed A files are always unverifiable
+    # In POST mode, unhashed A files are always unverifiable (no B entries)
     a = [_file("/src/photo.jpg", None, size=5000, mtime=12345)]
     mod = _setup(
         monkeypatch,
         entries_map={"/src": a},
-        stream_map={"/tgt": []},
+        b_hashes_map={"mac:/tgt": set()},
     )
     with pytest.raises(SystemExit) as exc:
         mod.cmd_sets(_make_args(paths=["/src", "/tgt"]))
@@ -243,9 +248,9 @@ def test_multiple_b_targets(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/src": a},
-        stream_map={
-            "/tgt1": [_stream_line("aaa", "/tgt1/x.txt")],
-            "/tgt2": [_stream_line("bbb", "/tgt2/y.txt")],
+        b_hashes_map={
+            "mac:/tgt1": _hashes("aaa"),
+            "mac:/tgt2": _hashes("bbb"),
         },
     )
     with pytest.raises(SystemExit) as exc:
@@ -264,12 +269,7 @@ def test_ab_flag_grouping(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/a1": a1, "/a2": a2},
-        stream_map={
-            "/b1": [
-                _stream_line("aaa", "/b1/x.txt"),
-                _stream_line("bbb", "/b1/y.txt"),
-            ],
-        },
+        b_hashes_map={"mac:/b1": _hashes("aaa", "bbb")},
     )
     with pytest.raises(SystemExit) as exc:
         mod.cmd_sets(_make_args(a_paths=["/a1", "/a2"], b_paths=["/b1"]))
@@ -292,7 +292,7 @@ def test_cross_host(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/photos": a},
-        stream_map={"unraid:": [_stream_line("aaa", "/media/img.jpg")]},
+        b_hashes_map={"unraid:/media": _hashes("aaa")},
         hosts=[{"host": "mac"}, {"host": "unraid"}],
     )
     monkeypatch.setattr(mod, "parse_host_path", cross_parse)
@@ -317,7 +317,7 @@ def test_windows_drive_paths(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/users/brian": a},
-        stream_map={"/media": [_stream_line("aaa", "/media/x.txt")]},
+        b_hashes_map={"mac:/media": _hashes("aaa")},
     )
     monkeypatch.setattr(mod, "extract_drive_path", drive_parse)
 
@@ -338,7 +338,7 @@ def test_min_size_filter(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/src": a},
-        stream_map={"/tgt": [_stream_line("aaa", "/tgt/x.txt")]},
+        b_hashes_map={"mac:/tgt": _hashes("aaa")},
     )
     # min_size=1000 should exclude small.txt from consideration
     # but since we pass min_size to the server, the server filters.
@@ -359,7 +359,7 @@ def test_summary_only(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/src": a},
-        stream_map={"/tgt": [_stream_line("zzz", "/tgt/z.txt")]},
+        b_hashes_map={"mac:/tgt": set()},
     )
     with pytest.raises(SystemExit) as exc:
         mod.cmd_sets(_make_args(paths=["/src", "/tgt"], summary=True))
@@ -378,7 +378,7 @@ def test_no_summary(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/src": a},
-        stream_map={"/tgt": [_stream_line("zzz", "/tgt/z.txt")]},
+        b_hashes_map={"mac:/tgt": set()},
     )
     with pytest.raises(SystemExit) as exc:
         mod.cmd_sets(_make_args(paths=["/src", "/tgt"], no_summary=True))
@@ -397,12 +397,10 @@ def test_covered_all_hosts(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/backup": a},
-        stream_map={
-            "mac:": [
-                _stream_line("aaa", "/media/a.txt"),
-                _stream_line("bbb", "/backup/a.txt"),  # should be excluded
-            ],
-        },
+        # "" key = no host/path filter (--covered all hosts)
+        # The POST sends exclude=[{host:mac, prefix:/backup}]
+        # Our fake_post handles this by checking for exclude keys
+        b_hashes_map={"": _hashes("aaa", "bbb")},
         hosts=[{"host": "mac"}],
     )
     with pytest.raises(SystemExit) as exc:
@@ -420,9 +418,7 @@ def test_covered_specific_host(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/backup": a},
-        stream_map={
-            "unraid:": [_stream_line("aaa", "/media/a.txt")],
-        },
+        b_hashes_map={"unraid:": _hashes("aaa")},
         hosts=[{"host": "mac"}, {"host": "unraid"}],
     )
     with pytest.raises(SystemExit) as exc:
@@ -466,7 +462,7 @@ def test_common_mode(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/src": a},
-        stream_map={"/tgt": [_stream_line("aaa", "/tgt/x.txt")]},
+        b_hashes_map={"mac:/tgt": _hashes("aaa")},
     )
     with pytest.raises(SystemExit) as exc:
         mod.cmd_sets(_make_args(paths=["/src", "/tgt"], common=True))
@@ -489,7 +485,7 @@ def test_limit_output(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/src": a},
-        stream_map={"/tgt": []},
+        b_hashes_map={"mac:/tgt": set()},
     )
     with pytest.raises(SystemExit) as exc:
         mod.cmd_sets(_make_args(paths=["/src", "/tgt"], n=2))
@@ -512,7 +508,7 @@ def test_duplicate_hashes_in_source(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/src": a},
-        stream_map={"/tgt": [_stream_line("bbb", "/tgt/b.txt")]},
+        b_hashes_map={"mac:/tgt": _hashes("bbb")},
     )
     with pytest.raises(SystemExit) as exc:
         mod.cmd_sets(_make_args(paths=["/src", "/tgt"]))
@@ -574,7 +570,7 @@ def test_long_format(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/src": a},
-        stream_map={"/tgt": []},
+        b_hashes_map={"mac:/tgt": set()},
     )
     with pytest.raises(SystemExit) as exc:
         mod.cmd_sets(_make_args(paths=["/src", "/tgt"], long=True))
@@ -596,7 +592,7 @@ def test_json_output(monkeypatch, capsys):
     mod = _setup(
         monkeypatch,
         entries_map={"/src": a},
-        stream_map={"/tgt": [_stream_line("aaa", "/tgt/x.txt")]},
+        b_hashes_map={"mac:/tgt": _hashes("aaa")},
     )
     with pytest.raises(SystemExit) as exc:
         mod.cmd_sets(_make_args(paths=["/src", "/tgt"], json=True))
