@@ -24,7 +24,8 @@ def _make_args(**overrides):
     return SimpleNamespace(**defaults)
 
 
-def _setup(monkeypatch, entries_map=None, b_hashes_map=None, hosts=None):
+def _setup(monkeypatch, entries_map=None, b_hashes_map=None, hosts=None,
+           hash_hosts_map=None):
     """Set up monkeypatched sift.commands.sets module.
 
     entries_map: dict[path_prefix → list[entry]] for /files calls
@@ -32,12 +33,14 @@ def _setup(monkeypatch, entries_map=None, b_hashes_map=None, hosts=None):
                   Keys tried: "host:prefix", "host:", prefix, ""
                   Values are sets of hashes that "exist" in that scope.
     hosts: list of host dicts for /hosts
+    hash_hosts_map: dict[hash → "host1,host2"] for POST /files/hashes/hosts
     """
     from sift.commands import sets as mod
 
     entries_map = entries_map or {}
     b_hashes_map = b_hashes_map or {}
     hosts = hosts or [{"host": "mac"}]
+    hash_hosts_map = hash_hosts_map or {}
 
     def fake_get(path, params=None):
         if path == "/hosts":
@@ -75,6 +78,8 @@ def _setup(monkeypatch, entries_map=None, b_hashes_map=None, hosts=None):
                 pool = pool - b_hashes_map[exclude_key]
 
             return sorted(input_hashes & pool)
+        if path == "/files/hashes/hosts":
+            return {h: hash_hosts_map[h] for h in data if h in hash_hosts_map}
         return []
 
     monkeypatch.setattr(mod, "print_server_info", lambda: None)
@@ -609,6 +614,33 @@ def test_json_output(monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 # _parse_size helper
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# --common -l shows host locations
+# ---------------------------------------------------------------------------
+
+def test_common_long_shows_hosts(monkeypatch, capsys):
+    a = [
+        _file("/src/a.txt", "aaa", size=5000, mtime=1342310400),
+        _file("/src/b.txt", "bbb", size=3000, mtime=1342310400),
+    ]
+    mod = _setup(
+        monkeypatch,
+        entries_map={"/src": a},
+        b_hashes_map={"mac:/tgt": _hashes("aaa")},
+        hash_hosts_map={"aaa": "mac,unraid"},
+    )
+    with pytest.raises(SystemExit) as exc:
+        mod.cmd_sets(_make_args(paths=["/src", "/tgt"], common=True, long=True))
+    assert exc.value.code == 1  # bbb not covered
+    out = capsys.readouterr()
+    # Source host "mac" should be filtered out, only "unraid" remains
+    assert "[unraid]" in out.out
+    assert "[mac" not in out.out
+    assert "/src/a.txt" in out.out
+    # bbb not in common output
+    assert "/src/b.txt" not in out.out
+
 
 def test_parse_size():
     from sift.commands.sets import _parse_size

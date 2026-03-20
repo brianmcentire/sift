@@ -1069,6 +1069,35 @@ def check_hashes(req: HashCheckRequest):
     return sorted(found)
 
 
+@app.post("/files/hashes/hosts")
+def hash_hosts(hashes: list[str]):
+    """Return hash → comma-separated host list for the given hashes.
+
+    Uses the pre-aggregated host_hash_stats table for fast lookup.
+    Returns a dict like {"abc123": "host1,host2", ...}.
+    """
+    if not hashes:
+        return {}
+
+    req_start = time.monotonic()
+    result: dict[str, str] = {}
+
+    BATCH = 10_000
+    for i in range(0, len(hashes), BATCH):
+        batch = hashes[i : i + BATCH]
+        placeholders = ",".join(["?"] * len(batch))
+        rows = db.query(
+            f"SELECT hash, STRING_AGG(DISTINCT host, ',' ORDER BY host) "
+            f"FROM host_hash_stats WHERE hash IN ({placeholders}) GROUP BY hash",
+            batch,
+        )
+        for r in rows:
+            result[r[0]] = r[1]
+
+    _log_perf("/files/hashes/hosts", req_start, input=len(hashes), found=len(result))
+    return result
+
+
 # ---------------------------------------------------------------------------
 # File listing
 # ---------------------------------------------------------------------------

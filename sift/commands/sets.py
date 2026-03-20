@@ -46,12 +46,23 @@ def cmd_sets(args) -> None:
         sys.exit(2)
 
     # --- Fetch A entries (full, for file list) -----------------------------
+    _progress = sys.stderr.isatty()
     try:
         a_entries: list[dict] = []
         for host, path, drive in a_specs:
+            if _progress:
+                label = f"{host}:{path}" if host else path
+                sys.stderr.write(f"  Fetching source {label} ...\r")
+                sys.stderr.flush()
             entries = _fetch_entries(host, path, drive, min_size)
             a_entries.extend(entries)
+        if _progress:
+            sys.stderr.write(" " * 72 + "\r")
+            sys.stderr.flush()
     except Exception as e:
+        if _progress:
+            sys.stderr.write(" " * 72 + "\r")
+            sys.stderr.flush()
         print(f"sift sets: error: {e}", file=sys.stderr)
         sys.exit(2)
 
@@ -63,6 +74,11 @@ def cmd_sets(args) -> None:
     # --- Build A hash index ------------------------------------------------
     a_hash_index, a_unhashed = _build_hash_index(a_entries)
     a_hashes = set(a_hash_index.keys())
+    if _progress:
+        sys.stderr.write(
+            f"  Source: {len(a_entries):,} files, {len(a_hashes):,} unique hashes\r"
+        )
+        sys.stderr.flush()
 
     # --- Fetch B -----------------------------------------------------------
     # --reverse needs full B entries to list B-only files.
@@ -174,11 +190,15 @@ def cmd_sets(args) -> None:
             )
             if limit is not None and limit > 0:
                 file_list = file_list[:limit]
+            json_a_hosts = {h for h, _p, _d in a_specs}
+            json_host_map = _fetch_hash_hosts(file_list, exclude_hosts=json_a_hosts)
             result["files"] = [
                 {
                     "path": _display_path(e),
                     "size_bytes": e.get("size_bytes"),
                     "hash": e.get("hash"),
+                    **({"hosts": json_host_map[e["hash"]].split(",")}
+                       if e.get("hash") and e["hash"] in json_host_map else {}),
                 }
                 for e in file_list
             ]
@@ -208,7 +228,14 @@ def cmd_sets(args) -> None:
         file_list.sort(key=lambda e: _display_path(e))
         if limit is not None and limit > 0:
             file_list = file_list[:limit]
-        _print_file_list(file_list, long_fmt)
+
+        # Enrich with host locations for -l output
+        host_map: dict[str, str] = {}
+        if long_fmt and file_list:
+            a_hosts = {h for h, _p, _d in a_specs}
+            host_map = _fetch_hash_hosts(file_list, exclude_hosts=a_hosts)
+
+        _print_file_list(file_list, long_fmt, host_map)
 
     sys.exit(0 if fully_covered else 1)
 
@@ -321,6 +348,9 @@ def _fetch_entries(host: str, path: str, drive: str, min_size: int) -> list[dict
     return entries if isinstance(entries, list) else []
 
 
+_CLIENT_BATCH = 50_000  # hashes per POST request (progress granularity)
+
+
 def _check_hashes_remote(
     a_hashes: set[str],
     host: str = "",
@@ -328,23 +358,76 @@ def _check_hashes_remote(
     drive: str = "",
     min_size: int = 0,
     exclude: list[dict] | None = None,
+    progress_label: str = "",
 ) -> set[str]:
-    """POST A hashes to server, get back the subset that exist in scope."""
+    """POST A hashes to server, get back the subset that exist in scope.
+
+    If progress_label is set and stderr is a tty, prints incremental progress.
+    """
     if not a_hashes:
         return set()
-    body: dict = {"hashes": list(a_hashes)}
-    if host:
-        body["host"] = host
-    if path_prefix:
-        body["path_prefix"] = path_prefix
-    if drive:
-        body["drive"] = drive
-    if min_size:
-        body["min_size"] = min_size
-    if exclude:
-        body["exclude"] = exclude
-    result = client.post("/files/hashes/check", body, timeout=(5, 120))
-    return set(result)
+
+    hash_list = list(a_hashes)
+    total = len(hash_list)
+    show_progress = progress_label and total > _CLIENT_BATCH and sys.stderr.isatty()
+    found: set[str] = set()
+
+    for i in range(0, total, _CLIENT_BATCH):
+        batch = hash_list[i : i + _CLIENT_BATCH]
+        body: dict = {"hashes": batch}
+        if host:
+            body["host"] = host
+        if path_prefix:
+            body["path_prefix"] = path_prefix
+        if drive:
+            body["drive"] = drive
+        if min_size:
+            body["min_size"] = min_size
+        if exclude:
+            body["exclude"] = exclude
+        result = client.post("/files/hashes/check", body, timeout=(5, 120))
+        found.update(result)
+        if show_progress:
+            sent = min(i + _CLIENT_BATCH, total)
+            sys.stderr.write(
+                f"\r  {progress_label} ... {sent:,} / {total:,} checked, "
+                f"{len(found):,} found"
+            )
+            sys.stderr.flush()
+
+    if show_progress:
+        # Clear progress line — final status printed by caller
+        sys.stderr.write("\r" + " " * 72 + "\r")
+        sys.stderr.flush()
+
+    return found
+
+
+def _fetch_hash_hosts(
+    entries: list[dict],
+    exclude_hosts: set[str] | None = None,
+) -> dict[str, str]:
+    """Batch-lookup hash → comma-separated hosts via host_hash_stats.
+
+    Returns a dict like {"abc123": "host1,host2"}.
+    If exclude_hosts is set, those hosts are removed from the result.
+    Entries with no remaining hosts after filtering are omitted.
+    """
+    hashes = list({e["hash"] for e in entries if e.get("hash")})
+    if not hashes:
+        return {}
+    try:
+        raw = client.post("/files/hashes/hosts", hashes, timeout=(5, 30))
+    except Exception:
+        return {}
+    if not exclude_hosts:
+        return raw
+    result: dict[str, str] = {}
+    for h, hosts_str in raw.items():
+        filtered = [x for x in hosts_str.split(",") if x not in exclude_hosts]
+        if filtered:
+            result[h] = ",".join(filtered)
+    return result
 
 
 def _fetch_b_entries(
@@ -368,12 +451,13 @@ def _check_targets(
     """Check which A hashes exist in explicit B targets (POST approach)."""
     found: set[str] = set()
     for host, path, drive in b_specs:
+        label = f"{host}:{path}" if host else path
         batch_found = _check_hashes_remote(
             a_hashes - found,  # only check hashes not yet found
             host, path, drive, min_size,
+            progress_label=f"Checking {label}",
         )
         found |= batch_found
-        label = f"{host}:{path}" if host else path
         if sys.stderr.isatty():
             print(
                 f"  Checked {label} ... {len(found):,} of {len(a_hashes):,} found",
@@ -414,6 +498,7 @@ def _check_covered(
             batch_found = _check_hashes_remote(
                 a_hashes - found, host=resolved, min_size=min_size,
                 exclude=exclude,
+                progress_label=f"Checking {resolved}",
             )
             found |= batch_found
             if sys.stderr.isatty():
@@ -427,6 +512,7 @@ def _check_covered(
         # All hosts — single call, no host filter
         found = _check_hashes_remote(
             a_hashes, min_size=min_size, exclude=exclude,
+            progress_label="Checking all hosts",
         )
         if sys.stderr.isatty():
             print(
@@ -672,13 +758,22 @@ def _print_summary(
     w("\n")
 
 
-def _print_file_list(entries: list[dict], long_fmt: bool) -> None:
+def _print_file_list(
+    entries: list[dict],
+    long_fmt: bool,
+    host_map: dict[str, str] | None = None,
+) -> None:
     """Print file list to stdout."""
     for entry in entries:
         path = _display_path(entry)
         if long_fmt:
             size = entry.get("size_bytes") or 0
             mtime = entry.get("mtime")
-            print(f"{_fmt_size_col(size)}  {_fmt_mtime(mtime)}  {path}")
+            hosts = ""
+            if host_map:
+                h = entry.get("hash")
+                if h and h in host_map:
+                    hosts = f"  [{host_map[h]}]"
+            print(f"{_fmt_size_col(size)}  {_fmt_mtime(mtime)}  {path}{hosts}")
         else:
             print(path)

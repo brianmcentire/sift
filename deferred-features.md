@@ -814,3 +814,33 @@ This temporary staleness is acceptable if the final refresh still happens immedi
 - Reproduce the historical issue in Tree + `Only dups` with deep branches and `Load more`.
 - Measure where repeated `/tree/children` + `/tree/dup-metrics` paging happens.
 - Propose a bounded server-side contract first, then simplify the frontend to consume it.
+
+---
+
+## `sift sets` Source Fetch Progress Counter
+
+**Context:** `sift sets` fetches all source (A-side) file entries via `GET /files?lite=true` before
+checking hashes. For large sources (~788k files), this fetch takes 10-15 seconds with no visible
+progress — the user sees "Fetching source ..." but no counter.
+
+**Why it's slow:** The `/files` endpoint builds the full JSON array server-side (query + Pydantic
+serialization + JSON encoding) before sending a single byte. The client can't count entries as
+they arrive because there's nothing to read until the entire response is ready.
+
+**Proposed improvement:** Add a `GET /files/stream` endpoint that returns the same lite file data
+as NDJSON (one JSON object per line) using `StreamingResponse`. The client reads line-by-line and
+updates a `\r`-overwriting counter on stderr (e.g. `Fetching source ... 123,456 files`).
+
+**Why this is better than the current `/files` path:**
+- Server memory: yields rows one at a time instead of building 788k-element Python list
+- Client progress: entries arrive as the DB cursor iterates, not after full serialization
+- Transfer: NDJSON is slightly larger per-row but starts arriving immediately
+
+**Implementation notes:**
+- Query is identical to the `lite=true` path in `/files` (same columns, same WHERE)
+- No frontend impact — frontend uses `/files/page` and `/files/ls`, never `/files`
+- `_fetch_entries()` in `sift/commands/sets.py` would switch to streaming with a progress callback
+- Keep existing `/files` endpoint unchanged for other CLI callers (`sift find`, `sift du`, etc.)
+
+**Complexity concern:** Two ways to fetch file entries means two queries to keep in sync. Mitigate
+by extracting shared query-building logic if both endpoints diverge.
