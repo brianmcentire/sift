@@ -34,6 +34,9 @@ export default function HostChips({ hosts, promotedHiddenHosts = [], selectedHos
         return (
           <button
             key={h.host}
+            data-testid={`host-chip-${h.host}`}
+            data-host={h.host}
+            data-selected={isActive ? 'true' : 'false'}
             onClick={e => toggleHost(h.host, e.shiftKey)}
             className={`
               rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-widest
@@ -55,6 +58,10 @@ export default function HostChips({ hosts, promotedHiddenHosts = [], selectedHos
         return (
           <button
             key={h.host}
+            data-testid={`host-chip-${h.host}`}
+            data-host={h.host}
+            data-selected={isActive ? 'true' : 'false'}
+            data-hidden-host="true"
             onClick={e => toggleHost(h.host, e.shiftKey)}
             className={`
               rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-widest

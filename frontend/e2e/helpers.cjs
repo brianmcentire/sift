@@ -33,9 +33,33 @@ async function gotoCleanAndSettle(page) {
 }
 
 async function selectHost(page, hostName) {
-  const hostButton = page.locator('header button').filter({
-    hasText: new RegExp(`^${escapeRegex(hostName)}$`),
-  })
+  // Check if host chip is already visible in the chip bar
+  let hostButton = page.locator(`[data-testid="host-chip-${hostName}"]`)
+  const visible = await hostButton.isVisible().catch(() => false)
+
+  if (!visible) {
+    // Host may be hidden — promote it via the Hidden dropdown
+    const toggle = page.locator('[data-testid="hidden-host-toggle"]')
+    const toggleVisible = await toggle.isVisible().catch(() => false)
+    if (toggleVisible) {
+      await toggle.click()
+      const panel = page.locator('[data-testid="hidden-host-panel"]')
+      await expect(panel).toBeVisible({ timeout: 5_000 })
+      const option = panel.locator(`[data-testid="hidden-host-option-${hostName}"]`)
+      const optionVisible = await option.isVisible().catch(() => false)
+      if (optionVisible) {
+        const checkbox = option.locator('input[type="checkbox"]')
+        if (!(await checkbox.isChecked())) {
+          await checkbox.click()
+          await waitForApiIdle(page)
+        }
+        // Close dropdown
+        await page.locator('header').click({ position: { x: 5, y: 5 } })
+        hostButton = page.locator(`[data-testid="host-chip-${hostName}"]`)
+      }
+    }
+  }
+
   await expect(hostButton).toBeVisible({ timeout: 10_000 })
   await hostButton.click()
   await waitForApiIdle(page)

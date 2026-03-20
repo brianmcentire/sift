@@ -17,8 +17,10 @@ export default function HiddenHostDropdown({ hiddenHosts, selectedHosts, setSele
   const promotedCount = hiddenHosts.filter(h => promotedHiddenHosts.has(h.host)).length
 
   return (
-    <div className="relative" ref={ref}>
+    <div className="relative" ref={ref} data-testid="hidden-host-dropdown">
       <button
+        data-testid="hidden-host-toggle"
+        data-promoted-count={String(promotedCount)}
         onClick={() => setOpen(o => !o)}
         className={`
           rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-widest
@@ -33,13 +35,14 @@ export default function HiddenHostDropdown({ hiddenHosts, selectedHosts, setSele
       </button>
 
       {open && (
-        <div className="absolute left-0 top-full mt-1 z-50 min-w-[180px] rounded-lg border border-slate-200 bg-white shadow-lg py-1">
+        <div data-testid="hidden-host-panel" className="absolute left-0 top-full mt-1 z-50 min-w-[180px] rounded-lg border border-slate-200 bg-white shadow-lg py-1">
           {hiddenHosts.map(h => {
             const promoted = promotedHiddenHosts.has(h.host)
             const colors = hostColorMap.get(h.host)
             return (
               <label
                 key={h.host}
+                data-testid={`hidden-host-option-${h.host}`}
                 className="flex items-center gap-2 px-3 py-1.5 hover:bg-slate-50 cursor-pointer text-[12px]"
               >
                 <input
@@ -47,7 +50,6 @@ export default function HiddenHostDropdown({ hiddenHosts, selectedHosts, setSele
                   checked={promoted}
                   onChange={() => {
                     if (promoted) {
-                      // Uncheck: remove from promoted AND deselect
                       setPromotedHiddenHosts(prev => {
                         const next = new Set(prev)
                         next.delete(h.host)
@@ -59,7 +61,6 @@ export default function HiddenHostDropdown({ hiddenHosts, selectedHosts, setSele
                         return next
                       })
                     } else {
-                      // Check: promote AND select
                       setPromotedHiddenHosts(prev => new Set(prev).add(h.host))
                       setSelectedHosts(prev => new Set(prev).add(h.host))
                     }
