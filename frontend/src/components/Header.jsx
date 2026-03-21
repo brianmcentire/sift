@@ -61,7 +61,7 @@ export default function Header({
           <DirectorySearch
             value={dirQuery}
             onChange={setDirQuery}
-            placeholder={isTree ? 'folder to open…' : 'path contains…'}
+            placeholder={isTree ? 'folder to open' : 'path contains'}
             className="w-44 shrink-0"
           />
 
@@ -69,7 +69,7 @@ export default function Header({
           <SearchBar
             value={filenameQuery}
             onChange={setFilenameQuery}
-            placeholder="filename contains…"
+            placeholder="filename contains"
             className="w-44 shrink-0"
           />
 
@@ -77,7 +77,7 @@ export default function Header({
           <SearchBar
             value={hashQuery}
             onChange={setHashQuery}
-            placeholder="hash prefix or full…"
+            placeholder="hash or partial"
             className="w-44 shrink-0"
             data-testid="hash-search"
           />

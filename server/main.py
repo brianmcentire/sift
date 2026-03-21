@@ -3036,7 +3036,7 @@ def list_hosts():
         WITH all_hosts AS (
             SELECT host FROM host_stats
             UNION
-            SELECT DISTINCT host FROM scan_runs
+            SELECT DISTINCT host FROM scan_runs WHERE status = 'running'
         ),
         latest_run AS (
             SELECT host, root_path, root_path_display, started_at,
@@ -3096,7 +3096,7 @@ def patch_host(host_name: str, body: HostMetaPatch):
     # Validate host exists (case-insensitive match against known hosts)
     known = db.query(
         "SELECT host FROM host_stats WHERE LOWER(host) = LOWER(?)"
-        " UNION SELECT DISTINCT host FROM scan_runs WHERE LOWER(host) = LOWER(?)",
+        " UNION SELECT DISTINCT host FROM scan_runs WHERE status = 'running' AND LOWER(host) = LOWER(?)",
         [host_name, host_name],
     )
     if not known:
@@ -3231,7 +3231,7 @@ def _report_all_hosts_in_datastore() -> list[str]:
         WITH all_hosts AS (
             SELECT host FROM host_stats
             UNION
-            SELECT DISTINCT host FROM scan_runs
+            SELECT DISTINCT host FROM scan_runs WHERE status = 'running'
         )
         SELECT host FROM all_hosts ORDER BY host
         """

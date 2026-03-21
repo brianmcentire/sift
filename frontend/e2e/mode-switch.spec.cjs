@@ -50,13 +50,13 @@ test.describe('mode switching', () => {
 
   test('placeholder text updates on mode switch', async ({ page }) => {
     const dirInput = page.locator('[data-testid="directory-search"]')
-    await expect(dirInput).toHaveAttribute('placeholder', 'folder to open…')
+    await expect(dirInput).toHaveAttribute('placeholder', 'folder to open')
 
     await switchToListView(page)
-    await expect(dirInput).toHaveAttribute('placeholder', 'path contains…')
+    await expect(dirInput).toHaveAttribute('placeholder', 'path contains')
 
     await switchToTreeView(page)
-    await expect(dirInput).toHaveAttribute('placeholder', 'folder to open…')
+    await expect(dirInput).toHaveAttribute('placeholder', 'folder to open')
   })
 
   test('mode switch preserves host selection', async ({ page }) => {
