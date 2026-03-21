@@ -501,11 +501,15 @@ def refresh_host_stats(host: str) -> None:
             "DELETE FROM host_stats WHERE host = ?",
             [host],
         )
-        conn.execute(
-            "INSERT INTO host_stats (host, total_files, total_bytes, total_hashed, updated_at) "
-            "VALUES (?, ?, ?, ?, now())",
-            [host, total_files, total_bytes, total_hashed],
-        )
+        if total_files == 0:
+            # Host fully trimmed — clean up metadata too
+            conn.execute("DELETE FROM host_meta WHERE host = ?", [host])
+        else:
+            conn.execute(
+                "INSERT INTO host_stats (host, total_files, total_bytes, total_hashed, updated_at) "
+                "VALUES (?, ?, ?, ?, now())",
+                [host, total_files, total_bytes, total_hashed],
+            )
 
 
 def refresh_host_hard_linked_inodes(host: str) -> None:
