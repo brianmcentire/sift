@@ -8,8 +8,19 @@ const {
   selectAllHosts,
 } = require('./helpers.cjs')
 
-// These tests require at least one hidden host in the datastore.
-// Current state: Photoshop-PC is hidden.
+// Discover hidden/visible hosts from the live server at suite startup.
+// Tests skip if preconditions aren't met (no hidden hosts, etc.).
+let HIDDEN_HOST = null   // first hidden host name
+let VISIBLE_HOST = null  // first visible host with files
+
+test.beforeAll(async ({ request }) => {
+  const resp = await request.get('/hosts')
+  const hosts = await resp.json()
+  const hidden = hosts.find(h => h.hidden)
+  const visible = hosts.find(h => !h.hidden && h.total_files > 0)
+  HIDDEN_HOST = hidden?.host || null
+  VISIBLE_HOST = visible?.host || null
+})
 
 /** Open the Hidden dropdown panel. */
 async function openHiddenDropdown(page) {
@@ -51,38 +62,46 @@ async function closeHiddenDropdown(page) {
   await expect(page.locator('[data-testid="hidden-host-panel"]')).toHaveCount(0)
 }
 
+function skipUnlessHidden(testFn) {
+  testFn.skip(() => !HIDDEN_HOST, 'no hidden hosts in datastore')
+}
+
 test.describe('hidden host visibility', () => {
   test.beforeEach(async ({ page }) => {
     await gotoCleanAndSettle(page)
   })
 
   test('Hidden chip is visible when hidden hosts exist', async ({ page }) => {
+    test.skip(!HIDDEN_HOST, 'no hidden hosts in datastore')
     const toggle = page.locator('[data-testid="hidden-host-toggle"]')
     await expect(toggle).toBeVisible()
     await expect(toggle).toContainText('Hidden')
   })
 
   test('hidden host is NOT in the main chip bar by default', async ({ page }) => {
-    const hiddenChip = page.locator('[data-testid="host-chip-Photoshop-PC"]')
+    test.skip(!HIDDEN_HOST, 'no hidden hosts in datastore')
+    const hiddenChip = page.locator(`[data-testid="host-chip-${HIDDEN_HOST}"]`)
     await expect(hiddenChip).toHaveCount(0)
   })
 
   test('visible hosts have chips in the bar', async ({ page }) => {
-    const visibleChip = page.locator('[data-testid="host-chip-Brians-M2ProMBP"]')
+    test.skip(!VISIBLE_HOST, 'no visible hosts in datastore')
+    const visibleChip = page.locator(`[data-testid="host-chip-${VISIBLE_HOST}"]`)
     await expect(visibleChip).toBeVisible()
   })
 })
 
 test.describe('hidden host dropdown', () => {
   test.beforeEach(async ({ page }) => {
+    test.skip(!HIDDEN_HOST, 'no hidden hosts in datastore')
     await gotoCleanAndSettle(page)
   })
 
   test('dropdown opens and lists hidden hosts', async ({ page }) => {
     const panel = await openHiddenDropdown(page)
-    const option = panel.locator('[data-testid="hidden-host-option-Photoshop-PC"]')
+    const option = panel.locator(`[data-testid="hidden-host-option-${HIDDEN_HOST}"]`)
     await expect(option).toBeVisible()
-    await expect(option).toContainText('Photoshop-PC')
+    await expect(option).toContainText(HIDDEN_HOST)
   })
 
   test('dropdown closes on outside click', async ({ page }) => {
@@ -92,29 +111,29 @@ test.describe('hidden host dropdown', () => {
 
   test('hidden host checkbox is unchecked by default', async ({ page }) => {
     const panel = await openHiddenDropdown(page)
-    const checkbox = panel.locator('[data-testid="hidden-host-option-Photoshop-PC"] input[type="checkbox"]')
+    const checkbox = panel.locator(`[data-testid="hidden-host-option-${HIDDEN_HOST}"] input[type="checkbox"]`)
     await expect(checkbox).not.toBeChecked()
   })
 })
 
 test.describe('hidden host promotion', () => {
   test.beforeEach(async ({ page }) => {
+    test.skip(!HIDDEN_HOST, 'no hidden hosts in datastore')
     await gotoCleanAndSettle(page)
   })
 
   test('checking a hidden host promotes it to the chip bar', async ({ page }) => {
-    await promoteHiddenHost(page, 'Photoshop-PC')
+    await promoteHiddenHost(page, HIDDEN_HOST)
     await closeHiddenDropdown(page)
 
-    // Chip should appear with dashed border
-    const chip = page.locator('[data-testid="host-chip-Photoshop-PC"]')
+    const chip = page.locator(`[data-testid="host-chip-${HIDDEN_HOST}"]`)
     await expect(chip).toBeVisible()
     await expect(chip).toHaveAttribute('data-hidden-host', 'true')
     await expect(chip).toHaveAttribute('data-selected', 'true')
   })
 
   test('promoted chip badge count shows on Hidden toggle', async ({ page }) => {
-    await promoteHiddenHost(page, 'Photoshop-PC')
+    await promoteHiddenHost(page, HIDDEN_HOST)
     await closeHiddenDropdown(page)
 
     const toggle = page.locator('[data-testid="hidden-host-toggle"]')
@@ -122,31 +141,33 @@ test.describe('hidden host promotion', () => {
   })
 
   test('promoted chip stays in bar when another host is clicked', async ({ page }) => {
-    await promoteHiddenHost(page, 'Photoshop-PC')
+    test.skip(!VISIBLE_HOST, 'no visible hosts in datastore')
+    await promoteHiddenHost(page, HIDDEN_HOST)
     await closeHiddenDropdown(page)
 
-    // Click a visible host (deselects Photoshop-PC but chip should remain)
-    const visibleChip = page.locator('[data-testid="host-chip-Brians-M2ProMBP"]')
+    // Click a visible host (deselects hidden host but chip should remain)
+    const visibleChip = page.locator(`[data-testid="host-chip-${VISIBLE_HOST}"]`)
     await visibleChip.click()
     await waitForApiIdle(page)
     await waitForTreeReady(page)
 
     // Chip still in bar, but now deselected
-    const hiddenChip = page.locator('[data-testid="host-chip-Photoshop-PC"]')
+    const hiddenChip = page.locator(`[data-testid="host-chip-${HIDDEN_HOST}"]`)
     await expect(hiddenChip).toBeVisible()
     await expect(hiddenChip).toHaveAttribute('data-selected', 'false')
   })
 
   test('deselected promoted chip can be shift-clicked to reselect', async ({ page }) => {
-    await promoteHiddenHost(page, 'Photoshop-PC')
+    test.skip(!VISIBLE_HOST, 'no visible hosts in datastore')
+    await promoteHiddenHost(page, HIDDEN_HOST)
     await closeHiddenDropdown(page)
 
     // Click a visible host to deselect hidden host
-    await page.locator('[data-testid="host-chip-Brians-M2ProMBP"]').click()
+    await page.locator(`[data-testid="host-chip-${VISIBLE_HOST}"]`).click()
     await waitForApiIdle(page)
 
     // Shift-click the hidden chip to add it back
-    const hiddenChip = page.locator('[data-testid="host-chip-Photoshop-PC"]')
+    const hiddenChip = page.locator(`[data-testid="host-chip-${HIDDEN_HOST}"]`)
     await hiddenChip.click({ modifiers: ['Shift'] })
     await waitForApiIdle(page)
 
@@ -154,23 +175,22 @@ test.describe('hidden host promotion', () => {
   })
 
   test('unchecking in dropdown removes chip from bar', async ({ page }) => {
-    await promoteHiddenHost(page, 'Photoshop-PC')
+    await promoteHiddenHost(page, HIDDEN_HOST)
     await closeHiddenDropdown(page)
 
-    // Verify chip is present
-    await expect(page.locator('[data-testid="host-chip-Photoshop-PC"]')).toBeVisible()
+    await expect(page.locator(`[data-testid="host-chip-${HIDDEN_HOST}"]`)).toBeVisible()
 
     // Uncheck via dropdown
-    await demoteHiddenHost(page, 'Photoshop-PC')
+    await demoteHiddenHost(page, HIDDEN_HOST)
     await closeHiddenDropdown(page)
 
-    // Chip should be gone
-    await expect(page.locator('[data-testid="host-chip-Photoshop-PC"]')).toHaveCount(0)
+    await expect(page.locator(`[data-testid="host-chip-${HIDDEN_HOST}"]`)).toHaveCount(0)
   })
 })
 
 test.describe('hidden host interaction with All and Reset', () => {
   test.beforeEach(async ({ page }) => {
+    test.skip(!HIDDEN_HOST, 'no hidden hosts in datastore')
     await gotoCleanAndSettle(page)
   })
 
@@ -178,41 +198,34 @@ test.describe('hidden host interaction with All and Reset', () => {
     await selectAllHosts(page)
     await waitForTreeReady(page)
 
-    // Hidden host should not appear as a chip
-    await expect(page.locator('[data-testid="host-chip-Photoshop-PC"]')).toHaveCount(0)
+    await expect(page.locator(`[data-testid="host-chip-${HIDDEN_HOST}"]`)).toHaveCount(0)
 
-    // Badge should show 0 promoted
     const toggle = page.locator('[data-testid="hidden-host-toggle"]')
     await expect(toggle).toHaveAttribute('data-promoted-count', '0')
   })
 
   test('"All" does not deselect a promoted hidden host', async ({ page }) => {
-    // Promote and select hidden host
-    await promoteHiddenHost(page, 'Photoshop-PC')
+    await promoteHiddenHost(page, HIDDEN_HOST)
     await closeHiddenDropdown(page)
 
-    // Click All — should select all visible. Hidden chip stays promoted but deselected.
     await selectAllHosts(page)
     await waitForApiIdle(page)
 
-    const hiddenChip = page.locator('[data-testid="host-chip-Photoshop-PC"]')
-    // Chip should still be in the bar (promoted)
+    const hiddenChip = page.locator(`[data-testid="host-chip-${HIDDEN_HOST}"]`)
     await expect(hiddenChip).toBeVisible()
-    // But not selected (All only selects visible hosts)
     await expect(hiddenChip).toHaveAttribute('data-selected', 'false')
   })
 
   test('Reset clears promoted hidden hosts', async ({ page }) => {
-    await promoteHiddenHost(page, 'Photoshop-PC')
+    await promoteHiddenHost(page, HIDDEN_HOST)
     await closeHiddenDropdown(page)
 
-    await expect(page.locator('[data-testid="host-chip-Photoshop-PC"]')).toBeVisible()
+    await expect(page.locator(`[data-testid="host-chip-${HIDDEN_HOST}"]`)).toBeVisible()
 
     await clickReset(page)
     await waitForTreeReady(page)
 
-    // Chip gone, badge back to 0
-    await expect(page.locator('[data-testid="host-chip-Photoshop-PC"]')).toHaveCount(0)
+    await expect(page.locator(`[data-testid="host-chip-${HIDDEN_HOST}"]`)).toHaveCount(0)
     const toggle = page.locator('[data-testid="hidden-host-toggle"]')
     await expect(toggle).toHaveAttribute('data-promoted-count', '0')
   })
@@ -220,33 +233,31 @@ test.describe('hidden host interaction with All and Reset', () => {
 
 test.describe('hidden host data flow', () => {
   test.beforeEach(async ({ page }) => {
+    test.skip(!HIDDEN_HOST, 'no hidden hosts in datastore')
     await gotoCleanAndSettle(page)
   })
 
   test('promoting a hidden host loads its tree data', async ({ page }) => {
-    // Start with just the local host
-    await page.locator('[data-testid="host-chip-Brians-M2ProMBP"]').click()
+    test.skip(!VISIBLE_HOST, 'no visible hosts in datastore')
+    // Start with just a visible host
+    await page.locator(`[data-testid="host-chip-${VISIBLE_HOST}"]`).click()
     await waitForApiIdle(page)
     await waitForTreeReady(page)
 
-    const rowsBefore = await page.locator('[data-testid="tree-row"]').count()
-
-    // Promote hidden host via shift-click on its chip (after promoting)
-    await promoteHiddenHost(page, 'Photoshop-PC')
+    // Promote hidden host
+    await promoteHiddenHost(page, HIDDEN_HOST)
     await closeHiddenDropdown(page)
     await waitForApiIdle(page)
     await waitForTreeReady(page)
 
-    // Should have tree rows (possibly more or different, since hidden host has data)
     const rowsAfter = await page.locator('[data-testid="tree-row"]').count()
     expect(rowsAfter).toBeGreaterThan(0)
   })
 
   test('hidden host not persisted to localStorage', async ({ page }) => {
-    await promoteHiddenHost(page, 'Photoshop-PC')
+    await promoteHiddenHost(page, HIDDEN_HOST)
     await closeHiddenDropdown(page)
 
-    // Read localStorage
     const stored = await page.evaluate(() => {
       try {
         const raw = window.localStorage.getItem('sift-filters')
@@ -254,8 +265,20 @@ test.describe('hidden host data flow', () => {
       } catch { return null }
     })
 
-    // selectedHosts in storage should NOT contain the hidden host
     const savedHosts = stored?.selectedHosts || []
-    expect(savedHosts).not.toContain('Photoshop-PC')
+    expect(savedHosts).not.toContain(HIDDEN_HOST)
+  })
+})
+
+test.describe('no hidden hosts graceful behavior', () => {
+  test('app loads normally when no hosts are hidden', async ({ page }) => {
+    // This test always runs — verifies the Hidden chip is absent when appropriate
+    await gotoCleanAndSettle(page)
+    const toggle = page.locator('[data-testid="hidden-host-toggle"]')
+    if (!HIDDEN_HOST) {
+      await expect(toggle).toHaveCount(0)
+    } else {
+      await expect(toggle).toBeVisible()
+    }
   })
 })

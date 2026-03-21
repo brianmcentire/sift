@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 
 from sift import client
-from sift.commands import print_config_hint, resolve_host
+from sift.commands import print_config_hint
 
 
 def cmd_host(args) -> None:
@@ -38,8 +38,20 @@ def _get_hosts():
         sys.exit(1)
 
 
+def _resolve_or_exit(name: str) -> str:
+    """Resolve host name against server, exit with hint if not found."""
+    hosts = _get_hosts()
+    needle = name.strip().lower()
+    match = next((h["host"] for h in hosts if h["host"].lower() == needle), None)
+    if match:
+        return match
+    print(f"sift: host '{name}' not found", file=sys.stderr)
+    print("  hint: run 'sift host list' to see known hosts", file=sys.stderr)
+    sys.exit(1)
+
+
 def _patch_host(name: str, body: dict) -> None:
-    canonical = resolve_host(name)
+    canonical = _resolve_or_exit(name)
     try:
         client.patch(f"/hosts/{canonical}", body)
     except Exception as e:
@@ -126,17 +138,14 @@ def _cmd_label(args) -> None:
         else:
             print(f"Label cleared for '{args.name}'.")
     else:
+        canonical = _resolve_or_exit(args.name)
         hosts = _get_hosts()
-        canonical = resolve_host(args.name)
-        host = next((h for h in hosts if h["host"].lower() == canonical.lower()), None)
-        if not host:
-            print(f"sift: host '{args.name}' not found", file=sys.stderr)
-            sys.exit(1)
-        label = host.get("label") or ""
+        host = next((h for h in hosts if h["host"] == canonical), None)
+        label = host.get("label") or "" if host else ""
         if label:
             print(label)
         else:
-            print(f"(no label set for '{host['host']}')")
+            print(f"(no label set for '{canonical}')")
 
 
 def _cmd_describe(args) -> None:
@@ -147,14 +156,11 @@ def _cmd_describe(args) -> None:
         else:
             print(f"Description cleared for '{args.name}'.")
     else:
+        canonical = _resolve_or_exit(args.name)
         hosts = _get_hosts()
-        canonical = resolve_host(args.name)
-        host = next((h for h in hosts if h["host"].lower() == canonical.lower()), None)
-        if not host:
-            print(f"sift: host '{args.name}' not found", file=sys.stderr)
-            sys.exit(1)
-        desc = host.get("description") or ""
+        host = next((h for h in hosts if h["host"] == canonical), None)
+        desc = host.get("description") or "" if host else ""
         if desc:
             print(desc)
         else:
-            print(f"(no description set for '{host['host']}')")
+            print(f"(no description set for '{canonical}')")
