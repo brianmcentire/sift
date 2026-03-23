@@ -154,7 +154,7 @@ Then open `http://localhost:8765` in a browser for the web UI.
 
 ### `sift scan [path]`
 
-Walks the filesystem, hashes files, and sends metadata to the server. Shows live progress (files/s, MB/s, elapsed time). Uses a mtime/size cache so unchanged files are skipped on subsequent scans — rescans are much faster than initial scans.
+Walks the filesystem, hashes files, and sends metadata to the server. Shows live progress (files/s, MB/s, elapsed time). Uses a mtime/size cache so unchanged files are skipped on subsequent scans — rescans are much faster than initial scans. After a successful scan, files that no longer exist on disk are automatically removed from the inventory (`--keep-deleted` to skip this).
 
 ```
 sift scan /                     # scan everything from root
