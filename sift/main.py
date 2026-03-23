@@ -433,6 +433,51 @@ def main() -> None:
         help="JSON output to stdout",
     )
 
+    # sift organize
+    p_organize = sub.add_parser(
+        "organize",
+        help="Generate a script to reorganize donor files to match a model host's structure",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Generate a shell script that rearranges files from local donor directories\n"
+        "to match the directory structure of a model host in the sift datastore.\n"
+        "\n"
+        "The script is written to stdout — redirect to a file, review, then run it.\n"
+        "Files already in the target at the correct path are skipped (\"already in place\").\n"
+        "Files in the target that aren't in the model are left untouched.\n"
+        "\n"
+        "Examples:\n"
+        "  # Pre-seed a mirror of a Windows PC from existing Unraid backups:\n"
+        "  sift organize Photoshop-PC:D:\\ /mnt/user/mirrors/photoshop-d \\\n"
+        "    --from /mnt/user/backups --from /mnt/user/media/photos > organize.sh\n"
+        "\n"
+        "  # Same, but copy instead of move (leaves donors intact):\n"
+        "  sift organize Photoshop-PC:D:\\ /mnt/user/mirrors/photoshop-d \\\n"
+        "    --from /mnt/user/backups --copy > organize.sh\n"
+        "\n"
+        "  # Review the script, then run it:\n"
+        "  less organize.sh\n"
+        "  bash organize.sh",
+    )
+    p_organize.add_argument(
+        "model", help="Model host:path whose structure to replicate (e.g. MyPC:D:\\)",
+    )
+    p_organize.add_argument(
+        "target", help="Local target directory where organized structure will be built",
+    )
+    p_organize.add_argument(
+        "--from", dest="donors", action="append", required=True, metavar="PATH",
+        help="Donor directory on local host (repeatable, first = highest priority)",
+    )
+    organize_mode = p_organize.add_mutually_exclusive_group()
+    organize_mode.add_argument(
+        "--move", dest="mode", action="store_const", const="move", default="move",
+        help="Use mv for file operations (default)",
+    )
+    organize_mode.add_argument(
+        "--copy", dest="mode", action="store_const", const="copy",
+        help="Use cp instead of mv",
+    )
+
     # sift host
     p_host = sub.add_parser("host", help="Manage host visibility and metadata")
     host_sub = p_host.add_subparsers(dest="host_action", metavar="ACTION")
@@ -543,6 +588,10 @@ def main() -> None:
             from sift.commands.sets import cmd_sets
 
             cmd_sets(args)
+        elif args.command == "organize":
+            from sift.commands.organize import cmd_organize
+
+            cmd_organize(args)
         else:
             parser.print_help()
             sys.exit(1)
