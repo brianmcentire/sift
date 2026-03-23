@@ -48,3 +48,10 @@ def get(session, endpoint, **params):
     r = session.get(url, params=params or None, timeout=30)
     r.raise_for_status()
     return r.json()
+
+
+def post(session, endpoint, json_body):
+    url = f"{session.base_url}{endpoint}"
+    r = session.post(url, json=json_body, timeout=30)
+    r.raise_for_status()
+    return r.json()

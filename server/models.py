@@ -312,3 +312,34 @@ class HashCheckRequest(BaseModel):
     drive: str = ""
     min_size: int = 0
     exclude: list[HashCheckExclude] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Move models
+# ---------------------------------------------------------------------------
+
+
+class MoveItem(BaseModel):
+    old_path: str
+    new_path: str
+    new_path_display: str
+    new_filename: str
+    new_ext: str = ""
+    new_file_category: str = "other"
+    new_inode: Optional[int] = None
+    new_device: Optional[int] = None
+    inode_known: bool = False
+
+
+class MoveRequest(BaseModel):
+    host: str
+    old_drive: str = ""
+    new_drive: str = ""
+    moves: list[MoveItem]
+    force: bool = False
+
+
+class MoveResponse(BaseModel):
+    moved: int
+    not_found: list[str] = Field(default_factory=list)
+    collisions: list[str] = Field(default_factory=list)

@@ -567,39 +567,11 @@ unlisted FUSE type (safe default: assume local). Critical for Unraid where
 
 ---
 
-## `sift mv` — move files and update the datastore in one step
+## ~~`sift mv`~~ — IMPLEMENTED (v0.11.0)
 
-**Motivation:**
-
-When files are moved on disk (e.g. reorganizing from `/mnt/user/backups` to `/mnt/user/media`),
-the next `sift scan` auto-trims the old rows and then rehashes every moved file at its new path —
-even though the hashes already exist in the datastore. For large moves this wastes significant time
-re-reading files that haven't changed.
-
-**Desired behavior:**
-
-`sift mv <source> <dest>` (or `sift mv <sources...> <dest-dir>`) that:
-
-1. Moves the file(s) on the local filesystem (like `mv`)
-2. Updates the path in the datastore via a server endpoint (no rehash needed)
-
-This keeps the datastore in sync without a rescan cycle. The hash, size, mtime, inode, and other
-metadata are unchanged — only the path needs updating.
-
-**Scope considerations:**
-
-- Single-host only (move happens on the local filesystem)
-- Needs a new server endpoint: `PATCH /files/move` or similar, accepting old path → new path
-- Should handle both single-file and directory moves
-- Must update `path`, `path_display`, and `filename`/`ext` if the filename changes
-- Should update `directory_index` and invalidate relevant caches
-- Error if source doesn't exist on disk or in datastore
-
-**Why this is deferred:**
-
-- The current scan + auto-trim workflow handles moved files correctly, just slowly
-- Requires a new server endpoint with careful path update logic
-- Edge cases: cross-drive moves, cross-host moves (not supported), partial failures
+Implemented: `sift mv <sources...> <dest>` moves files on disk and updates the datastore
+via `POST /files/move`. Supports `--dry-run`, `--db-only`, `--force`. Also added `--sift-mv`
+mode to `sift organize` to emit `sift mv` commands instead of bare `mv`.
 
 ---
 

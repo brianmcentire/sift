@@ -10,7 +10,7 @@ Run with:
 """
 
 import pytest
-from tests.integration.conftest import live_client, get
+from tests.integration.conftest import live_client, get, post
 
 
 pytestmark = pytest.mark.integration
@@ -517,3 +517,321 @@ class TestLiveDirectories:
                 f"  {child!r} is missing ancestor {anc!r}" for child, anc in missing[:5]
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# POST /files/move
+# ---------------------------------------------------------------------------
+
+
+_MOVE_TEST_HOST = "__sift_test_move__"
+
+
+def _insert_test_file(live_client, path, hash_val="abc123", size=1024):
+    """Insert a synthetic file into the datastore for testing."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    record = {
+        "host": _MOVE_TEST_HOST,
+        "drive": "",
+        "path": path,
+        "path_display": path,
+        "filename": path.rsplit("/", 1)[-1],
+        "ext": path.rsplit(".", 1)[-1] if "." in path.rsplit("/", 1)[-1] else "",
+        "file_category": "other",
+        "size_bytes": size,
+        "hash": hash_val,
+        "mtime": 1700000000,
+        "last_checked": now,
+        "source_os": "linux",
+        "skipped_reason": None,
+        "last_seen_at": now,
+        "inode": 12345,
+        "device": 100,
+    }
+    post(live_client, "/files", [record])
+
+
+def _cleanup_test_host(live_client):
+    """Remove all test files from the datastore."""
+    post(live_client, "/trim", {
+        "host": _MOVE_TEST_HOST,
+        "path_prefix": "",
+        "recursive": True,
+    })
+
+
+def _get_test_file(live_client, path):
+    """Query a specific test file from the datastore."""
+    results = get(live_client, "/files",
+                  host=_MOVE_TEST_HOST, path_prefix=path, limit=10)
+    return [r for r in results if r["path_display"] == path]
+
+
+class TestLiveMove:
+    def setup_method(self, method):
+        """Clean up test data before each test (will be done in the test)."""
+        pass
+
+    def test_basic_move(self, live_client):
+        """Move a single file and verify path updated, hash preserved."""
+        _cleanup_test_host(live_client)
+        try:
+            _insert_test_file(live_client, "/test/old/file.txt", hash_val="movehash1")
+            result = post(live_client, "/files/move", {
+                "host": _MOVE_TEST_HOST,
+                "old_drive": "",
+                "new_drive": "",
+                "moves": [{
+                    "old_path": "/test/old/file.txt",
+                    "new_path": "/test/new/file.txt",
+                    "new_path_display": "/test/new/file.txt",
+                    "new_filename": "file.txt",
+                    "new_ext": "txt",
+                    "new_file_category": "other",
+                    "inode_known": False,
+                }],
+                "force": False,
+            })
+            assert result["moved"] == 1
+            assert result["not_found"] == []
+            assert result["collisions"] == []
+
+            # Old path should be gone
+            old = _get_test_file(live_client, "/test/old/file.txt")
+            assert len(old) == 0, "Old path should not exist after move"
+
+            # New path should exist with same hash
+            new = _get_test_file(live_client, "/test/new/file.txt")
+            assert len(new) == 1, "New path should exist after move"
+            assert new[0]["hash"] == "movehash1", "Hash should be preserved"
+            assert new[0]["size_bytes"] == 1024, "Size should be preserved"
+        finally:
+            _cleanup_test_host(live_client)
+
+    def test_move_not_found(self, live_client):
+        """Moving a nonexistent path should report not_found."""
+        _cleanup_test_host(live_client)
+        try:
+            result = post(live_client, "/files/move", {
+                "host": _MOVE_TEST_HOST,
+                "old_drive": "",
+                "new_drive": "",
+                "moves": [{
+                    "old_path": "/nonexistent/file.txt",
+                    "new_path": "/dest/file.txt",
+                    "new_path_display": "/dest/file.txt",
+                    "new_filename": "file.txt",
+                    "new_ext": "txt",
+                    "new_file_category": "other",
+                    "inode_known": False,
+                }],
+                "force": False,
+            })
+            assert result["moved"] == 0
+            assert "/nonexistent/file.txt" in result["not_found"]
+        finally:
+            _cleanup_test_host(live_client)
+
+    def test_move_collision_blocked(self, live_client):
+        """Moving to an existing path without --force should report collision."""
+        _cleanup_test_host(live_client)
+        try:
+            _insert_test_file(live_client, "/test/src.txt", hash_val="srchash")
+            _insert_test_file(live_client, "/test/dst.txt", hash_val="dsthash")
+
+            result = post(live_client, "/files/move", {
+                "host": _MOVE_TEST_HOST,
+                "old_drive": "",
+                "new_drive": "",
+                "moves": [{
+                    "old_path": "/test/src.txt",
+                    "new_path": "/test/dst.txt",
+                    "new_path_display": "/test/dst.txt",
+                    "new_filename": "dst.txt",
+                    "new_ext": "txt",
+                    "new_file_category": "other",
+                    "inode_known": False,
+                }],
+                "force": False,
+            })
+            assert result["moved"] == 0
+            assert "/test/dst.txt" in result["collisions"]
+
+            # Both files should still exist unchanged
+            src = _get_test_file(live_client, "/test/src.txt")
+            dst = _get_test_file(live_client, "/test/dst.txt")
+            assert len(src) == 1 and src[0]["hash"] == "srchash"
+            assert len(dst) == 1 and dst[0]["hash"] == "dsthash"
+        finally:
+            _cleanup_test_host(live_client)
+
+    def test_move_collision_force(self, live_client):
+        """Moving to an existing path with force should overwrite."""
+        _cleanup_test_host(live_client)
+        try:
+            _insert_test_file(live_client, "/test/src.txt", hash_val="srchash")
+            _insert_test_file(live_client, "/test/dst.txt", hash_val="dsthash")
+
+            result = post(live_client, "/files/move", {
+                "host": _MOVE_TEST_HOST,
+                "old_drive": "",
+                "new_drive": "",
+                "moves": [{
+                    "old_path": "/test/src.txt",
+                    "new_path": "/test/dst.txt",
+                    "new_path_display": "/test/dst.txt",
+                    "new_filename": "dst.txt",
+                    "new_ext": "txt",
+                    "new_file_category": "other",
+                    "inode_known": False,
+                }],
+                "force": True,
+            })
+            assert result["moved"] == 1
+
+            # Source gone, dest has source's hash
+            src = _get_test_file(live_client, "/test/src.txt")
+            dst = _get_test_file(live_client, "/test/dst.txt")
+            assert len(src) == 0
+            assert len(dst) == 1 and dst[0]["hash"] == "srchash"
+        finally:
+            _cleanup_test_host(live_client)
+
+    def test_move_with_inode_update(self, live_client):
+        """When inode_known=True, new inode/device should be used."""
+        _cleanup_test_host(live_client)
+        try:
+            _insert_test_file(live_client, "/test/inode.txt", hash_val="inodehash")
+
+            result = post(live_client, "/files/move", {
+                "host": _MOVE_TEST_HOST,
+                "old_drive": "",
+                "new_drive": "",
+                "moves": [{
+                    "old_path": "/test/inode.txt",
+                    "new_path": "/test/inode_moved.txt",
+                    "new_path_display": "/test/inode_moved.txt",
+                    "new_filename": "inode_moved.txt",
+                    "new_ext": "txt",
+                    "new_file_category": "other",
+                    "new_inode": 99999,
+                    "new_device": 200,
+                    "inode_known": True,
+                }],
+                "force": False,
+            })
+            assert result["moved"] == 1
+        finally:
+            _cleanup_test_host(live_client)
+
+    def test_move_preserves_inode_when_unknown(self, live_client):
+        """When inode_known=False, old inode/device should be preserved."""
+        _cleanup_test_host(live_client)
+        try:
+            _insert_test_file(live_client, "/test/keep_inode.txt", hash_val="kihash")
+
+            result = post(live_client, "/files/move", {
+                "host": _MOVE_TEST_HOST,
+                "old_drive": "",
+                "new_drive": "",
+                "moves": [{
+                    "old_path": "/test/keep_inode.txt",
+                    "new_path": "/test/keep_inode_new.txt",
+                    "new_path_display": "/test/keep_inode_new.txt",
+                    "new_filename": "keep_inode_new.txt",
+                    "new_ext": "txt",
+                    "new_file_category": "other",
+                    "inode_known": False,
+                }],
+                "force": False,
+            })
+            assert result["moved"] == 1
+        finally:
+            _cleanup_test_host(live_client)
+
+    def test_move_batch(self, live_client):
+        """Multiple files in one request."""
+        _cleanup_test_host(live_client)
+        try:
+            for i in range(5):
+                _insert_test_file(
+                    live_client,
+                    f"/test/batch/file{i}.txt",
+                    hash_val=f"batchhash{i}",
+                )
+
+            moves = []
+            for i in range(5):
+                moves.append({
+                    "old_path": f"/test/batch/file{i}.txt",
+                    "new_path": f"/test/batch_new/file{i}.txt",
+                    "new_path_display": f"/test/batch_new/file{i}.txt",
+                    "new_filename": f"file{i}.txt",
+                    "new_ext": "txt",
+                    "new_file_category": "other",
+                    "inode_known": False,
+                })
+
+            result = post(live_client, "/files/move", {
+                "host": _MOVE_TEST_HOST,
+                "old_drive": "",
+                "new_drive": "",
+                "moves": moves,
+                "force": False,
+            })
+            assert result["moved"] == 5
+            assert result["not_found"] == []
+            assert result["collisions"] == []
+
+            # Verify all moved
+            for i in range(5):
+                old = _get_test_file(live_client, f"/test/batch/file{i}.txt")
+                new = _get_test_file(live_client, f"/test/batch_new/file{i}.txt")
+                assert len(old) == 0, f"Old file{i} should be gone"
+                assert len(new) == 1, f"New file{i} should exist"
+                assert new[0]["hash"] == f"batchhash{i}"
+        finally:
+            _cleanup_test_host(live_client)
+
+    def test_move_empty_request(self, live_client):
+        """Empty moves list should return moved=0."""
+        result = post(live_client, "/files/move", {
+            "host": _MOVE_TEST_HOST,
+            "old_drive": "",
+            "new_drive": "",
+            "moves": [],
+            "force": False,
+        })
+        assert result["moved"] == 0
+
+    def test_move_updates_filename_and_category(self, live_client):
+        """Moving to a different filename should update filename, ext, category."""
+        _cleanup_test_host(live_client)
+        try:
+            _insert_test_file(live_client, "/test/photo.txt", hash_val="photohash")
+
+            result = post(live_client, "/files/move", {
+                "host": _MOVE_TEST_HOST,
+                "old_drive": "",
+                "new_drive": "",
+                "moves": [{
+                    "old_path": "/test/photo.txt",
+                    "new_path": "/test/photo.jpg",
+                    "new_path_display": "/test/photo.jpg",
+                    "new_filename": "photo.jpg",
+                    "new_ext": "jpg",
+                    "new_file_category": "image",
+                    "inode_known": False,
+                }],
+                "force": False,
+            })
+            assert result["moved"] == 1
+
+            new = _get_test_file(live_client, "/test/photo.jpg")
+            assert len(new) == 1
+            assert new[0]["filename"] == "photo.jpg"
+            assert new[0]["ext"] == "jpg"
+            assert new[0]["file_category"] == "image"
+        finally:
+            _cleanup_test_host(live_client)

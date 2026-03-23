@@ -136,6 +136,8 @@ from server.models import (
     HashCheckRequest,
     HostEntry,
     HostMetaPatch,
+    MoveRequest,
+    MoveResponse,
     HostRootEntry,
     LsEntry,
     ScanRunCreate,
@@ -745,6 +747,142 @@ def mark_files_seen(body: SeenRequest):
         params.extend([entry.drive, entry.path])
     db.execute(sql, params)
     return {"updated": len(body.paths)}
+
+
+# ---------------------------------------------------------------------------
+# Move (path rename in datastore)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/files/move", response_model=MoveResponse)
+def move_files(body: MoveRequest):
+    if not body.moves:
+        return MoveResponse(moved=0)
+
+    start = time.monotonic()
+    host = body.host
+    old_drive = body.old_drive
+    new_drive = body.new_drive
+
+    old_paths = [m.old_path for m in body.moves]
+    new_paths = [m.new_path for m in body.moves]
+
+    # 1. Find which old_paths actually exist
+    old_ph = ", ".join(["?"] * len(old_paths))
+    existing_rows = db.query(
+        f"SELECT host, drive, path, path_display, filename, ext, file_category, "
+        f"size_bytes, hash, mtime, last_checked, source_os, skipped_reason, "
+        f"last_seen_at, inode, device "
+        f"FROM files WHERE host = ? AND drive = ? AND path IN ({old_ph})",
+        [host, old_drive] + old_paths,
+    )
+    found_paths = {row[2] for row in existing_rows}
+    not_found = [p for p in old_paths if p not in found_paths]
+
+    # 2. Check for collisions at new_path destinations
+    new_ph = ", ".join(["?"] * len(new_paths))
+    collision_rows = db.query(
+        f"SELECT path FROM files WHERE host = ? AND drive = ? AND path IN ({new_ph})",
+        [host, new_drive] + new_paths,
+    )
+    collision_set = {row[0] for row in collision_rows}
+    # Exclude self-moves (old_path == new_path on same drive) from collisions
+    if old_drive == new_drive:
+        collision_set -= found_paths
+
+    collisions: list[str] = []
+    if collision_set and body.force:
+        # Delete colliding rows so the INSERT succeeds
+        coll_ph = ", ".join(["?"] * len(collision_set))
+        db.execute(
+            f"DELETE FROM files WHERE host = ? AND drive = ? AND path IN ({coll_ph})",
+            [host, new_drive] + list(collision_set),
+        )
+    elif collision_set:
+        collisions = sorted(collision_set)
+
+    # 3. Build the rows to insert (only valid, non-colliding moves)
+    rows_by_path = {row[2]: row for row in existing_rows}
+    insert_rows = []
+    delete_paths = []
+
+    for m in body.moves:
+        if m.old_path not in found_paths:
+            continue
+        if m.new_path in collision_set and not body.force:
+            continue
+        old_row = rows_by_path[m.old_path]
+        # old_row: host, drive, path, path_display, filename, ext, file_category,
+        #          size_bytes, hash, mtime, last_checked, source_os, skipped_reason,
+        #          last_seen_at, inode, device
+        inode = m.new_inode if m.inode_known else old_row[14]
+        device = m.new_device if m.inode_known else old_row[15]
+
+        insert_rows.append((
+            host,           # host
+            new_drive,      # drive
+            m.new_path,     # path
+            m.new_path_display,  # path_display
+            m.new_filename,      # filename
+            m.new_ext,           # ext
+            m.new_file_category, # file_category
+            old_row[7],     # size_bytes
+            old_row[8],     # hash
+            old_row[9],     # mtime
+            old_row[10],    # last_checked
+            old_row[11],    # source_os
+            old_row[12],    # skipped_reason
+            old_row[13],    # last_seen_at
+            inode,          # inode
+            device,         # device
+        ))
+        delete_paths.append(m.old_path)
+
+    moved = 0
+    if insert_rows:
+        # Single multi-row INSERT (DuckDB-safe, no executemany)
+        row_ph = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        values_ph = ", ".join([row_ph] * len(insert_rows))
+        insert_sql = f"""
+            INSERT INTO files (
+                host, drive, path, path_display, filename, ext, file_category,
+                size_bytes, hash, mtime, last_checked, source_os, skipped_reason,
+                last_seen_at, inode, device
+            ) VALUES {values_ph}
+        """
+        insert_params: list = []
+        for row in insert_rows:
+            insert_params.extend(row)
+        db.execute(insert_sql, insert_params)
+
+        # Bulk DELETE old rows
+        del_ph = ", ".join(["?"] * len(delete_paths))
+        db.execute(
+            f"DELETE FROM files WHERE host = ? AND drive = ? AND path IN ({del_ph})",
+            [host, old_drive] + delete_paths,
+        )
+        moved = len(insert_rows)
+
+    elapsed = time.monotonic() - start
+    if elapsed > 1.0:
+        logger.warning("POST /files/move: %d rows in %.1fs", moved, elapsed)
+
+    _invalidate_query_caches()
+
+    # Refresh host_stats inline (cheap — single host aggregate).
+    # Enqueue directory_index rebuild for the maintenance worker so it doesn't
+    # block this response (full rebuild holds the DB lock for tens of seconds
+    # on large datastores).
+    def _bg_refresh():
+        try:
+            db.refresh_host_stats(host)
+        except Exception:
+            logger.exception("Background refresh after move failed")
+
+    threading.Thread(target=_bg_refresh, daemon=True).start()
+    db.enqueue_maintenance_job("refresh_directory_index", priority=80)
+
+    return MoveResponse(moved=moved, not_found=not_found, collisions=collisions)
 
 
 # ---------------------------------------------------------------------------

@@ -86,7 +86,8 @@ def cmd_organize(args) -> None:
         donor_reals.append(os.path.realpath(os.path.expanduser(d)))
         donor_queries.append(normalize_query_path(d))
 
-    use_move = args.mode == "move"
+    use_move = args.mode in ("move", "sift-mv")
+    use_sift_mv = args.mode == "sift-mv"
 
     # --- Collision checks ---
     _status(is_tty, "Checking paths for collisions...")
@@ -143,7 +144,7 @@ def cmd_organize(args) -> None:
 
     # --- Generate script to stdout ---
     _status(is_tty, "Writing script to stdout...\n")
-    _generate_script(plan, model_label, target_real, donor_reals, use_move)
+    _generate_script(plan, model_label, target_real, donor_reals, use_move, use_sift_mv)
 
     has_missing = len(plan.missing) > 0
     sys.exit(1 if has_missing else 0)
@@ -516,15 +517,19 @@ def _generate_script(
     target_real: str,
     donor_reals: list[str],
     use_move: bool,
+    use_sift_mv: bool = False,
 ) -> None:
     w = sys.stdout.write
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    mv_cmd = "sift mv" if use_sift_mv else "mv"
 
     w("#!/bin/bash\n")
     w("set -euo pipefail\n")
     w(f"# sift organize — generated {now}\n")
     w(f"# Model: {model_label} ({plan.model_total:,} files)\n")
     w(f"# Target: {target_real}\n")
+    if use_sift_mv:
+        w("# Mode: sift-mv (moves update the sift datastore automatically)\n")
     for i, dr in enumerate(donor_reals):
         w(f"# Donor {i + 1}: {dr}\n")
     w("\n")
@@ -536,8 +541,9 @@ def _generate_script(
           f" {dir_file_total:,} files) ---\n")
         # Sort by target path for readability
         for dm in sorted(plan.dir_moves, key=lambda d: d.target_dir):
-            w(f"mkdir -p {_shell_quote(os.path.dirname(dm.target_dir))}\n")
-            w(f"mv {_shell_quote(dm.source_dir)} {_shell_quote(dm.target_dir)}\n")
+            if not use_sift_mv:
+                w(f"mkdir -p {_shell_quote(os.path.dirname(dm.target_dir))}\n")
+            w(f"{mv_cmd} {_shell_quote(dm.source_dir)} {_shell_quote(dm.target_dir)}\n")
         w("\n")
 
     # File operations
@@ -558,8 +564,11 @@ def _generate_script(
             tgt_dir = os.path.dirname(op.target_path)
             if tgt_dir not in seen_dirs:
                 seen_dirs.add(tgt_dir)
-                w(f"mkdir -p {_shell_quote(tgt_dir)}\n")
-            w(f"{op.op} {_shell_quote(op.source_path)} {_shell_quote(op.target_path)}\n")
+                # sift mv creates parent dirs itself; bare mv/cp need mkdir
+                if op.op == "cp" or not use_sift_mv:
+                    w(f"mkdir -p {_shell_quote(tgt_dir)}\n")
+            cmd = mv_cmd if op.op == "mv" else "cp"
+            w(f"{cmd} {_shell_quote(op.source_path)} {_shell_quote(op.target_path)}\n")
         w("\n")
 
     # Summary

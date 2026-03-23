@@ -477,6 +477,41 @@ def main() -> None:
         "--copy", dest="mode", action="store_const", const="copy",
         help="Use cp instead of mv",
     )
+    organize_mode.add_argument(
+        "--sift-mv", dest="mode", action="store_const", const="sift-mv",
+        help="Like --move but uses 'sift mv' to update the datastore in one step",
+    )
+
+    # sift mv
+    p_mv = sub.add_parser(
+        "mv",
+        help="Move files and update the sift datastore",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Move files on disk and update their paths in the sift datastore,\n"
+        "avoiding a full rescan. Like mv but sift-aware.\n"
+        "\n"
+        "Examples:\n"
+        "  sift mv ~/old-photos ~/media/photos\n"
+        "  sift mv file1.txt file2.txt /dest/dir/\n"
+        "  sift mv --db-only /old/path /new/path\n"
+        "  sift mv --dry-run ~/dir1 ~/dir2",
+    )
+    p_mv.add_argument(
+        "paths", nargs="+",
+        help="Source(s) and destination (last argument)",
+    )
+    p_mv.add_argument(
+        "--dry-run", action="store_true",
+        help="Show what would happen without making changes",
+    )
+    p_mv.add_argument(
+        "--db-only", action="store_true",
+        help="Update datastore only, skip filesystem move",
+    )
+    p_mv.add_argument(
+        "--force", action="store_true",
+        help="Overwrite if destination already exists in datastore",
+    )
 
     # sift host
     p_host = sub.add_parser("host", help="Manage host visibility and metadata")
@@ -592,6 +627,10 @@ def main() -> None:
             from sift.commands.organize import cmd_organize
 
             cmd_organize(args)
+        elif args.command == "mv":
+            from sift.commands.mv import cmd_mv
+
+            cmd_mv(args)
         else:
             parser.print_help()
             sys.exit(1)
