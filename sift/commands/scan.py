@@ -405,6 +405,75 @@ def _prefetch_null_hash_retry_paths(
     return retry_paths
 
 
+def _auto_trim(
+    host: str,
+    drive: str,
+    root_path: str,
+    root_path_display: str,
+    quiet: bool,
+    debug: bool,
+) -> None:
+    """After a successful scan, trim deleted files under the scanned root.
+
+    Uses skip_refresh=True for each batch to avoid per-batch host_stats
+    recounts, then calls POST /trim/refresh once at the end.
+    """
+    trim_payload = {
+        "host": host,
+        "path_prefix": root_path,
+        "recursive": True,
+        "deleted_only": True,
+        "limit": 5000,
+        "count_only": True,
+        "skip_refresh": True,
+    }
+
+    # 1. Count eligible rows
+    resp = client.post("/trim", trim_payload)
+    matched = resp.get("matched", 0)
+    if matched == 0:
+        if not quiet:
+            print(
+                f"  Auto-trim: no deleted rows under {root_path_display}",
+                file=sys.stderr,
+            )
+        return
+
+    if not quiet:
+        sys.stderr.write(
+            f"  Auto-trim: removing ~{matched:,} deleted rows"
+            f" under {root_path_display}..."
+        )
+        sys.stderr.flush()
+
+    # 2. Delete in batches
+    trim_payload["count_only"] = False
+    deleted_total = 0
+    while True:
+        resp = client.post("/trim", trim_payload)
+        deleted_batch = resp.get("deleted", 0)
+        if deleted_batch == 0:
+            break
+        deleted_total += deleted_batch
+        if not quiet:
+            sys.stderr.write(f"\r\x1b[2K  Auto-trim: {deleted_total:,} deleted rows removed...")
+            sys.stderr.flush()
+
+    # 3. One-time refresh
+    if deleted_total > 0:
+        client.post("/trim/refresh", {"host": host})
+
+    if not quiet:
+        sys.stderr.write(
+            f"\r\x1b[2K  Auto-trim: {deleted_total:,} deleted rows removed"
+            f" under {root_path_display}\n"
+        )
+        sys.stderr.flush()
+
+    if debug:
+        _debug(f"[auto-trim] host={host} root={root_path} deleted={deleted_total}")
+
+
 def cmd_scan(args) -> None:
     cfg = get_agent_config()
     source_os = get_source_os()
@@ -414,6 +483,7 @@ def cmd_scan(args) -> None:
     one_filesystem = getattr(args, "one_filesystem", False)
     allow_unraid_disks = getattr(args, "yolo", False)
     null_hash_retry = getattr(args, "null_hash_retry", False)
+    keep_deleted = getattr(args, "keep_deleted", False)
     virtual_host = getattr(args, "as_host", None)
     virtual_root_arg = getattr(args, "root", None)
 
@@ -1323,15 +1393,9 @@ def cmd_scan(args) -> None:
             )
 
         # -------------------------------------------------------------------
-        # 5. Finalize
+        # 5. Print scan summary (before server finalize so user sees results
+        #    immediately — PATCH and auto-trim can take time on large hosts)
         # -------------------------------------------------------------------
-        try:
-            client.patch(f"/scan-runs/{run_id}", {"status": "complete"})
-        except Exception as e:
-            print(
-                f"\nsift: warning — failed to mark scan complete: {e}", file=sys.stderr
-            )
-
         # Erase transient finalize lines + progress bar, leaving cursor on
         # the progress bar's line so the summary prints cleanly after the
         # "Fetching file cache" line.
@@ -1370,6 +1434,27 @@ def cmd_scan(args) -> None:
             )
         if extras:
             print("  " + ", ".join(extras), file=sys.stderr)
+
+        # -------------------------------------------------------------------
+        # 6. Mark scan complete on server
+        # -------------------------------------------------------------------
+        try:
+            client.patch(f"/scan-runs/{run_id}", {"status": "complete"})
+        except Exception as e:
+            print(
+                f"  warning: failed to mark scan complete: {e}", file=sys.stderr
+            )
+
+        # -------------------------------------------------------------------
+        # 7. Auto-trim deleted files
+        # -------------------------------------------------------------------
+        if not keep_deleted:
+            try:
+                _auto_trim(host, drive, root_path, root_path_display, quiet, debug)
+            except Exception as e:
+                print(
+                    f"  warning: auto-trim failed: {e}", file=sys.stderr
+                )
 
     except _ServerDown as e:
         stop_event.set()

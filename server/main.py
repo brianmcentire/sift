@@ -14,6 +14,7 @@ from typing import Optional
 import json
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from pydantic import BaseModel as _BaseModel
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -851,6 +852,45 @@ def _trim_candidates_cte(body: TrimRequest) -> tuple[str, list]:
     return sql, params
 
 
+def _post_trim_refresh(host: str) -> None:
+    """One-time post-trim cleanup: refresh stats, mark aggregates stale, enqueue
+    maintenance, and invalidate caches.  Called once after all trim batches complete."""
+    db.refresh_host_stats(host)
+    db.set_aggregate_meta(
+        f"host_hash_stats:{host}",
+        "stale",
+        "Queued for refresh after trim",
+    )
+    db.set_aggregate_meta(
+        "hash_stats",
+        "stale",
+        "Queued for refresh after trim",
+    )
+    db.set_aggregate_meta(
+        "directory_index",
+        "stale",
+        "Queued for refresh after trim",
+    )
+    db.enqueue_maintenance_job(
+        "refresh_aggregates_for_host",
+        host=host,
+        priority=80,
+    )
+    _invalidate_query_caches()
+
+
+class TrimRefreshRequest(_BaseModel):
+    host: str
+
+
+@app.post("/trim/refresh")
+def trim_refresh(body: TrimRefreshRequest):
+    """Trigger a one-time post-trim refresh for a host.  Called after a batch
+    of skip_refresh=True trim calls to reconcile derived state."""
+    _post_trim_refresh(body.host)
+    return {"ok": True}
+
+
 @app.post("/trim", response_model=TrimResponse)
 def trim_files(body: TrimRequest):
     if body.limit < 1 or body.limit > 100_000:
@@ -910,29 +950,8 @@ def trim_files(body: TrimRequest):
     db.execute(to_delete_sql, cte_params + [body.limit])
     deleted = min(matched, body.limit)
 
-    if deleted > 0:
-        db.refresh_host_stats(body.host)
-        db.set_aggregate_meta(
-            f"host_hash_stats:{body.host}",
-            "stale",
-            "Queued for refresh after trim",
-        )
-        db.set_aggregate_meta(
-            "hash_stats",
-            "stale",
-            "Queued for refresh after trim",
-        )
-        db.set_aggregate_meta(
-            "directory_index",
-            "stale",
-            "Queued for refresh after trim",
-        )
-        db.enqueue_maintenance_job(
-            "refresh_aggregates_for_host",
-            host=body.host,
-            priority=80,
-        )
-        _invalidate_query_caches()
+    if deleted > 0 and not body.skip_refresh:
+        _post_trim_refresh(body.host)
 
     return {"matched": matched, "deleted": deleted, "preview_paths": []}
 

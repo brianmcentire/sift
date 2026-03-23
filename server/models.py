@@ -98,6 +98,7 @@ class TrimRequest(BaseModel):
     preview: bool = False
     offset: int = 0
     unsafe_not_seen_before: Optional[date] = None
+    skip_refresh: bool = False
 
 
 class TrimResponse(BaseModel):

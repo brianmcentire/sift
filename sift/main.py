@@ -56,6 +56,12 @@ def main() -> None:
         "--root", default=None,
         help="Scan root prefix to strip from stored paths (required with --as)",
     )
+    p_scan.add_argument(
+        "--keep-deleted",
+        dest="keep_deleted",
+        action="store_true",
+        help="Skip auto-trim of deleted files after scan completes",
+    )
 
     # sift ls
     p_ls = sub.add_parser(

@@ -584,7 +584,7 @@ After a successful complete scan of a root:
 
 - Automatically run a scoped deleted-only trim for the exact host/drive/root that just finished.
 - Make this the default scan behavior.
-- Add `--no-trim-deleted` to `sift scan` so users can explicitly opt out.
+- Add `--keep-deleted` to `sift scan` so users can explicitly opt out.
 - If the auto-trim step fails, keep the scan itself successful and emit a warning rather than
   downgrading the scan to failed.
 
@@ -612,7 +612,7 @@ After a successful complete scan of a root:
 Proposed scan behavior:
 
 - `sift scan /path` -> scan + auto-trim deleted rows for `/path`
-- `sift scan --no-trim-deleted /path` -> scan only, no auto-trim
+- `sift scan --keep-deleted /path` -> scan only, no auto-trim
 
 Suggested output addition after the normal scan summary:
 
@@ -626,7 +626,7 @@ Keep the output concise so normal scans do not become noisy.
 
 #### CLI / command wiring
 
-1. Add `--no-trim-deleted` to `sift scan` in `sift/main.py`.
+1. Add `--keep-deleted` to `sift scan` in `sift/main.py`.
 2. Default internal scan behavior to auto-trim enabled unless that flag is present.
 
 #### Scan completion flow
@@ -648,19 +648,22 @@ In `sift/commands/scan.py`:
 Current trim behavior refreshes `host_stats` after every delete batch. For large trim sets this can
 multiply cost because each batch triggers another host-wide recount over `files`.
 
-This is stronger than necessary for correctness:
+Progress reporting and `host_stats` refresh are independent concerns:
 
 - `files` is the source of truth.
 - `host_stats` is derived state used by cheap summary endpoints such as `/hosts` and
   `/stats/overview`.
-- Per-batch refresh is not required for trim progress reporting.
+- Progress comes from delete batch row counts, which are essentially free — each `DELETE`
+  already returns the number of rows affected. Accumulate a running total across batches and
+  report it (e.g. `Trimming: 5,000 deleted rows removed ...`). This requires no additional
+  queries.
+- `host_stats` refresh is only needed for correctness of derived reads, not for progress.
 
-Deferred implementation target:
+Implementation target:
 
-1. Change trim so `host_stats` refresh happens once after the full trim completes, not once per
-   batch.
-2. Likewise, perform aggregate-meta invalidation, maintenance enqueue, and cache invalidation once
-   per trim operation, not once per batch.
+1. Report trim progress from batch delete counts (cheap running total, no extra queries).
+2. Defer `host_stats` refresh, aggregate-meta invalidation, maintenance enqueue, and cache
+   invalidation to once after the full trim completes — not once per batch.
 3. Preserve immediate post-trim consistency for derived reads by still doing that one final refresh.
 
 ### Why this is deferred
@@ -701,7 +704,7 @@ This temporary staleness is acceptable if the final refresh still happens immedi
 ### Validation checklist
 
 - Successful `sift scan` triggers scoped auto-trim by default for the completed root.
-- `sift scan --no-trim-deleted` preserves current scan-only behavior.
+- `sift scan --keep-deleted` preserves current scan-only behavior.
 - Interrupted/failed scans do not trigger auto-trim.
 - Auto-trim failure does not change a successful scan into a failed one.
 - Root scoping is exact: scanning one subtree does not auto-trim unrelated subtrees.
