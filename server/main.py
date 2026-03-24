@@ -582,17 +582,14 @@ def patch_scan_run(run_id: int, body: ScanRunPatch):
             _last_stats_refresh.pop(host, None)
         db.refresh_host_stats(host)
         if body.status == "complete":
-            # Host-local aggregates are always refreshed immediately.
-            try:
-                db.refresh_host_hash_stats(host)
-                db.set_aggregate_meta(f"host_hash_stats:{host}", "fresh")
-            except Exception as exc:
-                logger.warning(
-                    "host aggregate refresh failed for host %s: %s", host, exc
-                )
-
-            # Global aggregate rebuilds can be slow — always defer to
-            # maintenance queue so the PATCH returns immediately.
+            # All aggregate rebuilds deferred to maintenance queue so this
+            # PATCH returns immediately — host_hash_stats alone can exceed
+            # 30s on large hosts (5M+ files), causing client timeouts.
+            db.set_aggregate_meta(
+                f"host_hash_stats:{host}",
+                "stale",
+                "Queued for refresh after scan completion",
+            )
             db.set_aggregate_meta(
                 "hash_stats",
                 "stale",
@@ -603,8 +600,11 @@ def patch_scan_run(run_id: int, body: ScanRunPatch):
                 "stale",
                 "Queued for refresh after scan completion",
             )
-            db.enqueue_maintenance_job("refresh_hash_stats", priority=80)
-            db.enqueue_maintenance_job("refresh_directory_index", priority=80)
+            db.enqueue_maintenance_job(
+                "refresh_aggregates_for_host",
+                host=host,
+                priority=80,
+            )
         _invalidate_query_caches()
     return {"ok": True}
 

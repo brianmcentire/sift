@@ -57,11 +57,11 @@ def cmd_sets(args) -> None:
             entries = _fetch_entries(host, path, drive, min_size)
             a_entries.extend(entries)
         if _progress:
-            sys.stderr.write(" " * 72 + "\r")
+            sys.stderr.write("\r\033[2K")
             sys.stderr.flush()
     except Exception as e:
         if _progress:
-            sys.stderr.write(" " * 72 + "\r")
+            sys.stderr.write("\r\033[2K")
             sys.stderr.flush()
         print(f"sift sets: error: {e}", file=sys.stderr)
         sys.exit(2)
@@ -397,7 +397,7 @@ def _check_hashes_remote(
 
     if show_progress:
         # Clear progress line — final status printed by caller
-        sys.stderr.write("\r" + " " * 72 + "\r")
+        sys.stderr.write("\r\033[2K")
         sys.stderr.flush()
 
     return found

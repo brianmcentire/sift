@@ -96,21 +96,25 @@ class TestPatchScanRun:
             "SELECT COUNT(*) FROM maintenance_jobs WHERE status = 'pending'"
         )
         assert jobs_row is not None
-        assert jobs_row[0] >= 2
+        assert jobs_row[0] >= 1
 
+        host_hash_meta = db_module.query_one(
+            "SELECT status FROM aggregate_meta WHERE key = 'host_hash_stats:mac'"
+        )
         hash_meta = db_module.query_one(
             "SELECT status FROM aggregate_meta WHERE key = 'hash_stats'"
         )
         dir_meta = db_module.query_one(
             "SELECT status FROM aggregate_meta WHERE key = 'directory_index'"
         )
+        assert host_hash_meta is not None and host_hash_meta[0] == "stale"
         assert hash_meta is not None and hash_meta[0] == "stale"
         assert dir_meta is not None and dir_meta[0] == "stale"
 
-    def test_complete_without_other_running_hosts_queues_global_aggregates(
+    def test_complete_without_other_running_hosts_queues_aggregates(
         self, client
     ):
-        """Global aggregates are always deferred to maintenance queue."""
+        """All aggregates deferred to maintenance queue on scan completion."""
         run_mac = insert_scan_run(host="mac", root_path="/", status="running")
 
         resp = client.patch(f"/scan-runs/{run_mac}", json={"status": "complete"})
@@ -120,14 +124,18 @@ class TestPatchScanRun:
             "SELECT COUNT(*) FROM maintenance_jobs WHERE status = 'pending'"
         )
         assert jobs_row is not None
-        assert jobs_row[0] == 2  # hash_stats + directory_index
+        assert jobs_row[0] == 1  # refresh_aggregates_for_host
 
+        host_hash_meta = db_module.query_one(
+            "SELECT status FROM aggregate_meta WHERE key = 'host_hash_stats:mac'"
+        )
         hash_meta = db_module.query_one(
             "SELECT status FROM aggregate_meta WHERE key = 'hash_stats'"
         )
         dir_meta = db_module.query_one(
             "SELECT status FROM aggregate_meta WHERE key = 'directory_index'"
         )
+        assert host_hash_meta is not None and host_hash_meta[0] == "stale"
         assert hash_meta is not None and hash_meta[0] == "stale"
         assert dir_meta is not None and dir_meta[0] == "stale"
 
