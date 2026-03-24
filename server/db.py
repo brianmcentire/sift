@@ -483,8 +483,11 @@ def executemany(sql: str, data: list[list[Any]]) -> None:
             )
 
 
-def refresh_host_stats(host: str) -> None:
-    """Recompute and store aggregate stats for a single host."""
+def refresh_host_stats(host: str) -> int:
+    """Recompute and store aggregate stats for a single host.
+
+    Returns the total file count for the host (0 means fully trimmed).
+    """
     with _lock:
         conn = get_connection()
         row = conn.execute(
@@ -510,6 +513,7 @@ def refresh_host_stats(host: str) -> None:
                 "VALUES (?, ?, ?, ?, now())",
                 [host, total_files, total_bytes, total_hashed],
             )
+        return total_files
 
 
 def refresh_host_hard_linked_inodes(host: str) -> None:

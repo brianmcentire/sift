@@ -259,14 +259,18 @@ class TestTrimUnsafeNotSeenSince:
         assert resp.status_code == 400
 
 
-def test_trim_enqueues_aggregate_refresh_after_delete(client):
-    insert_files([make_file(path="/users/brian/old.txt", filename="old.txt")])
+def test_trim_enqueues_aggregate_refresh_after_partial_delete(client):
+    """When a host still has files after trim, enqueue aggregate refresh."""
+    insert_files([
+        make_file(path="/old/file.txt", filename="file.txt"),
+        make_file(path="/keep/file.txt", filename="file.txt"),
+    ])
 
     resp = client.post(
         "/trim",
         json={
             "host": "mac",
-            "path_prefix": "/users/brian",
+            "path_prefix": "/old",
             "recursive": True,
             "deleted_only": False,
             "patterns": [],
@@ -284,6 +288,38 @@ def test_trim_enqueues_aggregate_refresh_after_delete(client):
         and j["status"] == "pending"
         for j in jobs
     )
+
+
+def test_trim_skips_expensive_rebuild_when_host_fully_trimmed(client):
+    """When a host has no files left after trim, skip the expensive rebuild."""
+    insert_files([make_file(path="/users/brian/old.txt", filename="old.txt")])
+
+    resp = client.post(
+        "/trim",
+        json={
+            "host": "mac",
+            "path_prefix": "/users/brian",
+            "recursive": True,
+            "deleted_only": False,
+            "patterns": [],
+            "limit": 5000,
+            "count_only": False,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] == 1
+
+    # Host is fully trimmed — no expensive aggregate rebuild should be enqueued
+    jobs = client.get("/maintenance/jobs", params={"limit": 20}).json()["jobs"]
+    assert not any(
+        j["job_type"] == "refresh_aggregates_for_host"
+        and j["host"] == "mac"
+        for j in jobs
+    )
+
+    # host_stats should be cleaned up (host disappears from /hosts)
+    hosts = client.get("/hosts").json()
+    assert not any(h["host"] == "mac" for h in hosts)
 
     def test_deleted_only_skips_rows_without_covering_complete_scan(self, client):
         old = "2025-01-01T00:00:00+00:00"

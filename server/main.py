@@ -161,11 +161,21 @@ def _startup_refresh() -> None:
     if _maintenance_stop_event.is_set():
         return
     try:
-        hosts = db.query("SELECT DISTINCT host FROM files")
-        for (host,) in hosts:
+        # Refresh stats for hosts that have files
+        live_hosts = db.query("SELECT DISTINCT host FROM files")
+        live_set = {r[0] for r in live_hosts}
+        for host in live_set:
             db.refresh_host_stats(host)
-        if hosts:
-            logger.info("Refreshed host_stats for %d host(s)", len(hosts))
+
+        # Clean up orphaned host_stats entries (host was fully trimmed but
+        # refresh_host_stats never ran — e.g. skip_refresh was used)
+        stale_hosts = db.query("SELECT host FROM host_stats WHERE host NOT IN (SELECT DISTINCT host FROM files)")
+        for (host,) in stale_hosts:
+            db.refresh_host_stats(host)  # will delete since total_files == 0
+            live_set.add(host)
+
+        if live_set:
+            logger.info("Refreshed host_stats for %d host(s)", len(live_set))
             _invalidate_query_caches()
     except Exception:
         logger.exception("host_stats refresh failed")
@@ -993,7 +1003,15 @@ def _trim_candidates_cte(body: TrimRequest) -> tuple[str, list]:
 def _post_trim_refresh(host: str) -> None:
     """One-time post-trim cleanup: refresh stats, mark aggregates stale, enqueue
     maintenance, and invalidate caches.  Called once after all trim batches complete."""
-    db.refresh_host_stats(host)
+    total_files = db.refresh_host_stats(host)
+    _invalidate_query_caches()
+    if total_files == 0:
+        # Host fully trimmed — host_stats and host_meta already cleaned up by
+        # refresh_host_stats.  No need to enqueue an expensive aggregate rebuild
+        # (hash_stats + directory_index) for a host with no files.  Stale entries
+        # in derived tables are harmless and get cleaned up on the next rebuild
+        # triggered by a real scan.
+        return
     db.set_aggregate_meta(
         f"host_hash_stats:{host}",
         "stale",
@@ -1014,7 +1032,6 @@ def _post_trim_refresh(host: str) -> None:
         host=host,
         priority=80,
     )
-    _invalidate_query_caches()
 
 
 class TrimRefreshRequest(_BaseModel):
