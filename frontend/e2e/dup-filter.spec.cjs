@@ -77,7 +77,7 @@ test.describe('min-size filter', () => {
   })
 
   test('min-size hides small files in tree view', async ({ page }) => {
-    await selectHost(page, 'Brians-M2ProMBP')
+    await selectHost(page, 'brians-m2prombp')
     const filesBefore = page.locator('[data-testid="tree-row"][data-entry-type="file"]')
     // Expand a directory first to see files
     const firstDir = page.locator('[data-testid="tree-row"][data-entry-type="dir"]').first()
@@ -129,7 +129,7 @@ test.describe('dup-only + min-size combined', () => {
   })
 
   test('dir dup badges update when min-size changes', async ({ page }) => {
-    await selectHost(page, 'Brians-M2ProMBP')
+    await selectHost(page, 'brians-m2prombp')
     await toggleDupOnly(page)
     await waitForTreeReady(page)
 
@@ -156,7 +156,7 @@ test.describe('dup badge click-through', () => {
   })
 
   test('clicking dir dup badge shows overlay with results', async ({ page }) => {
-    await selectHost(page, 'Brians-M2ProMBP')
+    await selectHost(page, 'brians-m2prombp')
     await toggleDupOnly(page)
     await waitForTreeReady(page)
 
@@ -186,7 +186,7 @@ test.describe('dup badge click-through', () => {
   })
 
   test('clicking dir dup badge after min-size change still shows results', async ({ page }) => {
-    await selectHost(page, 'Brians-M2ProMBP')
+    await selectHost(page, 'brians-m2prombp')
     await toggleDupOnly(page)
     await waitForTreeReady(page)
 

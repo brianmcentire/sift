@@ -28,7 +28,7 @@ test.describe('folder to open', () => {
   })
 
   test('expands known mac path', async ({ page }) => {
-    await selectHost(page, 'Brians-M2ProMBP')
+    await selectHost(page, 'brians-m2prombp')
     await setDirectorySearch(page, 'gas-m')
 
     await expect(page.locator('[data-testid="tree-row"][data-path$="/gas-meter-monitor"]')).toBeVisible({ timeout: 20_000 })
@@ -36,7 +36,7 @@ test.describe('folder to open', () => {
   })
 
   test('expands known Windows path', async ({ page }) => {
-    await selectHost(page, 'Photoshop-PC')
+    await selectHost(page, 'photoshop-pc')
     await setDirectorySearch(page, 'Scanner-Nikon')
 
     await expect(page.locator('[data-testid="tree-row"][data-path*="/scanner-nikon-4000"]')).toBeVisible({ timeout: 20_000 })
@@ -44,7 +44,7 @@ test.describe('folder to open', () => {
   })
 
   test('expands Windows matches across C and D', async ({ page }) => {
-    await selectHost(page, 'Photoshop-PC')
+    await selectHost(page, 'photoshop-pc')
     await setDirectorySearch(page, 'Downloads')
 
     await expect(page.locator('[data-testid="tree-row"][data-path="__drive__:C"]')).toBeVisible({ timeout: 20_000 })
@@ -74,7 +74,7 @@ test.describe('category filter', () => {
 test.describe('category filter preserves tree dirs', () => {
   test('directories remain visible when filtering by category in tree view', async ({ page }) => {
     await gotoCleanAndSettle(page)
-    await selectHost(page, 'Brians-M2ProMBP')
+    await selectHost(page, 'brians-m2prombp')
     await setDirectorySearch(page, 'gas-m')
 
     await expect(page.locator('[data-testid="tree-row"][data-path$="/gas-meter-monitor"]')).toBeVisible({ timeout: 20_000 })

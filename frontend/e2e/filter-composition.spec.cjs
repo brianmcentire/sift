@@ -114,7 +114,7 @@ test.describe('filter composition', () => {
   test('list view updates when switching from single host to all hosts with dup filters', async ({ page }) => {
     // Start in list view with one host, only-dups, and min-size
     await switchToListView(page)
-    await selectHost(page, 'Brians-M2ProMBP')
+    await selectHost(page, 'brians-m2prombp')
     await toggleDupOnly(page)
     await setMinSize(page, '1 MB')
     await page.waitForTimeout(500)

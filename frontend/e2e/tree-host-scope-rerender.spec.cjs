@@ -16,7 +16,7 @@ test.describe('tree dup highlight refresh on host add', () => {
 
   test('adding a second host re-renders file dup highlighting in expanded C:/tmp', async ({ page }) => {
     test.setTimeout(90_000)
-    await selectHost(page, 'Photoshop-PC')
+    await selectHost(page, 'photoshop-pc')
     await setDirectorySearch(page, 'C:\\tmp')
 
     const tmpDirRow = page.locator('[data-testid="tree-row"][data-entry-type="dir"][data-path^="__drive__:C"][data-path$="/tmp"]').first()
@@ -32,7 +32,7 @@ test.describe('tree dup highlight refresh on host add', () => {
       rows.filter(r => r.className.includes('bg-amber-50')).length
     )
 
-    // Baseline: with only Photoshop-PC selected, /tmp should not show dup-highlighted files.
+    // Baseline: with only photoshop-pc selected, /tmp should not show dup-highlighted files.
     await expect.poll(countAmberRows, { timeout: 5_000 }).toBe(0)
 
     const unraidChip = page.locator('header button').filter({
