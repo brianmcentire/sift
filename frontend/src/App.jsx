@@ -1263,7 +1263,9 @@ export default function App() {
         }
         const rows = Array.isArray(data) ? data : []
         if (rows.length === 0) {
-          setOverlayNotice('No duplicate hashes matched selected hosts for this directory at current min size')
+          setOverlayNotice(minSizeRef.current > 0
+            ? 'No duplicate hashes found in this directory at current min size'
+            : 'No duplicate hashes found in this directory for selected hosts')
           return
         }
         setOverlayNotice('')

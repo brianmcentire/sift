@@ -7,8 +7,12 @@ from typing import Tuple
 
 
 def local_hostname() -> str:
-    """Return short hostname, stripping FQDN domain suffix."""
-    return socket.gethostname().split(".")[0]
+    """Return short hostname, stripping FQDN domain suffix.
+
+    Always lowercased — DuckDB string comparison is case-sensitive, so
+    mixed-case host names cause silent data splits across aggregate tables.
+    """
+    return socket.gethostname().split(".")[0].lower()
 
 
 def get_source_os() -> str:

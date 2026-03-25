@@ -437,6 +437,7 @@ def main() -> None:
     p_organize = sub.add_parser(
         "organize",
         help="Generate a script to reorganize donor files to match a model host's structure",
+        usage="sift organize model target --from PATH [--from PATH ...] [--move | --copy | --sift-mv]",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Generate a shell script that rearranges files from local donor directories\n"
         "to match the directory structure of a model host in the sift datastore.\n"

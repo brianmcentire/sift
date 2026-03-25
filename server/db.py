@@ -384,6 +384,81 @@ def _run_migrations(conn: duckdb.DuckDBPyConnection) -> None:
     # by SCHEMA_SQL with correct schema) and migrated DBs (table just recreated).
     conn.execute("CREATE INDEX IF NOT EXISTS idx_dir_index_host_path ON directory_index(host, dir_path)")
 
+    # --- Host casing normalization (one-time) ---
+    # DuckDB string comparison is case-sensitive. Mixed-case host names cause
+    # silent data splits across aggregate tables. See architecture-principles.md.
+    mixed = conn.execute(
+        "SELECT COUNT(*) FROM files WHERE host != LOWER(host)"
+    ).fetchone()
+    mixed_count = mixed[0] if mixed else 0
+    if mixed_count > 0:
+        logger.info("migration: normalizing %d files with mixed-case host names", mixed_count)
+
+        # 1. Dedup files if PK conflicts would occur (same lower(host)+drive+path)
+        conflicts = conn.execute("""
+            SELECT COUNT(*) FROM (
+                SELECT 1 FROM files
+                GROUP BY LOWER(host), drive, path
+                HAVING COUNT(DISTINCT host) > 1
+            ) t
+        """).fetchone()[0]
+        if conflicts > 0:
+            logger.info("migration: resolving %d host-casing PK conflicts in files", conflicts)
+            conn.execute("""
+                DELETE FROM files WHERE rowid IN (
+                    SELECT rowid FROM (
+                        SELECT rowid, ROW_NUMBER() OVER (
+                            PARTITION BY LOWER(host), drive, path
+                            ORDER BY last_seen_at DESC NULLS LAST
+                        ) AS rn FROM files
+                    ) t WHERE rn > 1
+                )
+            """)
+
+        # 2. Lowercase files.host
+        conn.execute("UPDATE files SET host = LOWER(host) WHERE host != LOWER(host)")
+
+        # 3. Delete derived aggregate tables — rebuilt on startup
+        for table in ["host_stats", "host_hash_stats", "host_hard_linked_inodes", "directory_index"]:
+            conn.execute(f"DELETE FROM {table}")
+
+        # 4. Lowercase scan_runs (no unique constraint on host)
+        conn.execute("UPDATE scan_runs SET host = LOWER(host) WHERE host != LOWER(host)")
+
+        # 5. Dedup and lowercase host_meta (PK on host)
+        conn.execute("""
+            DELETE FROM host_meta WHERE rowid IN (
+                SELECT rowid FROM (
+                    SELECT rowid, ROW_NUMBER() OVER (
+                        PARTITION BY LOWER(host) ORDER BY host
+                    ) AS rn FROM host_meta
+                ) t WHERE rn > 1
+            )
+        """)
+        conn.execute("UPDATE host_meta SET host = LOWER(host) WHERE host != LOWER(host)")
+
+        # 6. Dedup and lowercase aggregate_meta host_hash_stats keys
+        conn.execute("""
+            DELETE FROM aggregate_meta WHERE rowid IN (
+                SELECT rowid FROM (
+                    SELECT rowid, ROW_NUMBER() OVER (
+                        PARTITION BY LOWER(key) ORDER BY updated_at DESC NULLS LAST
+                    ) AS rn FROM aggregate_meta
+                    WHERE key LIKE 'host_hash_stats:%'
+                ) t WHERE rn > 1
+            )
+        """)
+        conn.execute("""
+            UPDATE aggregate_meta
+            SET key = 'host_hash_stats:' || LOWER(SUBSTRING(key, 17))
+            WHERE key LIKE 'host_hash_stats:%'
+              AND key != 'host_hash_stats:' || LOWER(SUBSTRING(key, 17))
+        """)
+
+        # 7. Mark all aggregates stale so startup rebuilds with correct data
+        conn.execute("UPDATE aggregate_meta SET status = 'stale'")
+        logger.info("migration: host casing normalization complete")
+
 
 def init_db(db_path: str | None = None) -> None:
     global _conn
@@ -505,8 +580,14 @@ def refresh_host_stats(host: str) -> int:
             [host],
         )
         if total_files == 0:
-            # Host fully trimmed — clean up metadata too
+            # Host fully trimmed — clean up all derived/meta entries
             conn.execute("DELETE FROM host_meta WHERE host = ?", [host])
+            conn.execute("DELETE FROM host_hash_stats WHERE host = ?", [host])
+            conn.execute("DELETE FROM host_hard_linked_inodes WHERE host = ?", [host])
+            conn.execute(
+                "DELETE FROM aggregate_meta WHERE key = ?",
+                [f"host_hash_stats:{host}"],
+            )
         else:
             conn.execute(
                 "INSERT INTO host_stats (host, total_files, total_bytes, total_hashed, updated_at) "

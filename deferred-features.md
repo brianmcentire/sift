@@ -710,3 +710,49 @@ updates a `\r`-overwriting counter on stderr (e.g. `Fetching source ... 123,456 
 
 **Complexity concern:** Two ways to fetch file entries means two queries to keep in sync. Mitigate
 by extracting shared query-building logic if both endpoints diverge.
+
+---
+
+## `sift scan` Skip Reason Reporting
+
+**Context:** `sift scan` reports a single aggregate skip count (e.g. "423 skipped") with no
+breakdown of why files were skipped. Users see the number and wonder what happened — was it
+permissions? Cloud stubs? Volatile files? The only way to find out is querying the server
+API directly.
+
+**Current behavior:**
+- `stats["files_skipped"]` is incremented for every skip, regardless of reason
+- Skip reasons (`sparse_file`, `macos_dataless`, `windows_cloud_placeholder`,
+  `volatile_active`, `recently_modified`, `permission_error`) are sent to the server
+  per-file but not tracked locally during the scan
+- Read errors have their own counter and log file (`_error_log_path`), but skips do not
+
+**Proposed behavior — two levels:**
+
+1. **Always (no flags needed):** Print a per-reason count summary after the scan summary
+   when `files_skipped > 0`:
+   ```
+   Scan complete: 794,558 files scanned, 160,742 hashed, 633,393 cached, 423 skipped, ...
+     skipped: 312 volatile_active, 98 macos_dataless, 13 permission_error
+   ```
+
+2. **With `--verbose`:** Additionally print the full listing of every skipped file with
+   its reason, one per line:
+   ```
+     skipped: 312 volatile_active, 98 macos_dataless, 13 permission_error
+     /Users/brian/Library/Mail/.../message.partial.emlx  macos_dataless
+     /Users/brian/Library/Caches/.../tmp1234  volatile_active
+     ...
+   ```
+
+**Implementation:**
+- `sift/commands/scan.py`: add `skip_counts: dict[str, int]` and
+  `skip_details: list[tuple[str, str]]` (path, reason) to stats tracking. Increment
+  at each skip site (search for `files_skipped`). `skip_details` only populated when
+  `--verbose` is active (avoid unbounded memory in normal mode).
+- Print per-reason summary always; print full listing only with `--verbose`.
+- `sift/main.py`: `--verbose` flag already exists on the scan subparser — no new
+  args needed. Verify it's passed through to the scan function.
+- No server changes needed.
+
+**Scope:** Small change — ~10 lines of tracking + ~10 lines of output formatting.

@@ -69,6 +69,7 @@ _DUP_METRICS_LIVE_MAX_FILES = int(
     os.environ.get("SIFT_DUP_METRICS_LIVE_MAX_FILES", "200000")
 )
 _maintenance_stop_event = threading.Event()
+_maintenance_wake_event = threading.Event()
 _maintenance_thread: threading.Thread | None = None
 _startup_thread: threading.Thread | None = None
 _maintenance_lock = threading.Lock()
@@ -180,6 +181,7 @@ def _startup_refresh() -> None:
     except Exception:
         logger.exception("host_stats refresh failed")
     _bootstrap_aggregates()
+    _startup_sweep_stale_aggregates()
 
 
 def _bootstrap_aggregates() -> None:
@@ -261,6 +263,7 @@ async def lifespan(app: FastAPI):
     db.init_db(db_path)
     _cleanup_stale_scan_runs()
     _maintenance_stop_event.clear()
+    _maintenance_wake_event.clear()
     if _MAINTENANCE_ENABLED:
         _maintenance_thread = threading.Thread(
             target=_maintenance_loop,
@@ -281,6 +284,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         _maintenance_stop_event.set()
+        _maintenance_wake_event.set()  # unblock loop if waiting
         if _maintenance_thread and _maintenance_thread.is_alive():
             _maintenance_thread.join(timeout=1.0)
         _maintenance_thread = None
@@ -405,6 +409,7 @@ def _run_maintenance_job(job: dict) -> None:
         db.set_aggregate_meta("directory_index", "fresh")
     else:
         raise ValueError(f"unknown maintenance job type: {job_type}")
+    _invalidate_query_caches()
     elapsed = time.monotonic() - start
     logger.info("maintenance: completed %s in %.1fs", label, elapsed)
 
@@ -441,11 +446,101 @@ def _run_one_maintenance_cycle(force: bool = False) -> dict:
             }
 
 
+def _auto_enqueue_stale_aggregates() -> int:
+    """Find stale/stuck aggregates with no pending/running jobs and enqueue recovery.
+
+    Skips host-specific aggregates for hosts with no files (cleans up their
+    aggregate_meta entry instead). Returns count of newly enqueued jobs.
+    """
+    rows = db.query(
+        "SELECT key, status FROM aggregate_meta WHERE status IN ('stale', 'building')"
+    )
+    if not rows:
+        return 0
+
+    # Hosts that actually have files — only these need aggregate rebuilds
+    live_hosts = {
+        r[0]
+        for r in db.query("SELECT DISTINCT host FROM files WHERE host IS NOT NULL")
+    }
+
+    enqueued = 0
+    needs_hash_stats = False
+    needs_directory_index = False
+
+    for key, status in rows:
+        if key.startswith("host_hash_stats:"):
+            host = key.split(":", 1)[1]
+            if host not in live_hosts:
+                # Empty host — clean up stale aggregate_meta entry
+                db.execute(
+                    "DELETE FROM aggregate_meta WHERE key = ?", [key]
+                )
+                continue
+            if db.enqueue_maintenance_job("refresh_host_hash_stats", host=host, priority=80):
+                enqueued += 1
+                needs_hash_stats = True
+                needs_directory_index = True
+        elif key == "hash_stats":
+            needs_hash_stats = True
+        elif key == "directory_index":
+            needs_directory_index = True
+
+    if needs_hash_stats:
+        if db.enqueue_maintenance_job("refresh_hash_stats", priority=70):
+            enqueued += 1
+    if needs_directory_index:
+        if db.enqueue_maintenance_job("refresh_directory_index", priority=60):
+            enqueued += 1
+
+    return enqueued
+
+
+def _startup_sweep_stale_aggregates() -> None:
+    """On startup, reset stuck jobs and recover orphaned stale aggregates."""
+    try:
+        # Reset stuck 'running' jobs back to 'pending'
+        stuck = db.query(
+            "SELECT id, job_type, host FROM maintenance_jobs WHERE status = 'running'"
+        )
+        if stuck:
+            logger.info("startup sweep: resetting %d stuck running jobs", len(stuck))
+            conn = db.get_connection()
+            with db._lock:
+                for job_id, job_type, host in stuck:
+                    conn.execute(
+                        "UPDATE maintenance_jobs SET status = 'pending', updated_at = now() WHERE id = ?",
+                        [job_id],
+                    )
+
+        # Enqueue recovery for stale/building aggregates with no pending jobs
+        enqueued = _auto_enqueue_stale_aggregates()
+        if enqueued:
+            logger.info("startup sweep: enqueued %d stale aggregate recovery jobs", enqueued)
+        else:
+            logger.info("startup sweep: no stale aggregates found")
+    except Exception:
+        logger.exception("startup sweep failed")
+
+
 def _maintenance_loop() -> None:
     logger.info("maintenance worker started")
-    while not _maintenance_stop_event.wait(_MAINTENANCE_COOLDOWN_SEC):
+    while True:
+        # Wait for cooldown OR wake signal, checking stop event
+        _maintenance_wake_event.wait(timeout=_MAINTENANCE_COOLDOWN_SEC)
+        _maintenance_wake_event.clear()
+        if _maintenance_stop_event.is_set():
+            break
         try:
-            _run_one_maintenance_cycle(force=False)
+            result = _run_one_maintenance_cycle(force=False)
+            # When queue is empty, check for orphaned stale aggregates
+            if result.get("reason") == "no_job":
+                enqueued = _auto_enqueue_stale_aggregates()
+                if enqueued:
+                    logger.info(
+                        "maintenance: auto-enqueued %d stale aggregate recovery jobs",
+                        enqueued,
+                    )
         except Exception as exc:
             logger.warning("maintenance loop error: %s", exc)
     logger.info("maintenance worker stopped")
@@ -456,10 +551,10 @@ def _detect_client_host(request: Request) -> str | None:
     try:
         client_ip = request.client.host if request.client else None
         if client_ip in ("127.0.0.1", "::1"):
-            return socket.gethostname().split(".")[0]
+            return socket.gethostname().split(".")[0].lower()
         if client_ip:
             name, _, _ = socket.gethostbyaddr(client_ip)
-            return name.split(".")[0]
+            return name.split(".")[0].lower()
     except Exception:
         return None
     return None
@@ -528,6 +623,7 @@ async def db_timeout_handler(request: Request, exc: db.DBTimeoutError):
 
 @app.post("/scan-runs", response_model=ScanRunCreatedResponse)
 def create_scan_run(body: ScanRunCreate):
+    body.host = body.host.lower()
     # Abandon any prior 'running' scans for same host + drive + root_path
     stale = db.query(
         "SELECT id FROM scan_runs WHERE host = ? AND drive = ? AND root_path = ? AND status = 'running'",
@@ -660,11 +756,85 @@ def list_maintenance_jobs(limit: int = Query(50, ge=1, le=500)):
 
 
 @app.post("/maintenance/run-now")
-def run_maintenance_now(force: bool = Query(False)):
+def run_maintenance_now(
+    force: bool = Query(False),
+    background: bool = Query(False),
+):
     if not _MAINTENANCE_ENABLED and not force:
         return {"ok": False, "reason": "maintenance_disabled"}
+    if background:
+        _maintenance_wake_event.set()
+        return {"ok": True, "mode": "background", "ran": False, "reason": "wake_sent"}
     result = _run_one_maintenance_cycle(force=force)
     return {"ok": True, **result}
+
+
+@app.get("/maintenance/aggregate-status")
+def aggregate_status():
+    rows = db.query(
+        "SELECT key, status, note, updated_at FROM aggregate_meta ORDER BY key"
+    )
+    return [
+        {"key": r[0], "status": r[1], "note": r[2], "updated_at": str(r[3]) if r[3] else None}
+        for r in rows
+    ]
+
+
+@app.post("/maintenance/enqueue-refresh")
+def enqueue_refresh(host: str = Query("", description="Host for host_hash_stats refresh")):
+    """Manually enqueue aggregate refresh jobs (for recovery from stale state)."""
+    enqueued = []
+    if host:
+        db.set_aggregate_meta(f"host_hash_stats:{host}", "stale", "Manual enqueue")
+        db.set_aggregate_meta("hash_stats", "stale", "Manual enqueue")
+        db.set_aggregate_meta("directory_index", "stale", "Manual enqueue")
+        db.enqueue_maintenance_job("refresh_aggregates_for_host", host=host, priority=80)
+        enqueued.append(f"refresh_aggregates_for_host ({host})")
+    else:
+        # Enqueue for all known hosts
+        host_rows = db.query("SELECT DISTINCT host FROM files WHERE host IS NOT NULL")
+        for (h,) in host_rows:
+            db.set_aggregate_meta(f"host_hash_stats:{h}", "stale", "Manual enqueue")
+            db.enqueue_maintenance_job("refresh_host_hash_stats", host=h, priority=80)
+            enqueued.append(f"refresh_host_hash_stats ({h})")
+        db.set_aggregate_meta("hash_stats", "stale", "Manual enqueue")
+        db.enqueue_maintenance_job("refresh_hash_stats", priority=70)
+        enqueued.append("refresh_hash_stats")
+        db.set_aggregate_meta("directory_index", "stale", "Manual enqueue")
+        db.enqueue_maintenance_job("refresh_directory_index", priority=60)
+        enqueued.append("refresh_directory_index")
+    return {"ok": True, "enqueued": enqueued}
+
+
+@app.get("/maintenance/host-casing-audit")
+def host_casing_audit():
+    """Report distinct host values across all tables and flag casing inconsistencies."""
+    tables = {
+        "files": "SELECT DISTINCT host FROM files",
+        "host_stats": "SELECT DISTINCT host FROM host_stats",
+        "host_hash_stats": "SELECT DISTINCT host FROM host_hash_stats",
+        "scan_runs": "SELECT DISTINCT host FROM scan_runs",
+        "host_meta": "SELECT DISTINCT host FROM host_meta",
+    }
+    result: dict = {}
+    for label, sql in tables.items():
+        result[label] = sorted(r[0] for r in db.query(sql))
+    meta_rows = db.query(
+        "SELECT key FROM aggregate_meta WHERE key LIKE 'host_hash_stats:%'"
+    )
+    result["aggregate_meta_keys"] = [r[0] for r in meta_rows]
+    # Flag case inconsistencies
+    all_hosts: set[str] = set()
+    for label, hosts in result.items():
+        if label == "aggregate_meta_keys":
+            all_hosts.update(k.split(":", 1)[1] for k in hosts if ":" in k)
+        else:
+            all_hosts.update(hosts)
+    groups: dict[str, list[str]] = {}
+    for h in all_hosts:
+        groups.setdefault(h.lower(), []).append(h)
+    result["inconsistencies"] = {k: v for k, v in groups.items() if len(v) > 1}
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -677,6 +847,8 @@ def upsert_files(records: list[FileRecord]):
     if not records:
         return {"upserted": 0}
     start = time.monotonic()
+    for r in records:
+        r.host = r.host.lower()
 
     # Build a single multi-row INSERT so DuckDB can batch index lookups and
     # updates in one pass.  executemany runs each row as a separate statement
@@ -740,6 +912,7 @@ def upsert_files(records: list[FileRecord]):
 
 @app.post("/files/seen", response_model=SeenResponse)
 def mark_files_seen(body: SeenRequest):
+    body.host = body.host.lower()
     if not body.paths:
         return {"updated": 0}
 
@@ -766,6 +939,7 @@ def mark_files_seen(body: SeenRequest):
 
 @app.post("/files/move", response_model=MoveResponse)
 def move_files(body: MoveRequest):
+    body.host = body.host.lower()
     if not body.moves:
         return MoveResponse(moved=0)
 
@@ -2101,6 +2275,8 @@ def tree_dup_metrics(
     seg_list = [s.strip() for s in segments if s.strip()]
     host_list = [h.strip() for h in hosts.split(",") if h.strip()]
     host_list = list(dict.fromkeys(host_list))
+    drive_clause = " AND f.drive = ?" if drive else ""
+    drive_params: list = [drive] if drive else []
 
     if host_list:
         hosts_key = ",".join(host_list)
@@ -2145,7 +2321,7 @@ def tree_dup_metrics(
                 f.size_bytes
             FROM files f
             WHERE f.host IN ({host_ph})
-              AND f.drive = ?
+              {drive_clause}
               AND ((f.path >= ? AND f.path < ?) OR f.path = ?)
               AND SPLIT_PART(f.path, '/', {split_idx}) != ''
               AND f.hash IS NOT NULL
@@ -2189,7 +2365,7 @@ def tree_dup_metrics(
         """
         params: list = [
             *host_list,
-            drive,
+            *drive_params,
             lower_bound,
             upper_bound,
             prefix,
@@ -2335,7 +2511,7 @@ def tree_dup_metrics(
                     ) AS has_hard_link
                 FROM files f
                 WHERE f.host = ?
-                  AND f.drive = ?
+                  {drive_clause}
                   AND ((f.path >= ? AND f.path < ?) OR f.path = ?)
                   AND f.hash IS NOT NULL
                   AND COALESCE(f.size_bytes, 0) >= ?
@@ -2374,7 +2550,7 @@ def tree_dup_metrics(
             params = [
                 host,
                 host,
-                drive,
+                *drive_params,
                 lower_bound,
                 upper_bound,
                 prefix,
@@ -2446,7 +2622,7 @@ def tree_dup_metrics(
                 ) AS has_hard_link
             FROM files f
             WHERE f.host = ?
-              AND f.drive = ?
+              {drive_clause}
               AND ((f.path >= ? AND f.path < ?) OR f.path = ?)
               AND f.hash IS NOT NULL
               AND COALESCE(f.size_bytes, 0) >= ?
@@ -2462,16 +2638,13 @@ def tree_dup_metrics(
             SELECT segment, STRING_AGG(DISTINCT host ORDER BY host) AS other_hosts
             FROM cross_matches
             GROUP BY segment
-        ),
-        cross_dups AS (
-            SELECT DISTINCT segment, hash FROM cross_matches
         )
         SELECT
             sh.segment,
-            SUM(CASE WHEN (hhs.copy_count_effective > 1 OR cd.hash IS NOT NULL)
+            SUM(CASE WHEN hhs.copy_count_effective > 1
                       AND COALESCE(hhs.size_bytes, 0) >= ?
                      THEN sh.file_count ELSE 0 END) AS dup_count,
-            COUNT(DISTINCT CASE WHEN (hhs.copy_count_effective > 1 OR cd.hash IS NOT NULL)
+            COUNT(DISTINCT CASE WHEN hhs.copy_count_effective > 1
                                  AND COALESCE(hhs.size_bytes, 0) >= ?
                                 THEN sh.hash END) AS dup_hash_count,
             ch.other_hosts,
@@ -2481,7 +2654,6 @@ def tree_dup_metrics(
         FROM seg_hashes sh
         LEFT JOIN host_hash_stats hhs ON hhs.host = ? AND hhs.hash = sh.hash
         LEFT JOIN cross_hosts ch ON ch.segment = sh.segment
-        LEFT JOIN cross_dups cd ON cd.segment = sh.segment AND cd.hash = sh.hash
         WHERE sh.segment IS NOT NULL AND sh.segment != ''
           {seg_clause}
         GROUP BY sh.segment, ch.other_hosts
@@ -2489,7 +2661,7 @@ def tree_dup_metrics(
         params = [
             host,
             host,
-            drive,
+            *drive_params,
             lower_bound,
             upper_bound,
             prefix,
@@ -2543,7 +2715,7 @@ def tree_dup_metrics(
                 ) AS has_hard_link
             FROM files f
             WHERE f.host = ?
-              AND f.drive = ?
+              {drive_clause}
               AND ((f.path >= ? AND f.path < ?) OR f.path = ?)
               AND f.hash IS NOT NULL
               AND COALESCE(f.size_bytes, 0) >= ?
@@ -2559,16 +2731,13 @@ def tree_dup_metrics(
             SELECT segment, STRING_AGG(DISTINCT host ORDER BY host) AS other_hosts
             FROM cross_matches
             GROUP BY segment
-        ),
-        cross_dups AS (
-            SELECT DISTINCT segment, hash FROM cross_matches
         )
         SELECT
             sh.segment,
-            SUM(CASE WHEN (sh.hash IN (SELECT hash FROM dupes) OR cd.hash IS NOT NULL)
+            SUM(CASE WHEN sh.hash IN (SELECT hash FROM dupes)
                       AND sh.file_size >= ?
                      THEN sh.file_count ELSE 0 END) AS dup_count,
-            COUNT(DISTINCT CASE WHEN (sh.hash IN (SELECT hash FROM dupes) OR cd.hash IS NOT NULL)
+            COUNT(DISTINCT CASE WHEN sh.hash IN (SELECT hash FROM dupes)
                                  AND sh.file_size >= ?
                                 THEN sh.hash END) AS dup_hash_count,
             ch.other_hosts,
@@ -2577,7 +2746,6 @@ def tree_dup_metrics(
             SUM(sh.total_bytes) AS total_bytes
         FROM seg_hashes sh
         LEFT JOIN cross_hosts ch ON ch.segment = sh.segment
-        LEFT JOIN cross_dups cd ON cd.segment = sh.segment AND cd.hash = sh.hash
         WHERE sh.segment IS NOT NULL AND sh.segment != ''
           {seg_clause}
         GROUP BY sh.segment, ch.other_hosts
@@ -2587,7 +2755,7 @@ def tree_dup_metrics(
             host,
             min_size,
             host,
-            drive,
+            *drive_params,
             lower_bound,
             upper_bound,
             prefix,
@@ -3267,10 +3435,11 @@ def list_hosts():
 
 @app.patch("/hosts/{host_name}")
 def patch_host(host_name: str, body: HostMetaPatch):
-    # Validate host exists (case-insensitive match against known hosts)
+    host_name = host_name.lower()
+    # Validate host exists
     known = db.query(
-        "SELECT host FROM host_stats WHERE LOWER(host) = LOWER(?)"
-        " UNION SELECT DISTINCT host FROM scan_runs WHERE status = 'running' AND LOWER(host) = LOWER(?)",
+        "SELECT host FROM host_stats WHERE host = ?"
+        " UNION SELECT DISTINCT host FROM scan_runs WHERE status = 'running' AND host = ?",
         [host_name, host_name],
     )
     if not known:

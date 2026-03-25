@@ -1,6 +1,7 @@
 """sift server — start the FastAPI server with uvicorn."""
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
@@ -19,6 +20,13 @@ def cmd_server(args) -> None:
 
     if db_path:
         os.environ["SIFT_DB_PATH"] = db_path
+
+    # Configure logging before init_db so migration logs are visible
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-5s [%(name)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
     # Pre-flight: check DB lock before uvicorn swallows the error in a traceback
     try:

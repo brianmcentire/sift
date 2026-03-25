@@ -29,6 +29,10 @@ Code is authoritative for current behavior and contracts, except where behavior 
   - Retries and repeated submissions should be safe and converge on the same stored state.
 - Normalize paths at ingest.
   - Store normalized keys for matching/querying and display forms for UI.
+- Normalize host names to lowercase at ingest.
+  - `local_hostname()` lowercases `socket.gethostname()`. Server lowercases
+    on all ingestion endpoints. DuckDB string comparison is case-sensitive,
+    so mixed-case host names cause silent data splits across aggregate tables.
 - Store absolute paths.
   - Relative invocation must not produce relative storage.
 - Support partial scans safely.
