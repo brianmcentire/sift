@@ -39,12 +39,13 @@ verify-local: ## Fast local verification before deploy (tests + frontend build)
 soak-local: ## Run long soak/perf tests (manual usage only)
 	pytest -o addopts='' -m "soak or perf" -q
 
+SIFT_TEST_SERVER ?= http://localhost:8765
 test-e2e: build-frontend ## Run Playwright e2e tests (builds frontend, requires running sift server)
-	@curl -sf http://localhost:8765/hosts >/dev/null 2>&1 || \
-		{ echo "Error: sift server not running on :8765"; exit 1; }
+	@curl -sf $(SIFT_TEST_SERVER)/hosts >/dev/null 2>&1 || \
+		{ echo "Error: sift server not running at $(SIFT_TEST_SERVER)"; exit 1; }
 	@read -p "Did you restart the server with latest changes? (wait ~30s for aggregates) [y/N] " ans; \
 		[ "$$ans" = "y" ] || [ "$$ans" = "Y" ] || { echo "Aborted."; exit 1; }
-	cd frontend && npx playwright test
+	cd frontend && SIFT_TEST_SERVER=$(SIFT_TEST_SERVER) npx playwright test
 
 dist-agent: ## Build standalone sift binary for Linux x86_64 (Unraid)
 	mkdir -p dist

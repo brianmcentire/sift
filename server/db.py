@@ -387,40 +387,80 @@ def _run_migrations(conn: duckdb.DuckDBPyConnection) -> None:
     # --- Host casing normalization (one-time) ---
     # DuckDB string comparison is case-sensitive. Mixed-case host names cause
     # silent data splits across aggregate tables. See architecture-principles.md.
-    mixed = conn.execute(
-        "SELECT COUNT(*) FROM files WHERE host != LOWER(host)"
-    ).fetchone()
-    mixed_count = mixed[0] if mixed else 0
-    if mixed_count > 0:
-        logger.info("migration: normalizing %d files with mixed-case host names", mixed_count)
+    # Batched by rowid range (~500K per chunk) to avoid DuckDB heap corruption
+    # on large tables (8M+ rows with 10 indexes).
+    _BATCH = 500_000
+    mixed_hosts = [
+        r[0] for r in conn.execute(
+            "SELECT DISTINCT host FROM files WHERE host != LOWER(host)"
+        ).fetchall()
+    ]
+    if mixed_hosts:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM files WHERE host != LOWER(host)"
+        ).fetchone()[0]
+        logger.info(
+            "migration: normalizing %d files across %d hosts with mixed-case names",
+            total, len(mixed_hosts),
+        )
 
-        # 1. Dedup files if PK conflicts would occur (same lower(host)+drive+path)
-        conflicts = conn.execute("""
-            SELECT COUNT(*) FROM (
-                SELECT 1 FROM files
-                GROUP BY LOWER(host), drive, path
-                HAVING COUNT(DISTINCT host) > 1
-            ) t
-        """).fetchone()[0]
-        if conflicts > 0:
-            logger.info("migration: resolving %d host-casing PK conflicts in files", conflicts)
-            conn.execute("""
-                DELETE FROM files WHERE rowid IN (
-                    SELECT rowid FROM (
-                        SELECT rowid, ROW_NUMBER() OVER (
-                            PARTITION BY LOWER(host), drive, path
-                            ORDER BY last_seen_at DESC NULLS LAST
-                        ) AS rn FROM files
-                    ) t WHERE rn > 1
-                )
-            """)
+        for host in mixed_hosts:
+            target = host.lower()
+            host_count = conn.execute(
+                "SELECT COUNT(*) FROM files WHERE host = ?", [host]
+            ).fetchone()[0]
+            logger.info("migration: processing host %r → %r (%d files)", host, target, host_count)
 
-        # 2. Lowercase files.host
-        conn.execute("UPDATE files SET host = LOWER(host) WHERE host != LOWER(host)")
+            # 1. Dedup if target host already has rows that would create PK conflicts
+            conflicts = conn.execute("""
+                SELECT COUNT(*) FROM (
+                    SELECT 1 FROM files
+                    WHERE host IN (?, ?)
+                    GROUP BY LOWER(host), drive, path
+                    HAVING COUNT(DISTINCT host) > 1
+                ) t
+            """, [host, target]).fetchone()[0]
+            if conflicts > 0:
+                logger.info("migration:   resolving %d PK conflicts for %r", conflicts, host)
+                conn.execute("""
+                    DELETE FROM files WHERE rowid IN (
+                        SELECT rowid FROM (
+                            SELECT rowid, ROW_NUMBER() OVER (
+                                PARTITION BY LOWER(host), drive, path
+                                ORDER BY last_seen_at DESC NULLS LAST
+                            ) AS rn FROM files
+                            WHERE host IN (?, ?)
+                        ) t WHERE rn > 1
+                    )
+                """, [host, target])
+
+            # 2. Lowercase this host's files in batches by rowid range
+            bounds = conn.execute(
+                "SELECT MIN(rowid), MAX(rowid) FROM files WHERE host = ?", [host]
+            ).fetchone()
+            lo, hi = bounds[0], bounds[1]
+            if lo is not None:
+                batch_num = 0
+                total_batches = ((hi - lo) // _BATCH) + 1
+                cursor = lo
+                while cursor <= hi:
+                    batch_num += 1
+                    chunk_hi = min(cursor + _BATCH - 1, hi)
+                    conn.execute(
+                        "UPDATE files SET host = ? WHERE host = ? AND rowid BETWEEN ? AND ?",
+                        [target, host, cursor, chunk_hi],
+                    )
+                    logger.info(
+                        "migration:   %r batch %d/%d (rowid %d–%d)",
+                        host, batch_num, total_batches, cursor, chunk_hi,
+                    )
+                    cursor = chunk_hi + 1
+                logger.info("migration:   finished %r", host)
 
         # 3. Delete derived aggregate tables — rebuilt on startup
         for table in ["host_stats", "host_hash_stats", "host_hard_linked_inodes", "directory_index"]:
             conn.execute(f"DELETE FROM {table}")
+        logger.info("migration: cleared derived aggregate tables")
 
         # 4. Lowercase scan_runs (no unique constraint on host)
         conn.execute("UPDATE scan_runs SET host = LOWER(host) WHERE host != LOWER(host)")

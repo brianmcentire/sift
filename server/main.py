@@ -2295,11 +2295,9 @@ def tree_dup_metrics(
         meta_by_key = {str(r[0]): str(r[1]) for r in meta_rows}
         all_fresh = all(meta_by_key.get(k) == "fresh" for k in key_params)
         if not all_fresh:
-            response = TreeDupMetricsResponse(
+            return TreeDupMetricsResponse(
                 metrics={}, aggregated_at=None, data_freshness="stale"
             )
-            _cache_set(_tree_dup_metrics_cache, cache_key, response)
-            return response
 
         split_idx = prefix.count("/") + depth + 1
         host_ph = ", ".join(["?" for _ in host_list])

@@ -517,6 +517,9 @@ export default function App() {
         return api.treeDupMetrics(path, '', minAtRequest, unionMissing, drive, {}, hostsCsv)
           .then(data => {
             if (minSizeRef.current !== minAtRequest) return
+            // When aggregates are stale, don't mark segments as loaded —
+            // allows automatic retry once aggregates become fresh.
+            if (data?.data_freshness === 'stale') return
             const metrics = data?.metrics || {}
             targets.forEach(target => {
               const existing = cacheRef.current.get(target.key) || []
@@ -552,6 +555,7 @@ export default function App() {
       return api.treeDupMetrics(path, host, minAtRequest, missing, drive)
         .then(data => {
           if (minSizeRef.current !== minAtRequest) return
+          if (data?.data_freshness === 'stale') return
           const metrics = data?.metrics || {}
           const existing = cacheRef.current.get(key) || []
           const merged = existing.map(entry => {
